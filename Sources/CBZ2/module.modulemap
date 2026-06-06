@@ -1,0 +1,10 @@
+// System-library shim exposing libbz2 (bzlib.h) to Swift. libbz2 ships in both
+// the macOS and iOS SDKs (`usr/lib/libbz2.tbd`, `usr/include/bzlib.h`), so this
+// links on device + simulator with no third-party dependency. Used by
+// BSDIFF40Patch to inflate the bz2 control/diff/extra streams in a backend
+// bsdiff4 patch.
+module CBZ2 [system] {
+    header "shim.h"
+    link "bz2"
+    export *
+}

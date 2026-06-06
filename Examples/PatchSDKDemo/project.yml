@@ -1,0 +1,102 @@
+name: PatchSDKDemo
+options:
+  bundleIdPrefix: dev.patch
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Size-optimized + dead-stripped: this is the configuration the Track-D size
+    # measurement is taken against (release, arm64 iOS, -Osize, -dead_strip).
+    SWIFT_OPTIMIZATION_LEVEL: "-Osize"
+    GCC_OPTIMIZATION_LEVEL: "z"
+    DEAD_CODE_STRIPPING: "YES"
+    SWIFT_VERSION: "6.0"
+    # Emit a link map so we can attribute __TEXT/__DATA bytes to each library.
+    LD_GENERATE_MAP_FILE: "YES"
+
+packages:
+  PatchSDK:
+    # Local SPM package — the SDK under test, linked via SwiftPM exactly as a
+    # host app would consume it.
+    path: ../..
+
+targets:
+  PatchSDKDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # .wasm has no known type, so pin it to the resources (copy) phase
+      # explicitly — otherwise xcodegen may drop it or try to compile it.
+      - path: Resources/demo.wasm
+        buildPhase: resources
+        type: file
+      - path: Resources/MinimalSwift.wasm
+        buildPhase: resources
+        type: file
+    dependencies:
+      - package: PatchSDK
+        product: PatchSDK
+    info:
+      path: Generated/Info.plist
+      properties:
+        UILaunchScreen: {}
+        CFBundleDisplayName: PatchSDK Demo
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.patch.PatchSDKDemo
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_IDENTITY: ""
+
+  # Hosted XCTest bundle: runs WASMRuntime directly inside the app process on the
+  # simulator (headless, robust). This is the primary on-simulator proof.
+  PatchSDKDemoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: UnitTests
+    dependencies:
+      # Host app only. PatchSDK + WasmKit symbols are inherited from the host via
+      # BUNDLE_LOADER; re-declaring the SPM package product here makes the linker
+      # look for a PackageFrameworks/*.framework that the app build doesn't emit.
+      - target: PatchSDKDemo
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.patch.PatchSDKDemoTests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PatchSDKDemo.app/PatchSDKDemo"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGNING_ALLOWED: NO
+
+  # UI test bundle: launches the app and asserts the on-screen result. Secondary
+  # proof (can be skipped if headless UI launch is flaky).
+  PatchSDKDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITestsBundle
+    dependencies:
+      - target: PatchSDKDemo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.patch.PatchSDKDemoUITests
+        TEST_TARGET_NAME: PatchSDKDemo
+        CODE_SIGNING_ALLOWED: NO
+
+schemes:
+  PatchSDKDemo:
+    build:
+      targets:
+        PatchSDKDemo: all
+        PatchSDKDemoTests: [test]
+        PatchSDKDemoUITests: [test]
+    test:
+      targets:
+        - PatchSDKDemoTests
+        - PatchSDKDemoUITests
