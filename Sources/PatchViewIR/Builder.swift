@@ -49,7 +49,7 @@ public enum N {
         ViewNode(.button(actionID: actionID, label: [N.text(title)]))
     }
 
-    // Stateful controls (interactive). The `value` is read
+    // Stateful controls (INTERACTIVE — Breakthrough #5). The `value` is read
     // from guest state at emit time; `event` is what the host dispatches back
     // into the guest's `dispatch` when the control's binding changes.
     public static func toggle(_ title: String, isOn: Bool, event: String) -> ViewNode {

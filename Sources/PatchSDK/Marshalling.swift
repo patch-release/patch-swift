@@ -2,7 +2,7 @@ import Foundation
 import WasmKit
 
 // Marshalling — moves Swift values across the host <-> WASM boundary per the
-// Patch v0 ABI. The type table:
+// Patch v0 ABI. Implements the plan's type table (patch-plan.md ~lines 698–706):
 //
 //   | Swift type        | WASM representation                                  |
 //   |-------------------|-----------------------------------------------------|
@@ -180,7 +180,7 @@ extension Optional: WASMBridgeable where Wrapped: WASMBridgeable {
 // `WASMBridgeable` and `Codable` overlap (String/Data/Int are both), so we do
 // NOT make `Codable` conform automatically. Instead, wrap a Codable value in
 // `MessagePackBridge` to marshal it as a MessagePack (ptr,len) blob. Generated
-// bridge code emits this wrapper for user structs/enums.
+// bridge code (Day 3+) emits this wrapper for user structs/enums.
 
 public struct MessagePackBridge<T: Codable>: WASMBridgeable {
     public var value: T

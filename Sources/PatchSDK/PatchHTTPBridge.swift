@@ -1,15 +1,16 @@
 import Foundation
 import WasmKit
 
-// MARK: - Networking (URLSession) async host bridge
+// MARK: - Breakthrough #6 — NETWORKING (URLSession) async host bridge
 //
-// The async sibling of the host-bridge family. The common real-app async
-// shape — a function that is `async` only because it `await`s `URLSession`, then
-// decodes JSON and runs value-type logic — runs in WASM by rewriting the
-// `URLSession.shared.data(from:)` / `.data(for:)` leaf onto the async imports
-// this file serves.
+// The async sibling of the #8 host-bridge family. The dominant real-app async
+// shape — a function that is `async` ONLY because it `await`s `URLSession`, then
+// decodes JSON + runs value-type logic — runs in WASM by rewriting the
+// `URLSession.shared.data(from:)` / `.data(for:)` leaf (CLI FusionRewriter) onto
+// the async imports this file serves. Proven end-to-end in executing WASM
+// (docs/ENGINEERING.md §2 breakthrough #6, 6/6 incl a live HTTPS fetch).
 //
-// ## The async-suspend contract (matches the emitted shims + the C ABI)
+// ## The async-suspend contract (matches the engine's emitted shims + the C ABI)
 //   guest import  `patch_host.http_get(urlPtr,urlLen,token) -> ()`           [SUSPEND]
 //   guest import  `patch_host.http_request(mPtr,mLen,uPtr,uLen,bPtr,bLen,token) -> ()`
 //   guest export  `patch_resolve_http(token, dataPtr, dataLen, status) -> ()` [RESUME]

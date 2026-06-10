@@ -3,11 +3,16 @@ import PackageDescription
 
 // PatchSDK — the on-device runtime for Patch OTA updates.
 //
+// Day-2 scope (Track D / Agent D1): the WASM runtime + value marshalling core.
+// The loader (download/verify/cache), native fallback, and generated bridges are
+// Days 3–6 and are left as clearly-marked TODO stubs.
+//
 // Depends on WasmKit 0.2.2 (swiftwasm/WasmKit) and its WASI Preview 1
 // implementation (`WasmKitWASI`), which is what lets real Swift-compiled
 // `wasm32-unknown-wasip1` modules instantiate (they import 14–34
 // `wasi_snapshot_preview1.*` functions). The package is declared for both macOS
-// and iOS so the same sources cross-compile for the iOS Simulator and device.
+// and iOS so the same sources cross-compile for the iOS Simulator/device; the
+// PoC verified WasmKit 0.2.2 links for `arm64-apple-ios*-simulator`.
 let package = Package(
     name: "PatchSDK",
     platforms: [
@@ -18,22 +23,22 @@ let package = Package(
     ],
     products: [
         .library(name: "PatchSDK", targets: ["PatchSDK"]),
-        // The shared ViewNode IR — the same schema the engine emits into the
-        // guest. Depend on just this to build or inspect a ViewNode tree without
-        // pulling in WasmKit or SwiftUI.
+        // The shared ViewNode IR — the SAME schema the engine-lowering pipeline
+        // emits into the guest. An app/engine can depend on JUST this to build or
+        // inspect a ViewNode tree without pulling in WasmKit or SwiftUI.
         .library(name: "PatchViewIR", targets: ["PatchViewIR"]),
         // The native SwiftUI renderer (`render(_:)` + `PatchView`/`FrontierView`).
         // SwiftUI-only; depends on PatchViewIR.
         .library(name: "PatchRender", targets: ["PatchRender"]),
-        // The SwiftUI glue that drives a live Patch module's view_body/dispatch
+        // The SwiftUI glue that drives a LIVE Patch module's view_body/dispatch
         // exports into the renderer (the on-device interactive loop). Depends on
         // the runtime + IR + renderer; kept separate so SwiftUI stays out of the
         // core PatchSDK module.
         .library(name: "PatchSwiftUI", targets: ["PatchSwiftUI"])
     ],
     dependencies: [
-        // Pinned exactly to 0.2.2. swiftlang/wasmkit redirects here; use the
-        // swiftwasm URL.
+        // Pinned exactly to 0.2.2 — the version proven in poc/wasmkit-ios.
+        // Use the swiftwasm URL; the swiftlang/wasmkit path does NOT resolve.
         .package(url: "https://github.com/swiftwasm/WasmKit.git", exact: "0.2.2")
     ],
     targets: [
@@ -43,10 +48,12 @@ let package = Package(
         // no third-party code, cross-compiles for iOS device + simulator.
         .systemLibrary(name: "CBZ2", path: "Sources/CBZ2"),
 
-        // The shared ViewNode IR. Pure Foundation `Codable`
+        // The shared ViewNode IR (Breakthrough #3/#5). Pure Foundation `Codable`
         // value types — NO WasmKit, NO SwiftUI — so it compiles unchanged into
-        // BOTH the native host AND a wasm32 guest. This is the schema the engine
-        // emits; coordinate the wire format via `PatchViewIRSchema` (Schema.swift).
+        // BOTH the native host AND a wasm32 guest. This is the schema the engine-
+        // lowering pipeline emits; coordinate the wire format via
+        // `PatchViewIRSchema` (Schema.swift). Vendored from swiftui-wasm's
+        // `ViewNodeIR` with an added schema-version contract.
         .target(name: "PatchViewIR"),
 
         // The native SwiftUI renderer: `render(ViewNode) -> AnyView` + the
@@ -63,13 +70,15 @@ let package = Package(
         .target(
             name: "PatchSDK",
             dependencies: [
-                // Binary-size note: PatchSDK links ONLY these
+                // Binary-size note (Track D size pass): PatchSDK links ONLY these
                 // three WasmKit products. They transitively pull exactly the
                 // runtime — WasmParser, WasmTypes, SystemExtras, _CWasmKit,
                 // SystemPackage — and NOTHING ELSE. The text-format / component
                 // tooling (WAT, WIT) and the CLI's deps (NIO, ArgumentParser,
                 // swift-atomics/-collections/-log) are NOT products we depend on,
-                // so they are never compiled into or linked against the SDK. The
+                // so they are never compiled into or linked against the SDK. A
+                // release, dead-stripped arm64-iOS link map confirms it: the only
+                // statically linked objects are PatchSDK + the six above. The
                 // realistic dead-stripped contribution is ~1.1-1.5 MiB (see
                 // README "Binary size"); do NOT add WAT/WIT here.
                 .product(name: "WasmKit", package: "WasmKit"),
@@ -108,31 +117,36 @@ let package = Package(
                 // Real Swift-compiled .wasm fixtures used by the runtime tests.
                 .copy("Fixtures/MinimalNoFoundation.release.wasm"),
                 .copy("Fixtures/MarshalFixture.release.wasm"),
-                // Bridge round-trip fixture (hand-written; imports patch.* host fns).
+                // D3 bridge round-trip fixture (hand-written; imports patch.* host fns).
                 .copy("Fixtures/BridgeFixture.wasm"),
-                // Embedded-Swift demo pricing module: imports patch_host.*
-                // (decimal_op / json_get_i64) and computes an order total
-                // via the native shell's real Foundation Decimal.
+                // Embedded-Swift (T0) demo pricing module: imports patch_host.*
+                // (decimal_op / json_get_i64) and computes the demo's order total
+                // via the native shell's real Foundation Decimal. ~26 KB stripped
+                // vs the ~57 MB full-Foundation module it replaces.
                 .copy("Fixtures/DemoEmbeddedPricing.wasm"),
-                // Diff/brotli format fixtures (generated by the backend's bsdiff4/brotli).
+                // D2 diff/brotli format fixtures (generated by the backend's bsdiff4/brotli).
                 .copy("Fixtures/diff_old.bin"),
                 .copy("Fixtures/diff_new.bin"),
                 .copy("Fixtures/diff.patch"),
                 .copy("Fixtures/diff_new.br"),
-                // Async executor guest: exports the patch_* pump contract +
-                // host-await round-trip. Drives the SDK's on-device async pump tests.
+                // Async executor proof guest (experiments/async-exec): exports the
+                // patch_* pump contract + host-await round-trip. Drives the SDK's
+                // on-device async pump tests.
                 .copy("Fixtures/AsyncExecGuest.wasm"),
-                // Networking guest: awaits patch_host.http_get and decodes JSON in
-                // WASM. NetworkingGuest.wasm (a large full-Foundation guest) is NOT a
-                // declared resource: it's kept out of git and loaded by source-relative
-                // path in PatchHTTPBridgeTests, which XCTSkips when it's absent.
-                // Interactive SwiftUI guest: a TEA loop emitting a ViewNode tree and
-                // running its update logic in WASM. Drives the renderer + dispatch tests.
+                // Breakthrough #6 networking proof guest (experiments/networking):
+                // awaits patch_host.http_get, decodes JSON with JSONDecoder IN WASM,
+                // NetworkingGuest.wasm (53 MB — full-Foundation JSONDecoder in WASM) is
+                // NOT a declared resource: it's kept out of git (too large w/o LFS) and
+                // loaded by source-relative path in PatchHTTPBridgeTests, which XCTSkips
+                // when it's absent. Rebuild via experiments/networking.
+                // Interactive SwiftUI guest (swiftui-wasm/guest-interactive): a TEA
+                // loop emitting a ViewNode tree + running its UPDATE logic in WASM.
+                // Drives the SDK's renderer + dispatch tests.
                 .copy("Fixtures/FrontierGuestInteractive.wasm"),
-                // Engine-emitted interactive guest: a SettingsView lowered through the
-                // SwiftUI engine path, exporting BOTH view_body AND the auto-generated
-                // dispatch. Exercises engine dispatch codegen against Patch.dispatch
-                // end-to-end.
+                // ENGINE-EMITTED interactive guest: a SettingsView lowered through the
+                // production PATCH_SWIFTUI engine path (BodyLowering + SwiftUIGuestEmitter),
+                // exporting BOTH view_body AND the auto-generated dispatch. Proves the
+                // engine's dispatch codegen drives the SDK's Patch.dispatch end-to-end.
                 .copy("Fixtures/EngineSettingsView.wasm")
             ]
         )

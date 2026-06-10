@@ -2,14 +2,15 @@
 // ============================================================================
 // WasmKit is single-threaded and has no event loop, so a guest `Task {...}` body
 // never runs on its own: the Swift concurrency runtime would enqueue the job on a
-// global executor that doesn't exist in the WASI sandbox. The mechanism is a
-// host-driven cooperative executor:
+// global executor that doesn't exist in the WASI sandbox. The PROVEN mechanism
+// (experiments/async-exec, ASYNC-BREAKTHROUGH.md) is a HOST-DRIVEN cooperative
+// executor:
 //
-//   * GUEST side (the guest contract in guest-contract/CPatchExec): a C
+//   * GUEST side (the codegen contract in sdk/guest-contract/CPatchExec): a C
 //     shim overrides `swift_task_enqueueGlobal_hook` to FIFO-capture every job
 //     the runtime wants to run, and exports a `patch_pump(budget)` that runs up
-//     to `budget` captured jobs via `swift_job_run`. The host pump is the event
-//     loop. A guest that awaits host async work calls a `patch_host.async_request
+//     to `budget` captured jobs via `swift_job_run`. The host pump IS the event
+//     loop. A guest that awaits HOST async work calls a `patch_host.async_request
 //     (token)` import and is later resumed by the host calling the guest's
 //     `patch_resolve(token, value)` export.
 //
@@ -17,13 +18,16 @@
 //     `patch_pump` export until the top-level Task signals done (`patch_done`),
 //     resolving any host-async continuations the guest is suspended on in between.
 //
-// The pump is wired through the serial call queue so it is hot-swap-safe.
+// This is the productized version of the proven `experiments/async-exec` host
+// driver, moved into the SDK runtime and wired through the serial call queue so
+// it is hot-swap-safe.
 
 import WasmKit
 
 /// The set of export/import names the async pump contract uses. These match the
-/// `@_cdecl` exports the guest emits (see `guest-contract/`). Names are
-/// configurable so the contract can evolve without changing the host.
+/// `@_cdecl` exports the guest codegen emits (see sdk/guest-contract) and the
+/// `experiments/async-exec` proof. Names are configurable so the engine can
+/// evolve the contract without changing the host.
 public struct AsyncPumpContract: Sendable {
     /// Export the guest installs the executor hook (call once before a Task).
     public var install: String

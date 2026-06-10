@@ -2,9 +2,9 @@ import XCTest
 import Foundation
 @testable import PatchSDK
 
-/// Regression tests. Each test pins a specific correctness / crash / DoS bug
-/// that was fixed in the corresponding source file.
-final class RegressionTests3: XCTestCase {
+/// Regression tests for the sdk3 bug hunt. Each test pins a specific real bug
+/// (correctness / crash / DoS) that was fixed in the corresponding source file.
+final class BugHuntSDK3Tests: XCTestCase {
 
     // MARK: #1 — MessagePack nested keyed/unkeyed containers serialized as EMPTY.
     //

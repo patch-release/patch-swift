@@ -2,7 +2,7 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// Host-ABI bridge family (module "patch_host").
+/// Breakthrough #8 — host-ABI bridge FAMILY (module "patch_host").
 ///
 /// Two layers under test:
 ///  1. Each new bridge's host functions resolve + perform the REAL native op,
@@ -217,7 +217,7 @@ final class HostBridgeFamilyTests: XCTestCase {
         "bundle_info_string", "bundle_resource_path",
         "process_env", "os_version",
         "defaults_get_bool", "defaults_get_int",
-        // Networking (async) — same patch_host namespace. v1 emits
+        // Breakthrough #6 networking (async) — same patch_host namespace. v1 emits
         // ONLY http_get (data(for:)/http_request deferred — URLRequest absent in the
         // WASM-SDK guest Foundation). The SDK still SERVES http_request (superset is
         // fine for emitted ⊆ served), but the engine does not emit it in v1.

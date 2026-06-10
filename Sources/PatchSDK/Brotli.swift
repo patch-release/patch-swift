@@ -4,13 +4,15 @@ import Compression
 /// Brotli decompression for downloaded modules.
 ///
 /// The backend stores **both** the raw `.wasm` and a brotli-compressed
-/// `.wasm.br`, and the update-check response returns the **compressed** path as
-/// `module_url`. So the on-wire bytes the loader downloads are brotli; it must
+/// `.wasm.br`, and `update_check` returns the **compressed** path as
+/// `module_url` (see `backend/app/services/storage.py`: `module_gcs_path`
+/// is the `.br`). So the on-wire bytes the loader downloads are brotli; it must
 /// inflate them before hashing/activating.
 ///
-/// **Hashing contract:** the backend computes `sha256` over the **raw,
-/// uncompressed** `.wasm` bytes (before brotli). So the loader inflates first,
-/// then verifies the inflated bytes against `sha256`.
+/// **Hashing contract (important for backend alignment):** the backend computes
+/// `sha256` over the **raw, uncompressed** `.wasm` bytes
+/// (`hashlib.sha256(wasm_bytes)` in `routes/modules.py`, before brotli). So the
+/// loader inflates first, then verifies the inflated bytes against `sha256`.
 ///
 /// Uses Apple's `Compression` framework (`COMPRESSION_BROTLI`, available on
 /// macOS 12+ / iOS 15+ — within the SDK's macOS 14 / iOS 16 floor). Verified to

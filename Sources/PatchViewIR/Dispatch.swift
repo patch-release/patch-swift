@@ -1,7 +1,7 @@
-// Dispatch.swift — the interactive event-loop envelopes.
+// Dispatch.swift — the INTERACTIVE event loop envelopes (Breakthrough #5).
 // =========================================================================
-// The static path lowers a body to `view_body(state) -> tree`. The interactive
-// path adds the update half of an Elm/TEA loop, run in WASM:
+// The static breakthrough lowered a body to `view_body(state) -> tree`. The
+// interactive breakthrough adds the UPDATE half of an Elm/TEA loop, run IN WASM:
 //
 //     dispatch(state, event) -> (newState, newTree)
 //

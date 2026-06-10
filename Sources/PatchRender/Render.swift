@@ -1,6 +1,6 @@
 // Render.swift — the native SDK renderer: ViewNode IR -> REAL SwiftUI.
 // =====================================================================
-// The WASM guest builds a `ViewNode`
+// This is the host half of Breakthrough #3. The WASM guest builds a `ViewNode`
 // tree and serializes it across the boundary; this renderer reconstitutes a
 // *real* SwiftUI `AnyView` from that tree — real `Text` with real `Font`,
 // real `VStack`/`HStack`/`ZStack`, real `.padding`/`.background`/`.frame`/etc.

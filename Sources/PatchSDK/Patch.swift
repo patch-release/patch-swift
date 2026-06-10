@@ -6,12 +6,12 @@ import UIKit
 
 // Patch — the public entry point of the on-device OTA SDK.
 //
-// Provides configuration, the runtime/marshalling core, the thread-safety
-// foundation (a serial call queue plus a read/write lock guarding the active
-// module so hot-swap is safe while calls are in flight), `Patch.call` against
-// the active module, and the high-level orchestration that wires the loader
-// (download/verify/cache), native fallback chain, hot-swap activation, and the
-// host bridges together.
+// Day-2 (Agent D1) implements: configuration, the runtime/marshalling core, the
+// thread-safety foundation (serial call queue + a read/write lock guarding the
+// active module so hot-swap is safe while calls are in flight), and `Patch.call`
+// against an already-loaded module. The loader (download/verify/cache), native
+// fallback, hot-swap activation, and generated bridges are Days 3–6 and are
+// marked `// TODO(Day N)` below.
 
 // MARK: - Configuration
 
@@ -19,7 +19,7 @@ import UIKit
 ///
 /// The three presets (`production` / `staging` / `development`) are conveniences;
 /// `custom("…")` carries an arbitrary backend channel string (channels are
-/// free-form on the backend). `name` is what goes on the wire.
+/// free-form on the backend — see spec §3). `name` is what goes on the wire.
 public enum PatchChannel: Sendable, Equatable {
     case production
     case staging
@@ -153,7 +153,7 @@ public enum PatchError: Error, CustomStringConvertible {
 
 // MARK: - Read/Write lock
 //
-// Guards the active module so a hot-swap can replace it exclusively
+// Guards the active module so a hot-swap (Day 3+) can replace it exclusively
 // while concurrent reads (calls obtaining the current runtime) proceed in
 // parallel. Built on `pthread_rwlock` — portable to iOS, no Foundation-only API.
 
@@ -181,7 +181,7 @@ public final class Patch: @unchecked Sendable {
     public static let shared = Patch()
 
     /// Serial queue: all host->wasm invocations are funneled here so a single
-    /// WASM instance (single-threaded by nature) is never
+    /// WASM instance (single-threaded by nature — see COMPATIBILITY.md) is never
     /// re-entered concurrently. `call` dispatches synchronously onto it.
     private let callQueue = DispatchQueue(label: "com.patch.sdk.runtime", qos: .userInitiated)
 
@@ -201,17 +201,17 @@ public final class Patch: @unchecked Sendable {
     /// to the first additional instance that does. Empty for a legacy single `.wasm`.
     private var additional: [WASMRuntime] = []
 
-    /// Host bridges exposed to loaded modules. Apps add custom bridges here before
+    /// D3 bridges exposed to loaded modules. Apps add custom bridges here before
     /// `configure`/`start`; the defaults are installed by `configure`.
     public let bridges = BridgeRegistry()
 
     /// Host side of the guest↔host async round-trip. Records the tokens a guest
     /// suspends on (via the `patch_host.async_request` import) so the async pump
     /// can resolve them. Apps swap `broker.valueProvider` to plug in real host
-    /// async results.
+    /// async results; the default mirrors the proven `experiments/async-exec`.
     public let asyncBroker = PatchAsyncBroker()
 
-    /// Host side of the guest↔host networking round-trip. Records
+    /// Host side of the guest↔host NETWORKING round-trip (breakthrough #6). Records
     /// the fetches a guest suspends on (via `patch_host.http_get`/`http_request`) and
     /// resolves them through `patch_resolve_http`. Defaults to a real-`URLSession`
     /// fetch; apps/tests can replace `httpBroker` (e.g. with a mock fetch) before
@@ -220,24 +220,24 @@ public final class Patch: @unchecked Sendable {
     public var httpBroker = PatchHTTPBroker()
 
     /// The async pump contract (export/import names + budget) used by the
-    /// async-call path. Defaults to the standard `patch_*` names; settable so the
-    /// guest contract can evolve.
+    /// async-call path. Defaults to the proven `patch_*` names; settable so the
+    /// engine can evolve the guest contract.
     public var asyncPumpContract: AsyncPumpContract {
         get { lock.read { _asyncPumpContract } }
         set { lock.write { _asyncPumpContract = newValue } }
     }
     private var _asyncPumpContract = AsyncPumpContract.default
 
-    /// On-disk cache (current/previous/bundled). Created by `configure`.
+    /// D2 on-disk cache (current/previous/bundled). Created by `configure`.
     private var _storage: ModuleStorage?
-    /// Update poller. Created by `configure` when an API base URL is set.
+    /// D2 update poller. Created by `configure` when an API base URL is set.
     private var _updateChecker: UpdateChecker?
 
-    /// SwiftUI-observable state machine for the imperative update
+    /// SwiftUI-observable state machine for the imperative (EAS-style) update
     /// flow. `@MainActor` so SwiftUI views can `@ObservedObject` it directly.
     @MainActor public let updateState = PatchUpdateStateObservable()
 
-    /// Holds the last `checkForUpdate()` response (the imperative API), so a
+    /// Holds the last `checkForUpdate()` response (W4 §5 imperative API), so a
     /// subsequent `fetchUpdate()` knows what to download without re-checking.
     /// Guarded by `lock`.
     private var _pendingResponse: UpdateCheckResponse?
@@ -356,11 +356,11 @@ public final class Patch: @unchecked Sendable {
         lock.read { active != nil }
     }
 
-    // MARK: Module activation
+    // MARK: Module activation (Day-2: direct load; Day-3: from the loader)
 
-    /// Load a module from raw bytes and make it the active module. The loader
-    /// calls this internally after download+verify; it is also public so apps
-    /// can activate a module directly and bridges can drive it.
+    /// Load a module from raw bytes and make it the active module. On Day 3 the
+    /// loader will call this internally after download+verify; exposed now so the
+    /// runtime/marshalling core is testable and bridges can drive it.
     public func activate(bytes: [UInt8]) throws {
         // Build the new runtime(s) OUTSIDE the write lock (instantiation is slow);
         // swap in under the exclusive lock so in-flight reads see a consistent module.
@@ -408,6 +408,20 @@ public final class Patch: @unchecked Sendable {
         guard let primary = runtimes.first else {
             throw PatchError.runtime(.instantiationFailed("empty module set"))
         }
+        // Probe EVERY module's usability (it must export the linear `memory` the
+        // marshalling ABI crosses through) before returning the set, so neither
+        // `activate` nor `hotSwap` ever swaps in a set containing a module that
+        // instantiated but can't actually participate in a call. Done here (before
+        // the swap) so a bad set fails the build, leaving the prior set untouched.
+        do {
+            for rt in runtimes { try rt.assertUsable() }
+        } catch let e as PatchRuntimeError {
+            runtimes.forEach { $0.teardown() }
+            throw PatchError.runtime(e)
+        } catch {
+            runtimes.forEach { $0.teardown() }
+            throw error
+        }
         return (primary, Array(runtimes.dropFirst()))
     }
 
@@ -449,8 +463,12 @@ public final class Patch: @unchecked Sendable {
                 return p
             }
 
-            // (3) Probe the freshly-swapped PRIMARY module. If it cannot stand up,
-            // restore the prior set and rethrow so the app keeps the good module.
+            // (3) Probe the freshly-swapped module set. If ANY module cannot stand up
+            // (e.g. an additive PMOD sub-module that instantiated but exports no
+            // `memory`, so the marshalling ABI can't cross into it), restore the prior
+            // set and rethrow so the app keeps the known-good module. Probing only the
+            // primary would let a broken additive sub-module swap in and fail later at
+            // call time instead of rolling back here.
             func rollback(_ throwing: () -> Void) {
                 built.primary.teardown()
                 built.additional.forEach { $0.teardown() }
@@ -459,6 +477,7 @@ public final class Patch: @unchecked Sendable {
             }
             do {
                 try built.primary.assertUsable()
+                for sub in built.additional { try sub.assertUsable() }
             } catch let e as PatchRuntimeError {
                 rollback {}
                 throw PatchError.runtime(e)
@@ -591,8 +610,14 @@ public final class Patch: @unchecked Sendable {
                 }
                 let outPtr = UInt32(truncatingIfNeeded: packed >> 32)
                 let outLen = UInt32(truncatingIfNeeded: packed & 0xFFFF_FFFF)
+                // Free the OUTPUT buffer no matter how we leave this scope. A buggy
+                // or hostile guest can pack an out-of-bounds (ptr,len), making the
+                // `read` below throw `memoryOutOfBounds` — in which case the old
+                // code never reached `free(outPtr)` and leaked the guest buffer.
+                // Repeated failing calls would exhaust guest linear memory. (free
+                // no-ops on outPtr==0, the "no value" encoding.)
+                defer { runtime.free(outPtr) }
                 let outBytes = try runtime.read(ptr: outPtr, len: outLen)
-                runtime.free(outPtr)
                 return outBytes
             } catch let e as PatchRuntimeError {
                 throw PatchError.runtime(e)
@@ -619,12 +644,13 @@ public final class Patch: @unchecked Sendable {
 
     /// Invoke a kickoff export that starts an async `Task` in the guest, then pump
     /// the guest executor to completion (resolving host-async continuations via
-    /// `asyncBroker`). The kickoff export is the generated
+    /// `asyncBroker`). The kickoff export is the engine-emitted
     /// `patch_start_<fn>(args…)`-style entry that enqueues — but does not run — a
     /// top-level Task. Returns the number of pump rounds it took.
     ///
-    /// The executor pump runs through `withRuntime` (the serial queue + read
-    /// lock) so it is hot-swap-safe. After it returns, read
+    /// This is the productized executor pump: it is exactly the
+    /// `experiments/async-exec` host driver, moved into the SDK and funneled
+    /// through `withRuntime` (the serial queue + read lock). After it returns, read
     /// the guest result via the module's result export (e.g. `patch_result`) using
     /// `call(...)`, or use `callAsyncResult` which does both.
     @discardableResult
@@ -727,8 +753,11 @@ public final class Patch: @unchecked Sendable {
                 }
                 let outPtr = UInt32(truncatingIfNeeded: packed >> 32)
                 let outLen = UInt32(truncatingIfNeeded: packed & 0xFFFF_FFFF)
+                // Free the OUTPUT buffer on every exit path (see `callPacked`): an
+                // out-of-bounds packed (ptr,len) makes `read` throw, and the old
+                // code leaked `outPtr` on that path.
+                defer { runtime.free(outPtr) }
                 let outBytes = try runtime.read(ptr: outPtr, len: outLen)
-                runtime.free(outPtr)
                 return outBytes
             } catch let e as PatchRuntimeError {
                 throw PatchError.runtime(e)
@@ -758,8 +787,8 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// High-level typed call: lowers `argument`, invokes `function`, raises `R`.
-    /// This is the single-argument convenience; multi-argument calls go through
-    /// the lower-level `call(_:_:)` / marshalling APIs.
+    /// This is the shape generated single-argument bridges will use. Multi-arg
+    /// variants are generated per-signature (Day 5+).
     public func call<A: WASMBridgeable, R: WASMBridgeable>(
         _ function: String,
         _ argument: A,
@@ -781,7 +810,7 @@ public final class Patch: @unchecked Sendable {
         }
     }
 
-    // MARK: - High-level orchestration (loader + fallback + telemetry)
+    // MARK: - High-level orchestration (D2: loader + fallback + telemetry)
 
     /// Outcome of `start()` / `checkForUpdate()`.
     public enum StartOutcome: Sendable, Equatable {
@@ -833,10 +862,10 @@ public final class Patch: @unchecked Sendable {
     /// download/activation/error telemetry. Returns the outcome. On a bad new
     /// module it runs the fallback chain so the app keeps working.
     ///
-    /// This is the auto-apply behavior that `start()` drives. The public
-    /// `checkForUpdate()` is the imperative, report-only API (see below). This
-    /// stays internal so startup behavior is unchanged and the imperative API is
-    /// purely additive.
+    /// This is the original auto-apply behavior that `start()` drives; it used to
+    /// be the public `checkForUpdate()`. The public `checkForUpdate()` is now the
+    /// EAS-style report-only API (see below). Kept internal so startup is
+    /// identical and the imperative API is purely additive.
     @discardableResult
     func checkAndApply() async -> StartOutcome {
         guard let cfg = currentConfiguration,
@@ -894,7 +923,7 @@ public final class Patch: @unchecked Sendable {
         }
     }
 
-    // MARK: - Imperative update API
+    // MARK: - Imperative EAS-Expo-Updates-style API (W4 §5)
     //
     // These methods give the host app explicit control over the update
     // lifecycle — check (no apply) → fetch (stage) → reload (activate) — so a
@@ -947,8 +976,8 @@ public final class Patch: @unchecked Sendable {
         await MainActor.run { self.updateState.set(s) }
     }
 
-    /// Check the backend for an available update **without applying it**.
-    /// Returns an `UpdateInfo`
+    /// Check the backend for an available update **without applying it** (the
+    /// EAS-Expo-Updates `checkForUpdateAsync` shape). Returns an `UpdateInfo`
     /// describing the available update (including `isMandatory`), or `nil` when
     /// already up to date. The response is remembered so a subsequent
     /// `fetchUpdate()` can download it. Drives `updateState`.
@@ -1017,8 +1046,8 @@ public final class Patch: @unchecked Sendable {
         return true
     }
 
-    /// Activate the staged update **now** (hot-swap).
-    /// Activates the bytes fetched by `fetchUpdate()`,
+    /// Activate the staged update **now** (hot-swap) — the EAS-Expo-Updates
+    /// `reloadAsync` shape. Activates the bytes fetched by `fetchUpdate()`,
     /// caches them as the new current on success, and fires the `activation`
     /// telemetry event. Throws `nothingStaged` if no update was fetched. On an
     /// activation failure it reports `error`, runs the fallback chain so the app
@@ -1141,7 +1170,7 @@ public final class Patch: @unchecked Sendable {
     private let valueCache = ValueCache()
 
     /// Map a dotted value key (`ProfileCard.primaryFontSize`) to its WASM export
-    /// symbol (`_pv_ProfileCard_primaryFontSize`).
+    /// symbol (`_pv_ProfileCard_primaryFontSize`). Mirrors `CodeEmitter.ValueExport`.
     static func valueExportSymbol(for key: String) -> String {
         "_pv_" + key.replacingOccurrences(of: ".", with: "_")
     }

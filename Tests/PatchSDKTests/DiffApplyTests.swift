@@ -1,7 +1,7 @@
 import XCTest
 @testable import PatchSDK
 
-/// Client-side BSDIFF40 diff application + brotli decompression + SHA-256.
+/// D2 — client-side BSDIFF40 diff application + brotli decompression + SHA-256.
 /// Fixtures (`diff_*`) are produced by the backend's `bsdiff4` / `brotli`
 /// packages, so a passing test proves wire-format alignment with the backend.
 final class DiffApplyTests: XCTestCase {

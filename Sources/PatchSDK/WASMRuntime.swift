@@ -17,7 +17,7 @@ public enum PatchRuntimeError: Error, CustomStringConvertible, Equatable {
     case unexpectedResults(function: String, got: Int, expected: String)
     /// A WASM trap (e.g. `proc_exit`, `fatalError`, OOB) tore down the call.
     /// A trap is NOT recoverable within the same instance — the instance must
-    /// be re-loaded.
+    /// be re-loaded. (See poc/wasm-compilation/COMPATIBILITY.md.)
     case trap(String)
     /// The module bytes failed to parse / instantiate.
     case instantiationFailed(String)
@@ -43,7 +43,8 @@ public enum PatchRuntimeError: Error, CustomStringConvertible, Equatable {
 /// functions (clock/random/args/environ/fd_*/path_*). They will NOT instantiate
 /// unless the host provides them. `WasmKitWASI`'s `WASIBridgeToHost` provides a
 /// full Preview 1 implementation; this struct controls what capabilities it
-/// grants (the safest patch surface grants no FS preopens).
+/// grants (the safest patch surface grants no FS preopens — see
+/// poc/wasm-compilation/COMPATIBILITY.md).
 public struct WASIConfig: Sendable {
     /// Command-line args exposed to the guest (`args_get`). Usually just a name.
     public var args: [String]
@@ -71,7 +72,7 @@ public struct WASIConfig: Sendable {
 /// memory access, and the Patch v0 marshalling ABI.
 ///
 /// One `WASMRuntime` owns one active `Instance`. The runtime is created once per
-/// loaded patch module; hot-swap replaces the whole runtime behind the
+/// loaded patch module; hot-swap (Day 3+) replaces the whole runtime behind the
 /// read/write lock in `Patch` rather than mutating an instance in place, which
 /// keeps WasmKit's `Store`/`Instance` graph internally consistent.
 ///
@@ -80,7 +81,8 @@ public struct WASIConfig: Sendable {
 /// into the module's exported `memory`. No NUL terminator; length is explicit.
 /// The host reserves guest memory through the module's exported allocator
 /// (`patch_malloc(i32) -> i32`, optionally paired with `patch_free(i32)`),
-/// writes the bytes, then calls the target export with `(ptr, len)`.
+/// writes the bytes, then calls the target export with `(ptr, len)`. This
+/// matches the string ABI proven in `poc/wasmkit-ios`.
 public final class WASMRuntime {
     /// One Engine per runtime; the Store/Instance are created from it.
     public let engine: Engine
@@ -91,7 +93,7 @@ public final class WASMRuntime {
     /// guest memory). `WASIBridgeToHost` is the Preview 1 implementation.
     private let wasi: WASIBridgeToHost
 
-    /// Name of the exported guest allocator. Matches the standard fixtures.
+    /// Name of the exported guest allocator. Matches the PoC / fixtures.
     private let allocatorName: String
     /// Name of the exported linear memory. Standard for Swift reactor modules.
     private let memoryName: String
@@ -104,7 +106,8 @@ public final class WASMRuntime {
     ///   - bytes: the `.wasm` binary (a WASI reactor or command module).
     ///   - wasiConfig: WASI capabilities to grant.
     ///   - hostImports: extra host functions to expose to the guest (the
-    ///       wasm->native bridge). Merged on top of the WASI imports.
+    ///       wasm->native bridge; Day 3+ generated code defines these). Merged
+    ///       on top of the WASI imports.
     ///   - allocatorName: exported allocator (default `patch_malloc`).
     ///   - memoryName: exported memory (default `memory`).
     public init(
@@ -290,7 +293,19 @@ public final class WASMRuntime {
     @discardableResult
     public func writeBuffer(_ bytes: [UInt8]) throws -> (ptr: UInt32, len: UInt32) {
         let ptr = try allocate(bytes.count)
-        try write(bytes, at: ptr)
+        // If the WRITE fails (e.g. a buggy/hostile guest `patch_malloc` returned a
+        // pointer near/past the end of linear memory, so the bounds-checked write
+        // throws `memoryOutOfBounds`), the just-allocated guest buffer must be freed
+        // — otherwise it leaks in guest linear memory. The leak compounded through
+        // every caller (MarshalContext records the ptr only AFTER this returns, so a
+        // throw never recorded it; callPacked's input write; the HTTP resolve path)
+        // and repeated failing calls could exhaust guest memory. Free on any throw.
+        do {
+            try write(bytes, at: ptr)
+        } catch {
+            free(ptr)
+            throw error
+        }
         return (ptr, UInt32(bytes.count))
     }
 }

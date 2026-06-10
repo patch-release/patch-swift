@@ -1,7 +1,7 @@
 import XCTest
 @testable import PatchSDK
 
-/// UpdateChecker: wire-protocol parse/decision, telemetry, exponential
+/// D2 — UpdateChecker: wire-protocol parse/decision, telemetry, exponential
 /// backoff. Uses a mock `HTTPTransport` (no real network).
 final class UpdateCheckerTests: XCTestCase {
 

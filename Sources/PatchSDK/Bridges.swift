@@ -53,6 +53,15 @@ public struct BridgeContext {
         return mem
     }
 
+    /// Best-effort release of a guest buffer via the exported `patch_free`. A no-op
+    /// when the guest exports no allocator-free or `ptr == 0`. Used to reclaim a
+    /// buffer that was allocated but could not be written (error path), so a broken
+    /// allocator can't leak a buffer per bridge call.
+    private func freeGuest(_ ptr: UInt32) {
+        guard ptr != 0, let free = caller.instance?.exports[function: "patch_free"] else { return }
+        _ = try? free.invoke([.i32(ptr)])
+    }
+
     /// Read `len` bytes from guest memory at `ptr`.
     public func readBytes(ptr: UInt32, len: UInt32) throws -> [UInt8] {
         let mem = try memory()
@@ -86,6 +95,10 @@ public struct BridgeContext {
         // and corrupt guest memory / trap. `readBytes` already checks; this makes
         // the write path symmetric (fail closed with an OOB error instead).
         guard Int(ptr) >= 0, Int(ptr) + bytes.count <= mem.data.count else {
+            // The buffer was already allocated in guest memory; free it before
+            // throwing so a broken allocator can't leak one buffer per bridge call.
+            // (Best-effort: a no-op if the guest exports no `patch_free`.)
+            freeGuest(ptr)
             throw BridgeError.oob(ptr: ptr, len: UInt32(bytes.count))
         }
         mem.withUnsafeMutableBufferPointer(offset: UInt(ptr), count: bytes.count) { raw in
@@ -183,25 +196,25 @@ public final class BridgeRegistry: @unchecked Sendable {
         // JSON, and read Date() using the NATIVE shell's real Foundation/ICU.
         register(FoundationBridge())
         register(LoggingBridge())
-        // Host-ABI bridge family (module "patch_host"). The read-only synchronous
-        // leaves that a function's call sites can be rewritten onto, so a
-        // near-pure function whose only native touch is one of these ships OTA
-        // instead of falling back. All plain Foundation → cross-platform,
-        // registered unconditionally.
+        // Breakthrough #8 — host-ABI bridge FAMILY (module "patch_host"). The
+        // read-only synchronous leaves the CLI's FusionRewriter rewrites a real
+        // function's call sites onto, so a 95%-pure function whose only native
+        // touch is one of these ships OTA instead of demoting. All plain
+        // Foundation → cross-platform, registered unconditionally.
         register(FileManagerBridge())
         register(BundleBridge())
         register(ProcessInfoEnvBridge())
         register(UserDefaultsTypedBridge(defaults: userDefaults))
-        // Networking (async). Serves patch_host.http_get / http_request (the
-        // async-suspend shape that `URLSession.shared.data(from:)`/`.data(for:)`
-        // gets rewritten onto). Backed by a real
+        // Breakthrough #6 — NETWORKING (async). Serves patch_host.http_get /
+        // http_request (the async-suspend shape the FusionRewriter rewrites
+        // `URLSession.shared.data(from:)`/`.data(for:)` onto). Backed by a real
         // URLSession broker out of the box (device path); cookies/TLS/auth stay
         // host-side. Distinct from the sync `patch.http_get` (URLSessionBridge) —
-        // different module namespace, no collision. To drive a guest that awaits a
+        // different module namespace, no collision. To DRIVE a guest that awaits a
         // fetch, resolve through this bridge's broker in the pump's stall handler
         // (see `Patch.callAsyncResult` / `PatchHTTPBroker.resolveCallback`).
         register(PatchHTTPBridge())
-        // Each convenience default init is platform-guarded, so the
+        // Wave-5 bridges. Each convenience default init is platform-guarded, so the
         // registration is gated by the same condition (tests inject their own impls
         // via overrides, so this only governs the out-of-the-box wiring).
         register(AnalyticsBridge())
@@ -246,7 +259,7 @@ public final class BridgeRegistry: @unchecked Sendable {
         #if canImport(PhotosUI) && canImport(UIKit)
         register(PhotoPickerBridge())
         #endif
-        // Additional bridges (cross-platform defaults first, then platform-gated).
+        // Wave-6 bridges (cross-platform defaults first, then platform-gated).
         register(ProcessInfoBridge())
         register(FileDownloadBridge())
         register(HandoffBridge())
@@ -593,12 +606,13 @@ public struct JSONBridge: Bridge {
 // host functions and the NATIVE shell satisfies them with its REAL Foundation.
 // Result: tens-of-KB patches with full Decimal/JSON/Date semantics.
 //
-// Critical ABI note: the patch MUST declare these imports through a generated
-// **C header** with
+// CRITICAL ABI NOTE (research finding, shell-foundation/FINDINGS.md): the patch
+// MUST declare these imports through a generated **C header** with
 // `__attribute__((import_module("patch_host"), import_name("...")))` — NOT Swift
-// `@_extern(wasm)`, whose mangled, non-flat ABI WasmKit rejects. The module
-// namespace is therefore **"patch_host"** (not "patch"), and every function here
-// uses the flat scalar ABI Clang's attributes produce.
+// `@_extern(wasm)`, whose mangled, non-flat ABI WasmKit rejects. The CLI codegen
+// emits exactly that header (`CodeGenerator.CHeaderBridge`). The module namespace
+// is therefore **"patch_host"** (not "patch"), and every function here uses the
+// flat scalar ABI Clang's attributes produce.
 //
 // Surface (the complete "Foundation value" set proven to run on WasmKit 0.2.2):
 //   * `decimal_op(op:i32, a:i64, b:i64, scale:i32) -> i64`
@@ -683,14 +697,14 @@ public struct FoundationBridge: Bridge {
         return n.int64Value
     }
 
-    // MARK: - Expanded Foundation bridge surface
+    // MARK: - Expanded Foundation bridge surface (research/foundation-bridges)
     //
     // Typed JSON readers + string-return formatter/regex/date bridges. These widen
-    // the set of fragments that can ship at the tiny Embedded tier: a
+    // the set of fragments CodeEmitter can ship at the tiny Embedded (T0) tier: a
     // fragment whose boundary is a String/Double or that formats a number / runs a
-    // regex no longer needs to statically link Foundation — it calls the native
-    // shell's real Foundation through these flat host functions. All mirror the
-    // existing FoundationBridge/BridgeContext patterns.
+    // regex no longer needs to statically link Foundation (~60 MB, demoted on size)
+    // — it calls the native shell's real Foundation through these flat host
+    // functions. All mirror the existing FoundationBridge/BridgeContext patterns.
     // Each is exposed as a `static func` for direct unit testing (like decimalOp /
     // jsonGetI64), with the registered host function delegating to it.
 
@@ -810,7 +824,7 @@ public struct FoundationBridge: Bridge {
             [.i64(UInt64(bitPattern: Int64(clock().timeIntervalSince1970 * 1000)))]
         }
 
-        // ---- Expanded surface --------------------------------------------------
+        // ---- Expanded surface (research/foundation-bridges) ------------------
         // Typed JSON readers (complete the json_get_* family).
         // json_get_string(ptr,len,key,keyLen) -> i64 packed string (0 = absent).
         imports.host(module, "json_get_string", [.i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in

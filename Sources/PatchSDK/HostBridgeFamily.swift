@@ -1,13 +1,14 @@
 import Foundation
 import WasmKit
 
-// MARK: - Host-ABI bridge family (module "patch_host")
+// MARK: - Breakthrough #8 — host-ABI bridge FAMILY (module "patch_host")
 //
-// Read-only synchronous native leaves that a developer's real source can be
-// rewritten onto, so a near-pure function whose only native touch is one of
-// these compiles and ships OTA instead of falling back. Every function here is
-// registered under the flat-ABI namespace
-// **"patch_host"** (the namespace the generated C header imports), with the
+// Read-only synchronous native leaves the FusionRewriter rewrites a developer's
+// real source onto, so a 95%-pure function whose ONLY native touch is one of
+// these compiles + ships OTA instead of demoting. Proven end-to-end in executing
+// WASM (docs/ENGINEERING.md §2 breakthrough #8, experiments/host-bridges/,
+// 16/16 checks). Every function here is registered under the flat-ABI namespace
+// **"patch_host"** (the namespace the CLI's generated C header imports), with the
 // exact `(ptr,len)` + packed-i64 marshalling the existing `BridgeContext` uses.
 //
 // These complement — they do not replace — the existing `patch`-namespace bridges

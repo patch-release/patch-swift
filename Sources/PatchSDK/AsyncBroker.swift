@@ -5,11 +5,12 @@
 // value for this token". The host owns the real concurrency: it performs the work
 // (on its own run loop / via a bridge) and later calls the guest's
 // `patch_resolve(token, value)` export to resume the continuation. The guest's
-// own executor only ever pumps pure continuations; the host owns the I/O.
+// own executor only ever pumps PURE continuations; the host owns the I/O. This is
+// the async + host-ABI fusion from ASYNC-BREAKTHROUGH.md, productized.
 //
 // `PatchAsyncBroker` captures the tokens the guest requested during a pump round.
-// The default `valueProvider` is deterministic (token·100+7), which lets the SDK
-// test the round-trip with no real I/O; a
+// The default `valueProvider` is deterministic (token·100+7), which is what the
+// proof asserts and what lets the SDK test the round-trip with no real I/O; a
 // real app supplies a provider that maps a token → an actual host result (e.g.
 // the resolved value of a bridged async call).
 

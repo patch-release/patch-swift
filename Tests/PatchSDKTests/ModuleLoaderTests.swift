@@ -2,7 +2,7 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// ModuleLoader: download (file://) → decompress → SHA-256 verify
+/// D2 — ModuleLoader: download (file://) → decompress → SHA-256 verify
 /// (pass + tamper-fail) → cache → activate a real fixture. Plus the diff path.
 final class ModuleLoaderTests: XCTestCase {
 

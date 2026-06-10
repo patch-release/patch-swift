@@ -8,9 +8,9 @@ import Foundation
 // native-only dependencies is the safest choice — it relies only on
 // `Foundation`'s `Encoder`/`Decoder` protocols and `Data`, which exist on every
 // Apple platform. (Note: the *guest* WASM module typically uses
-// JSONEncoder/JSONDecoder, so generated bridges may translate; the host-side
-// codec here is the SDK's canonical structured-blob format and round-trips with
-// itself.)
+// JSONEncoder/JSONDecoder — see poc/wasm-compilation — so generated bridges may
+// translate; the host-side codec here is the SDK's canonical structured-blob
+// format and round-trips with itself.)
 //
 // Spec coverage: the subset needed for Codable payloads — nil, bool, ints
 // (pos/neg fixint + int8/16/32/64, uint8/16/32/64), float32/float64, str

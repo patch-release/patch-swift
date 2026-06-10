@@ -2,7 +2,7 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// The imperative update API:
+/// W4 §5 — the EAS-Expo-Updates-style imperative API:
 /// `checkForUpdate()` (no apply) → `fetchUpdate()` (stage) → `reloadAsync()`
 /// (activate), plus `enforceMandatoryUpdates()`, the `isMandatory` surface, the
 /// observable `updateState`, and arbitrary channel strings. All over a mock

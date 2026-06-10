@@ -3,10 +3,10 @@ import Foundation
 // MARK: - UpdateInfo
 
 /// A summary of an available OTA update, returned by `Patch.checkForUpdate()`
-/// (the imperative update API). It describes availability only —
+/// (the EAS-Expo-Updates-style imperative API). It describes availability only —
 /// nothing is downloaded or applied until the developer calls `fetchUpdate()` /
 /// `reloadAsync()`. `isMandatory` surfaces the backend's `response.mandatory`
-/// flag so the host app can decide whether to block the UI.
+/// flag (spec §5) so the host app can decide whether to block the UI.
 public struct UpdateInfo: Sendable, Equatable {
     /// The version string of the available module (`response.version`).
     public let version: String

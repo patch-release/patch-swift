@@ -1,7 +1,7 @@
 import XCTest
 @testable import PatchSDK
 
-/// On-disk module cache: current/previous/bundled slots + atomic swap.
+/// D2 — on-disk module cache: current/previous/bundled slots + atomic swap.
 final class StorageTests: XCTestCase {
 
     private func tempStorage() throws -> (ModuleStorage, URL) {

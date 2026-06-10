@@ -5,8 +5,9 @@ import SwiftUI
 @testable import PatchRender
 #endif
 
-/// The SwiftUI renderer: a `ViewNode` tree reconstitutes to real SwiftUI, and an
-/// interactive control's binding dispatches an event back into the guest dispatch.
+/// Proves the PRODUCTIZED SwiftUI renderer (Breakthrough #3/#5) in the SDK: a
+/// `ViewNode` tree reconstitutes to REAL SwiftUI, and an interactive control's
+/// binding dispatches an event back into the (would-be) guest dispatch.
 final class PatchRenderTests: XCTestCase {
 
     // MARK: - IR + schema (no SwiftUI needed)

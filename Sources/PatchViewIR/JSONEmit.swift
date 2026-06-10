@@ -16,6 +16,19 @@
 //
 // This file is `Foundation`-free and compiles under Embedded Swift.
 
+// MARK: - Non-finite-float wire tokens
+//
+// JSON has no representation for ±Infinity / NaN, so both the embedded emitter
+// (this file) and the host's Foundation codec (`ViewNodeWire`) agree to carry a
+// non-finite Double as one of these STRING tokens. They MUST match the strings
+// passed to Foundation's `nonConformingFloat*Strategy.convert*String` so the two
+// guest tiers round-trip identically. Foundation-free (Embedded-Swift-safe).
+public enum JSONNonFinite {
+    public static let positiveInfinity = "inf"
+    public static let negativeInfinity = "-inf"
+    public static let nan = "nan"
+}
+
 // MARK: - Tiny JSON string builder
 
 struct JSONOut {
@@ -51,6 +64,21 @@ struct JSONOut {
     }
 
     mutating func number(_ d: Double) {
+        // Non-finite doubles have NO valid JSON number form: `String(.infinity)`
+        // is the bare token `inf` (and `nan` for NaN), which is invalid JSON the
+        // host's `JSONDecoder` REJECTS — so a guest emitting `.frame(maxWidth:
+        // .infinity)` (a ubiquitous SwiftUI idiom) would produce a tree the host
+        // can't decode, collapsing the whole view to the error stub. Emit the
+        // non-finite sentinel as a JSON STRING token instead; the host decodes it
+        // via `nonConformingFloatDecodingStrategy.convertFromString` (see
+        // `ViewNodeWire`), matching Foundation's own non-conforming-float strategy
+        // so the T0 (embedded) and T2 (Foundation) guests round-trip identically.
+        if !d.isFinite {
+            if d.isNaN { string(JSONNonFinite.nan) }
+            else if d > 0 { string(JSONNonFinite.positiveInfinity) }
+            else { string(JSONNonFinite.negativeInfinity) }
+            return
+        }
         // Emit integers without a trailing ".0" only when exact; otherwise the
         // shortest round-trippable form. Embedded Swift has String(Double).
         if d == d.rounded() && abs(d) < 1e15 {

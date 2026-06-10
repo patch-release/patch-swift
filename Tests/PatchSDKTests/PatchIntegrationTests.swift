@@ -2,9 +2,9 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// End-to-end: Patch.start()/checkForUpdate() wiring the loader + fallback +
-/// telemetry over a mock transport (no real network). Exercises the
-/// orchestration, not just the units.
+/// End-to-end: Patch.start()/checkForUpdate() wiring the D2 loader + fallback +
+/// telemetry over a mock transport (no real network). Proves the orchestration,
+/// not just the units.
 final class PatchIntegrationTests: XCTestCase {
 
     private func tempDir() -> URL {

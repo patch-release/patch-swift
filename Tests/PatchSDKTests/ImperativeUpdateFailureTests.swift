@@ -2,8 +2,8 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// Imperative update API — failure-path + observable-state coverage that
-/// complements `ImperativeUpdateTests` (which covers the happy paths). Here we drive the
+/// W4 §5 — failure-path + observable-state coverage that complements
+/// `ImperativeUpdateTests` (which covers the happy paths). Here we drive the
 /// `.failed` transition for each imperative step, assert the error telemetry
 /// fires, and verify the `PatchUpdateStateObservable.available` mirror is kept
 /// in sync (set on `.available`, cleared on `.failed` / `.upToDate` / `.idle`).

@@ -20,15 +20,15 @@
 //     host can still decode. The host accepts any guest version in
 //     `minSupportedVersion ... version`.
 //
-// The engine vendors/shares THIS module, so the two copies MUST declare the
-// same `version`. The guest stamps the version
+// COORDINATION (engine-lowering agent): the engine vendors/shares THIS module.
+// The two copies MUST declare the same `version`. The guest stamps the version
 // into its emission envelope (`BodyEmission.schemaVersion`, see below); the host
 // validates it on decode via `PatchViewIRSchema.check(_:)`. If the engine and
 // SDK are versioned together (vendored from one source), the check is a belt-
 // and-suspenders guard against a stale OTA module loaded by a newer host.
 public enum PatchViewIRSchema {
     /// The current IR wire-format schema version. Engine + host MUST match.
-    /// v1 = the initial schema (text/image/spacer/divider/color/
+    /// v1 = the initial productized schema (text/image/spacer/divider/color/
     /// shape primitives; vstack/hstack/zstack/group/forEach containers; button +
     /// the interactive controls toggle/slider/stepper/textField; the modifier set
     /// in `Modifier`; the `{root, coverage?}` BodyEmission + `{state, tree,

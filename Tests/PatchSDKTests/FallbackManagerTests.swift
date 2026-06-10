@@ -2,7 +2,7 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// FallbackManager: the graceful-degradation chain
+/// D2 — FallbackManager: the graceful-degradation chain
 /// current → previous → bundled → disabled. The core safety mechanism: a bad
 /// module must never crash the app; it walks the chain until something activates
 /// (or lands on "disabled"). Tested with both injected activation (to deciside

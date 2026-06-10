@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Wire protocol (matches the Patch backend API)
+// MARK: - Wire protocol (matches backend/app/schemas/module.py + event.py EXACTLY)
 
 /// Request body for `POST /api/v1/modules/check`.
 ///
@@ -140,10 +140,11 @@ public struct DeviceEventPayload: Codable, Equatable, Sendable {
 
 /// Telemetry event-type vocabulary.
 ///
-/// The backend's stats endpoint aggregates on the literal event types
-/// `"download"`, `"activation"`, and `"error"`, so the SDK emits exactly those
-/// three. `fallback` is also emitted as an extra signal captured in the raw
-/// event rows.
+/// NOTE / WIRE MISMATCH: the backend's `GET /modules/{id}/stats` aggregates on
+/// the literal event types `"download"`, `"activation"`, and `"error"`
+/// (`routes/modules.py`). The SDK therefore emits exactly those three strings so
+/// stats populate. `fallback` is also emitted (extra signal the stats endpoint
+/// ignores today but the raw rows capture). See README "Wire protocol notes".
 public enum EventType: String, Sendable {
     case download
     case activation

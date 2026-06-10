@@ -3,10 +3,10 @@ import Foundation
 import CBZ2
 @testable import PatchSDK
 
-/// Regression tests. Each test pins a specific correctness / crash / DoS /
-/// wrong-instance bug fixed in the corresponding source file. All are
-/// fixture-free (pure Swift) so they run in any environment.
-final class RegressionTests4: XCTestCase {
+/// Regression tests for the SDK bug-hunt #4. Each test pins a specific real bug
+/// (correctness / crash / DoS / wrong-instance) fixed in the corresponding
+/// source file. All are fixture-free (pure Swift) so they run in any environment.
+final class BugHuntSDK4Tests: XCTestCase {
 
     // MARK: #1 — FoundationBridge.decimalOp(divFloor) used FLOOR, not truncate-to-0
     //

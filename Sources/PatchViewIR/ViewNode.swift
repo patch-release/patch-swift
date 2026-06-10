@@ -100,7 +100,7 @@ public enum IRTextAlignment: String, Equatable, Sendable {
     case leading, center, trailing
 }
 
-// MARK: - Events (the interactive additions)
+// MARK: - Events (the INTERACTIVE additions — Breakthrough #5)
 
 /// An event the host fires back into the guest's `dispatch` when the user
 /// interacts with a control. The `id` selects which UPDATE branch runs inside
@@ -185,7 +185,7 @@ public indirect enum NodeKind: Equatable, Sendable {
     // Interaction
     case button(actionID: String, label: [ViewNode])
 
-    // Stateful controls (the interactive additions).
+    // Stateful controls (the INTERACTIVE additions — Breakthrough #5).
     // Each carries the control's CURRENT value (read from the guest's state when
     // the tree was emitted) plus the `EventID` the host dispatches on change.
     // The native renderer wires the real SwiftUI control's two-way `Binding` to

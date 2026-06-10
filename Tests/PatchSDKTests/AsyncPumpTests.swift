@@ -2,11 +2,11 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// The on-device async/await executor: a real Swift-compiled
+/// Proves the PRODUCTIZED on-device async/await EXECUTOR: a real Swift-compiled
 /// WASM module's `async`/`await` / `Task` / `async let` / `TaskGroup` / actor /
-/// host-await bodies run to completion when driven through the SDK's pump.
+/// host-await bodies RUN TO COMPLETION when driven through the SDK's pump.
 ///
-/// Exercised through the SDK API:
+/// This mirrors the `experiments/async-exec` proof, but through the SDK API:
 ///   * the low-level `WASMRuntime.pumpToCompletion` (the executor pump in the run
 ///     path), and
 ///   * the high-level `Patch.runAsync` / `Patch.callAsyncResult` facade methods,
@@ -77,7 +77,7 @@ final class AsyncPumpTests: XCTestCase {
     /// through the broker; the pump resolves it and resumes the continuation.
     /// processWithHost(base) = base + fetched*2, where `fetched` is whatever the
     /// HOST resolved (the host owns the value; we capture it and mirror the guest's
-    /// pure transform).
+    /// pure transform — exactly as the experiments/async-exec proof does).
     func testHostAwaitRoundTripViaBroker() throws {
         // Capture each value the broker resolves, so we can mirror the guest's
         // transform without assuming the guest's internal token numbering.

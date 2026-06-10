@@ -15,16 +15,42 @@ import Foundation
 // JSON codec used by the host + the T2 (full-Foundation) guest.
 
 public enum ViewNodeWire {
+    /// A `JSONEncoder` configured to carry non-finite Doubles (`.infinity` /
+    /// `NaN` — e.g. `.frame(maxWidth: .infinity)`) as the same string tokens the
+    /// embedded emitter uses, so the T2 (Foundation) guest produces wire bytes
+    /// the host decodes identically to the T0 (embedded) guest. Without this the
+    /// default encoder THROWS on a non-finite Double and a `.frame(.infinity)`
+    /// body fails to emit at all.
+    static func makeEncoder() -> JSONEncoder {
+        let e = JSONEncoder()
+        e.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: JSONNonFinite.positiveInfinity,
+            negativeInfinity: JSONNonFinite.negativeInfinity,
+            nan: JSONNonFinite.nan)
+        return e
+    }
+    /// The matching decoder: reads the non-finite string tokens back to `.infinity`
+    /// / `NaN`. Without it the host `JSONDecoder` REJECTS the token a guest emitted
+    /// for a non-finite Double, collapsing the whole view to the error stub.
+    static func makeDecoder() -> JSONDecoder {
+        let d = JSONDecoder()
+        d.nonConformingFloatDecodingStrategy = .convertFromString(
+            positiveInfinity: JSONNonFinite.positiveInfinity,
+            negativeInfinity: JSONNonFinite.negativeInfinity,
+            nan: JSONNonFinite.nan)
+        return d
+    }
+
     /// Encode a `BodyEmission` to JSON bytes (the boundary format).
     public static func encode(_ emission: BodyEmission) throws -> [UInt8] {
-        [UInt8](try JSONEncoder().encode(emission))
+        [UInt8](try makeEncoder().encode(emission))
     }
     /// Decode JSON bytes back into a `BodyEmission`.
     public static func decode(_ bytes: [UInt8]) throws -> BodyEmission {
-        try JSONDecoder().decode(BodyEmission.self, from: Data(bytes))
+        try makeDecoder().decode(BodyEmission.self, from: Data(bytes))
     }
 
-    // MARK: - Interactive dispatch
+    // MARK: - Interactive dispatch (Breakthrough #5)
 
     /// Encode the `{state, event}` the host sends to the guest's `dispatch`.
     ///
@@ -34,11 +60,11 @@ public enum ViewNodeWire {
     /// its typed State. This keeps the host fully decoupled from the State type.
     public static func encodeDispatch(state: String, event: DispatchEvent) throws -> [UInt8] {
         struct Envelope: Codable { var state: String; var event: DispatchEvent }
-        return [UInt8](try JSONEncoder().encode(Envelope(state: state, event: event)))
+        return [UInt8](try makeEncoder().encode(Envelope(state: state, event: event)))
     }
 
     /// Decode the `{state, tree, coverage?}` the guest returns from `dispatch`.
     public static func decodeDispatch(_ bytes: [UInt8]) throws -> DispatchResult {
-        try JSONDecoder().decode(DispatchResult.self, from: Data(bytes))
+        try makeDecoder().decode(DispatchResult.self, from: Data(bytes))
     }
 }

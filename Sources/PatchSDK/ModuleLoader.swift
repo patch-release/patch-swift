@@ -10,11 +10,11 @@ import Foundation
 ///    `forceBrotli` is set), inflate it with `Brotli`. The decompressed bytes are
 ///    the raw `.wasm`.
 /// 3. **Verify** SHA-256 of the **raw** bytes against the backend's `sha256`
-///    (which is computed over the uncompressed wasm).
+///    (which is computed over the uncompressed wasm — see `routes/modules.py`).
 ///    A mismatch is rejected (no caching, no activation).
 /// 4. **Cache** the verified bytes into `ModuleStorage` as the new current
 ///    (demoting the old current to previous).
-/// 5. **Activate** via `Patch.activate(bytes:)`.
+/// 5. **Activate** via `Patch.activate(bytes:)` — the D1 activation primitive.
 ///
 /// ## Diff path (bandwidth saver, with safe fallback)
 /// When the response carries a `diff_url`, the loader downloads the bsdiff4
@@ -171,7 +171,7 @@ public final class ModuleLoader: @unchecked Sendable {
 
     /// Acquire the module described by `response` (diff if possible, else full)
     /// and SHA-256-verify it, but do **not** activate or cache it. This is the
-    /// "stage" half of the imperative update API: `fetchUpdate()` calls this
+    /// "stage" half of the EAS-style imperative API: `fetchUpdate()` calls this
     /// to download+verify a pending update, holding the bytes until the developer
     /// calls `reloadAsync()`.
     public func acquire(_ response: UpdateCheckResponse) async throws -> AcquiredModule {

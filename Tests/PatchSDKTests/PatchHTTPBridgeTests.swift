@@ -2,25 +2,25 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// Networking round-trip through the SDK.
+/// Breakthrough #6 — NETWORKING round-trip, PROVEN through the SDK.
 ///
-/// A real Swift-compiled WASM guest (built under the full
-/// WASM SDK) is `async` only because it `await`s a fetch; it then decodes JSON with
-/// `JSONDecoder` in WASM and returns a derived value. The host serves the fetch via
-/// `PatchHTTPBroker` (a mock fetch — no real outbound network in CI), writes the
+/// A real Swift-compiled WASM guest (experiments/networking, built under the full
+/// WASM SDK) is `async` ONLY because it `await`s a fetch; it then decodes JSON with
+/// `JSONDecoder` IN WASM and returns a DERIVED value. The host serves the fetch via
+/// `PatchHTTPBroker` (a MOCK fetch — no real outbound network in CI), writes the
 /// response bytes into guest linear memory, and resumes the guest's continuation via
 /// `patch_resolve_http`. The pump drives it to completion.
 ///
-/// The round-trip under test:
+/// This is the executing proof that the wired engine + SDK round-trips:
 ///   guest await URLSession-shaped fetch  ->  SDK host serves bytes+status
 ///   ->  JSONDecoder in WASM  ->  correct decoded/derived value.
 final class PatchHTTPBridgeTests: XCTestCase {
 
     private func guestBytes() throws -> [UInt8] {
-        // Loaded by source-relative path (not Bundle.module) so the large networking
-        // fixture can stay OUT of git + the Package resource list. The test
+        // Loaded by source-relative path (not Bundle.module) so the 53 MB networking
+        // proof fixture can stay OUT of git + the Package resource list. The test
         // XCTSkips when it's absent (e.g. a fresh checkout / CI); it runs locally where
-        // the fixture is present.
+        // the fixture is present. Rebuild it via experiments/networking if needed.
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/NetworkingGuest.wasm")

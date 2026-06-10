@@ -3,8 +3,8 @@ import CBZ2
 
 /// Client-side binary-diff application.
 ///
-/// The backend produces patches with the `bsdiff4` algorithm, which writes the
-/// classic **BSDIFF40** container:
+/// The backend (`backend/app/services/diff.py`) produces patches with Python's
+/// `bsdiff4` package, which writes the classic **BSDIFF40** container:
 ///
 /// ```
 /// offset 0   : magic "BSDIFF40"            (8 bytes)

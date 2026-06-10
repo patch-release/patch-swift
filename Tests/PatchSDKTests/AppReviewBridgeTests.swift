@@ -2,7 +2,7 @@ import XCTest
 import WasmKit
 @testable import PatchSDK
 
-/// `AppReviewBridge` (in-app rating prompt). Fire-and-forget host
+/// Wave-5 bridge: `AppReviewBridge` (in-app rating prompt). Fire-and-forget host
 /// function `patch.request_review()` -> []. The native StoreKit call is injected
 /// at `init`, so on macOS we inject a spy and assert the registered host function
 /// invokes it exactly once per guest call.

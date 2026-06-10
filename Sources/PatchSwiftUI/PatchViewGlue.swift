@@ -2,13 +2,14 @@
 // =============================================================================
 // `PatchView` (in PatchRender) is closure-driven so it has no WasmKit dependency.
 // This file supplies those closures from a live `Patch` module: it calls the
-// guest's `view_body` / `dispatch` exports over the packed-(ptr,len)+JSON
+// guest's `view_body` / `dispatch` exports over the proven packed-(ptr,len)+JSON
 // ABI, decodes the emitted `ViewNode` tree, validates the IR schema version, and
 // hands the tree to the renderer. A control change forwards the event into the
 // guest's `dispatch`, which re-emits the tree — the host re-renders.
 //
-// The result: a shipped WASM module's view renders as real SwiftUI, and its
-// interaction logic runs on-device in the sandbox.
+// This is the productization of the SwiftUI BREAKTHROUGH #3/#5 loop: a shipped
+// WASM module's view renders as REAL SwiftUI, and its interaction LOGIC runs
+// on-device in the sandbox.
 
 #if canImport(SwiftUI)
 import SwiftUI
@@ -95,7 +96,13 @@ extension Patch {
             ViewNode(.opaque(id: "patchview-error", label: "PatchView error: \(e)"))
         }
     ) -> PatchView {
-        let hasDispatch = (try? withRuntime { $0.hasFunction(dispatchExport) }) ?? false
+        // Use the FACADE's `hasFunction` (which checks the primary AND every
+        // additive PMOD sub-module), NOT `withRuntime { $0.hasFunction(...) }`
+        // (which only inspects the primary). The actual `dispatch` call routes via
+        // `callPacked` → `withRuntime(forFunction:)`, which DOES reach an additive
+        // sub-module; checking only the primary here would wrongly mark a PMOD
+        // module whose `dispatch` lives in a sub-module as read-only.
+        let hasDispatch = hasFunction(dispatchExport)
         return PatchView(
             initialState: initialState,
             context: context,

@@ -11,6 +11,8 @@ DerivedData/
 ## small committed fixtures are force-added by the patterns below.
 *.wasm
 !Tests/**/*.wasm
+# …except the big regenerable networking guest (kept local; its test self-skips)
+Tests/PatchSDKTests/Fixtures/NetworkingGuest.wasm
 !Examples/**/*.wasm
 !fixtures-src/**/*.wasm
 
