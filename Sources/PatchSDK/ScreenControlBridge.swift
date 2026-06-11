@@ -60,16 +60,23 @@ public struct ScreenControlBridge: Bridge {
     public init() {
         self.init(
             getBrightness: {
-                let read: @Sendable () -> Double = { Double(UIScreen.main.brightness) }
-                return Thread.isMainThread ? read() : DispatchQueue.main.sync { read() }
+                // Synchronous getter: reads `UIScreen.main.brightness` (main-actor) via
+                // a synchronous main hop (see `patchMainActorSyncRead`; bridge calls run
+                // off-main on `callQueue`, so this never deadlocks). Cannot use a
+                // fire-and-forget `Task` here (the guest needs the value back).
+                patchMainActorSyncRead { Double(UIScreen.main.brightness) }
             },
             setBrightness: { unit in
-                let apply: @Sendable () -> Void = { UIScreen.main.brightness = CGFloat(unit) }
-                if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+                // Concurrency hop: `UIScreen.main.brightness` is main-actor-isolated;
+                // this is a synchronous nonisolated `@Sendable` closure. The write is
+                // fire-and-forget → `Task { @MainActor in … }` (capturing the Sendable
+                // `Double`). A Task is used rather than `MainActor.assumeIsolated`
+                // (iOS 17+) to keep the iOS 16 floor.
+                Task { @MainActor in UIScreen.main.brightness = CGFloat(unit) }
             },
             setIdleTimerDisabled: { disabled in
-                let apply: @Sendable () -> Void = { UIApplication.shared.isIdleTimerDisabled = disabled }
-                if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+                // Same fire-and-forget main-actor hop for `isIdleTimerDisabled`.
+                Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = disabled }
             }
         )
     }

@@ -49,8 +49,13 @@ public struct HapticsBridge: Bridge {
     /// `canImport(UIKit)` so the cross-platform core still compiles on macOS.
     public init() {
         self.init(fire: { event, variant in
-            // Feedback generators must be created/used on the main thread.
-            let work: @Sendable () -> Void = {
+            // Feedback generators are main-actor-isolated (they must be created/used on
+            // the main thread), but this is a synchronous nonisolated `@Sendable`
+            // closure. Firing haptics is fire-and-forget, so hop the whole body onto
+            // the main actor with `Task { @MainActor in … }` (capturing only the
+            // Sendable `String` event/variant). A Task is used rather than
+            // `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+            Task { @MainActor in
                 switch event {
                 case "impact":
                     let gen = UIImpactFeedbackGenerator(style: Self.uiImpactStyle(variant))
@@ -68,7 +73,6 @@ public struct HapticsBridge: Bridge {
                     break
                 }
             }
-            if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
         })
     }
     #endif

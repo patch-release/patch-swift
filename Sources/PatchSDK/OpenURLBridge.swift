@@ -40,13 +40,18 @@ public struct OpenURLBridge: Bridge {
         self.init(
             open: { url in
                 guard let u = URL(string: url) else { return false }
-                let app = UIApplication.shared
-                guard app.canOpenURL(u) else { return false }
                 let box = OpenResultBox()
                 let sem = DispatchSemaphore(value: 0)
-                // `open(_:)` is async + main-thread-affine; bounce to main and
-                // wait so the guest's synchronous call gets a real result.
-                DispatchQueue.main.async {
+                // `UIApplication.shared` / `canOpenURL` / `open(_:)` are all
+                // main-actor-isolated and main-thread-affine. Do the WHOLE check +
+                // open inside a single main-actor hop (`DispatchQueue.main.async { @MainActor in … }`)
+                // so no main-actor state is touched from this nonisolated `@Sendable`
+                // closure, then block on the semaphore so the guest's synchronous call
+                // still gets a real result. (A blocking getter can't use a
+                // fire-and-forget `Task`; we keep the existing semaphore bridge.)
+                DispatchQueue.main.async { @MainActor in
+                    let app = UIApplication.shared
+                    guard app.canOpenURL(u) else { box.set(false); sem.signal(); return }
                     app.open(u, options: [:]) { ok in box.set(ok); sem.signal() }
                 }
                 _ = sem.wait(timeout: .now() + 5)
@@ -54,7 +59,11 @@ public struct OpenURLBridge: Bridge {
             },
             canOpen: { url in
                 guard let u = URL(string: url) else { return false }
-                return UIApplication.shared.canOpenURL(u)
+                // Synchronous read of a main-actor-isolated API via a synchronous main
+                // hop (see `patchMainActorSyncRead`; bridge calls run off-main on
+                // `callQueue`, so this never deadlocks). Cannot use a fire-and-forget
+                // `Task` — the guest needs the Bool back.
+                return patchMainActorSyncRead { UIApplication.shared.canOpenURL(u) }
             })
     }
     #endif

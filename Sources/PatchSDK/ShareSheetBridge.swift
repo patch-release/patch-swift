@@ -34,7 +34,15 @@ public struct ShareSheetBridge: Bridge {
     /// from the key window's top view controller. iOS-only.
     public init() {
         self.init(present: { text, url in
-            ShareSheetBridge.presentActivityController(text: text, url: url)
+            // Concurrency hop: `presentActivityController` is `@MainActor`, but this
+            // setter is a synchronous, nonisolated `@Sendable` closure. Hop onto the
+            // main actor with `Task { @MainActor in … }` (fire-and-forget — the share
+            // sheet has no result the guest awaits). The Sendable `String?` inputs are
+            // captured; the UIKit work runs main-actor-isolated. A Task is used rather
+            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+            Task { @MainActor in
+                ShareSheetBridge.presentActivityController(text: text, url: url)
+            }
         })
     }
     #endif

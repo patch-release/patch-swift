@@ -48,14 +48,21 @@ public struct AccessibilityBridge: Bridge {
     public init() {
         self.init(
             announce: { message in
-                let post: @Sendable () -> Void = {
+                // Concurrency hop: `UIAccessibility.post` is main-actor-isolated; this
+                // is a synchronous nonisolated `@Sendable` closure. Posting is
+                // fire-and-forget, so hop onto the main actor with `Task { @MainActor in
+                // … }` (capturing only the Sendable `String`). A Task is used rather
+                // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+                Task { @MainActor in
                     UIAccessibility.post(notification: .announcement, argument: message)
                 }
-                if Thread.isMainThread { post() } else { DispatchQueue.main.async { post() } }
             },
             isVoiceOverRunning: {
-                let read: @Sendable () -> Bool = { UIAccessibility.isVoiceOverRunning }
-                return Thread.isMainThread ? read() : DispatchQueue.main.sync { read() }
+                // Synchronous getter: reads `UIAccessibility.isVoiceOverRunning`
+                // (main-actor) via a synchronous main hop (see
+                // `patchMainActorSyncRead`; bridge calls run off-main on `callQueue`,
+                // so this never deadlocks).
+                patchMainActorSyncRead { UIAccessibility.isVoiceOverRunning }
             })
     }
     #endif

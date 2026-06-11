@@ -161,14 +161,32 @@ extension Data: WASMBridgeable {
 // to skip the right number of words when present. This matches the plan's
 // "(tag, value)" representation.
 
+/// Alias for `[WasmKit.Value]` — the WASM word list a marshalled value lowers to.
+///
+/// This alias exists SOLELY to spell the array type in the `Optional:
+/// WASMBridgeable` conditional-conformance witnesses below. It works around a
+/// Swift 6 whole-module type-checker bug: when ANY UIKit-family framework (UIKit,
+/// StoreKit, MediaPlayer, PhotosUI, MessageUI — all imported by the device
+/// bridges) is in the module, it transitively re-exports SwiftUI, which adds a
+/// pile of conditional `extension Optional: <SwiftUI protocol> where Wrapped:
+/// <that protocol>` conformances. With those in scope, type-checking a witness in
+/// OUR `extension Optional: WASMBridgeable` that spells a method type as a SUGARED
+/// array of a non-stdlib type *literally* (`[WasmKit.Value]`) trips a spurious
+/// global conformance lookup and mis-diagnoses `type 'Wrapped' does not conform to
+/// protocol 'Gesture'`. Spelling every `[Value]` in these witnesses through this
+/// typealias defeats the bad lookup; the conformance, ABI, and runtime behavior
+/// are byte-for-byte unchanged. (The other conformances above — Bool/Int/String/…
+/// — are NOT on `Optional`, so they never hit the bug and need no alias.)
+public typealias MarshalWords = [Value]
+
 extension Optional: WASMBridgeable where Wrapped: WASMBridgeable {
-    public func lower(into ctx: MarshalContext) throws -> [Value] {
+    public func lower(into ctx: MarshalContext) throws -> MarshalWords {
         switch self {
         case .none: return [.i32(0)]
         case .some(let w): return [.i32(1)] + (try w.lower(into: ctx))
         }
     }
-    public static func raise(from values: [Value], index: inout Int, ctx: MarshalContext) throws -> Optional<Wrapped> {
+    public static func raise(from values: MarshalWords, index: inout Int, ctx: MarshalContext) throws -> Optional<Wrapped> {
         let tag = try takeI32(values, &index)
         if tag == 0 { return .none }
         return .some(try Wrapped.raise(from: values, index: &index, ctx: ctx))

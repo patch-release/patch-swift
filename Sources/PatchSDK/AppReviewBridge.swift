@@ -55,7 +55,14 @@ public struct AppReviewBridge: Bridge {
     /// foreground window scene, falling back to the older
     /// `SKStoreReviewController.requestReview(in:)`.
     private static func requestReviewNative() {
-        let present: @Sendable () -> Void = {
+        // Concurrency hop: `AppStore.requestReview(in:)` (and the scene lookup via
+        // `UIApplication.shared`) are main-actor-isolated, but this is called from
+        // the synchronous, nonisolated `@Sendable` import closure. Hop the WHOLE
+        // body onto the main actor with `Task { @MainActor in … }` (fire-and-forget
+        // — the review prompt has no result the guest can act on). We use a Task
+        // rather than `MainActor.assumeIsolated`, which is iOS 17+, to keep the
+        // SDK's iOS 16 floor.
+        Task { @MainActor in
             let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             guard let scene = scenes.first(where: { $0.activationState == .foregroundActive })
                 ?? scenes.first
@@ -65,11 +72,6 @@ public struct AppReviewBridge: Bridge {
             } else {
                 SKStoreReviewController.requestReview(in: scene)
             }
-        }
-        if Thread.isMainThread {
-            present()
-        } else {
-            DispatchQueue.main.async { present() }
         }
     }
     #endif

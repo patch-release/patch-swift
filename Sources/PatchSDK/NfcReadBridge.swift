@@ -69,7 +69,7 @@ public struct NfcReadBridge: Bridge {
 /// delegate to be retained for the session's lifetime, so a single shared holder
 /// keeps it alive. Scanned messages are delivered natively through the delegate
 /// (the bridge call itself is fire-and-forget). Begins on the main thread.
-private final class NfcSessionHolder: NSObject, @unchecked Sendable {
+private final class NfcSessionHolder: NSObject, NFCNDEFReaderSessionDelegate, @unchecked Sendable {
     static let shared = NfcSessionHolder()
 
     private let lock = NSLock()
@@ -87,12 +87,17 @@ private final class NfcSessionHolder: NSObject, @unchecked Sendable {
     }
 
     // MARK: NFCNDEFReaderSessionDelegate
-    func readerSession(_ session: NFCNDEFReaderSession, didDetectNDEFs messages: [NFCNDEFMessage]) {
+    // `NFCNDEFReaderSessionDelegate` is an `@objc` protocol, so under Swift 6 its
+    // witnesses must be explicitly `@objc` (the implicit-`@objc` inference for
+    // NSObject-subclass protocol witnesses is no longer applied). Marking them
+    // `@objc` only makes the existing ObjC dispatch explicit — behavior is
+    // unchanged.
+    @objc func readerSession(_ session: NFCNDEFReaderSession, didDetectNDEFs messages: [NFCNDEFMessage]) {
         // Native delivery point: the iOS shell routes `messages` back into the app.
         // (No synchronous path back to the guest; this bridge is present-and-forget.)
     }
 
-    func readerSession(_ session: NFCNDEFReaderSession, didInvalidateWithError error: Error) {
+    @objc func readerSession(_ session: NFCNDEFReaderSession, didInvalidateWithError error: Error) {
         lock.lock(); self.session = nil; lock.unlock()
     }
 }

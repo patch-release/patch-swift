@@ -54,7 +54,15 @@ public struct MailComposeBridge: Bridge {
     /// only when the device is configured to send mail. iOS-only.
     public init() {
         self.init(compose: { draft in
-            MailComposeBridge.presentMailComposer(draft)
+            // Concurrency hop: `presentMailComposer` is `@MainActor`, but this setter
+            // is a synchronous, nonisolated `@Sendable` closure. Hop onto the main
+            // actor with `Task { @MainActor in … }` (fire-and-forget — the composer
+            // has no result the guest awaits). The Sendable `MailDraft` is captured;
+            // the UIKit/MessageUI work runs main-actor-isolated. A Task is used rather
+            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+            Task { @MainActor in
+                MailComposeBridge.presentMailComposer(draft)
+            }
         })
     }
     #endif
@@ -142,12 +150,25 @@ public struct MailComposeBridge: Bridge {
 private final class MailComposeDismisser: NSObject, MFMailComposeViewControllerDelegate {
     @MainActor static let shared = MailComposeDismisser()
 
-    func mailComposeController(
+    // `MFMailComposeViewControllerDelegate` is an `@objc` protocol; under Swift 6
+    // its witnesses must be explicitly `@objc` (implicit-`@objc` inference for
+    // NSObject-subclass protocol witnesses is no longer applied). Behavior
+    // unchanged — only the existing ObjC dispatch is made explicit.
+    @objc func mailComposeController(
         _ controller: MFMailComposeViewController,
         didFinishWith result: MFMailComposeResult,
         error: Error?
     ) {
-        controller.dismiss(animated: true)
+        // `dismiss(animated:)` is main-actor-isolated, but this `@objc` witness must
+        // stay nonisolated (marking it `@MainActor` makes the conformance to the
+        // non-`@MainActor` `MFMailComposeViewControllerDelegate` cross into main-actor
+        // code → a Swift 6 data-race conformance error). UIKit invokes this on the
+        // main thread anyway; hop the dismiss onto the main actor with
+        // `Task { @MainActor in … }` (fire-and-forget). A Task is used rather than
+        // `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+        Task { @MainActor in
+            controller.dismiss(animated: true)
+        }
     }
 }
 #endif

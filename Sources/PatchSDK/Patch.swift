@@ -1,8 +1,8 @@
 import Foundation
 import WasmKit
-#if canImport(UIKit) && !os(watchOS)
-import UIKit
-#endif
+// (No UIKit import: the only former UIKit use here — `UIDevice.current.systemVersion`
+// for `os_version` — was replaced by the nonisolated `ProcessInfo` equivalent to
+// satisfy Swift 6 strict concurrency. See `osVersion` below.)
 
 // Patch — the public entry point of the on-device OTA SDK.
 //
@@ -1127,18 +1127,18 @@ public final class Patch: @unchecked Sendable {
     // backend fails open (no version filtering). These are stable for the process
     // lifetime, so we compute them once and reuse them at both check sites.
 
-    /// The device OS version (e.g. "17.4"), sent as `os_version`. On Apple UI
-    /// platforms this is `UIDevice.current.systemVersion`; elsewhere (macOS /
-    /// Linux, including the SDK's own test build) it falls back to
-    /// `ProcessInfo.operatingSystemVersion` formatted "major.minor.patch". Never
-    /// crashes; the value is non-empty on every supported host.
+    /// The device OS version (e.g. "17.4"), sent as `os_version`. Computed from
+    /// `ProcessInfo.operatingSystemVersion` formatted "major.minor.patch" on every
+    /// platform — on iOS/tvOS this returns the same OS version numbers as
+    /// `UIDevice.current.systemVersion` would, but `ProcessInfo` is `nonisolated`
+    /// (and `Sendable`), so reading it in this nonisolated `static let` default
+    /// value does NOT trip Swift 6 strict-concurrency's "main actor-isolated
+    /// default value in a nonisolated context" error that `UIDevice.current`
+    /// (main-actor-isolated) does. Never crashes; the value is non-empty on every
+    /// supported host.
     static let osVersion: String = {
-        #if canImport(UIKit) && !os(watchOS)
-        return UIDevice.current.systemVersion
-        #else
         let v = ProcessInfo.processInfo.operatingSystemVersion
         return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-        #endif
     }()
 
     /// The host app's marketing version (`CFBundleShortVersionString`), sent as

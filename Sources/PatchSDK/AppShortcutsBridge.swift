@@ -69,21 +69,29 @@ public struct AppShortcutsBridge: Bridge {
     /// references UIKit.
     public init() {
         self.init(setShortcuts: { actions in
-            let items: [UIApplicationShortcutItem] = actions.map { action in
-                let icon = action.systemImageName.map {
-                    UIApplicationShortcutIcon(systemImageName: $0)
+            // Concurrency hop: `UIApplicationShortcutItem` is non-Sendable and
+            // `UIApplication.shared.shortcutItems` is main-actor-isolated, while
+            // this setter is a synchronous, nonisolated `@Sendable` closure. Hop
+            // the WHOLE mapping onto the main actor with `Task { @MainActor in … }`
+            // and BUILD the `[UIApplicationShortcutItem]` INSIDE the task — so the
+            // closure captures only the Sendable `[QuickAction]` input, never the
+            // non-Sendable items array. Fire-and-forget (the assignment has no
+            // result). A Task is used rather than `MainActor.assumeIsolated`
+            // (iOS 17+) to keep the SDK's iOS 16 floor.
+            Task { @MainActor in
+                let items: [UIApplicationShortcutItem] = actions.map { action in
+                    let icon = action.systemImageName.map {
+                        UIApplicationShortcutIcon(systemImageName: $0)
+                    }
+                    return UIApplicationShortcutItem(
+                        type: action.type,
+                        localizedTitle: action.title,
+                        localizedSubtitle: action.subtitle,
+                        icon: icon,
+                        userInfo: action.userInfo as [String: NSSecureCoding])
                 }
-                return UIApplicationShortcutItem(
-                    type: action.type,
-                    localizedTitle: action.title,
-                    localizedSubtitle: action.subtitle,
-                    icon: icon,
-                    userInfo: action.userInfo as [String: NSSecureCoding])
-            }
-            let apply: @Sendable () -> Void = {
                 UIApplication.shared.shortcutItems = items
             }
-            if Thread.isMainThread { apply() } else { DispatchQueue.main.async { apply() } }
         })
     }
     #endif

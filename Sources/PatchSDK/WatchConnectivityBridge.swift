@@ -80,7 +80,7 @@ public struct WatchConnectivityBridge: Bridge {
 /// session to be activated with a delegate before use; a single shared holder
 /// owns that lifecycle. Sends are dropped when the session is unsupported, not yet
 /// activated, or the counterpart is unreachable (the guest call is fire-and-forget).
-private final class WatchSessionHolder: NSObject, @unchecked Sendable {
+private final class WatchSessionHolder: NSObject, WCSessionDelegate, @unchecked Sendable {
     static let shared = WatchSessionHolder()
 
     private override init() {
@@ -100,6 +100,11 @@ private final class WatchSessionHolder: NSObject, @unchecked Sendable {
     }
 
     // MARK: WCSessionDelegate (minimal — we only send)
+    // `WCSessionDelegate` is an `@objc` protocol, so under Swift 6 its witnesses
+    // must be explicitly `@objc` (implicit-`@objc` inference for NSObject-subclass
+    // protocol witnesses is no longer applied). Marking them `@objc` only makes the
+    // existing ObjC dispatch explicit — behavior is unchanged.
+    @objc(session:activationDidCompleteWithState:error:)
     func session(
         _ session: WCSession,
         activationDidCompleteWith activationState: WCSessionActivationState,
@@ -107,8 +112,8 @@ private final class WatchSessionHolder: NSObject, @unchecked Sendable {
     ) {}
 
     #if os(iOS)
-    func sessionDidBecomeInactive(_ session: WCSession) {}
-    func sessionDidDeactivate(_ session: WCSession) {
+    @objc func sessionDidBecomeInactive(_ session: WCSession) {}
+    @objc func sessionDidDeactivate(_ session: WCSession) {
         // Reactivate so a newly-paired watch can be reached again.
         session.activate()
     }

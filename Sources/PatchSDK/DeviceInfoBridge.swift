@@ -75,10 +75,18 @@ public struct DeviceInfoBridge: Bridge {
     /// Convenience default init for the iOS shell: reads `UIDevice.current` and
     /// `UIScreen.main` each time the guest asks.
     public init() {
-        self.init(provider: { DeviceInfoBridge.current() })
+        // `current()` reads `@MainActor`-isolated UIKit state (`UIDevice.current`,
+        // `UIScreen.main`), so read it via a synchronous main hop (see
+        // `patchMainActorSyncRead`; bridge calls run off-main on `callQueue`, so this
+        // never deadlocks). The guest needs the snapshot back, so a fire-and-forget
+        // `Task` won't do.
+        self.init(provider: { patchMainActorSyncRead { DeviceInfoBridge.current() } })
     }
 
-    /// Read the live device snapshot from UIKit.
+    /// Read the live device snapshot from UIKit. `@MainActor` because every member
+    /// it touches (`UIDevice.current`, `UIScreen.main`/`.bounds`/`.scale`) is
+    /// main-actor-isolated; it is invoked through `patchMainActorSyncRead`.
+    @MainActor
     private static func current() -> DeviceInfo {
         let device = UIDevice.current
         let screen = UIScreen.main

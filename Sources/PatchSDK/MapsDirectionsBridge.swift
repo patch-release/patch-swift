@@ -49,7 +49,13 @@ public struct MapsDirectionsBridge: Bridge {
     public init() {
         self.init(open: { urlString in
             guard let url = URL(string: urlString) else { return false }
-            DispatchQueue.main.async { UIApplication.shared.open(url, options: [:]) }
+            // Concurrency hop: `UIApplication.shared.open` is main-actor-isolated;
+            // opening Maps is fire-and-forget (we report success as soon as the URL is
+            // valid, exactly as before), so hop onto the main actor with
+            // `Task { @MainActor in … }` (capturing only the Sendable `URL`). A Task is
+            // used rather than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16
+            // floor.
+            Task { @MainActor in UIApplication.shared.open(url, options: [:]) }
             return true
         })
     }

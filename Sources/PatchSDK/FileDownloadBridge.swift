@@ -94,6 +94,12 @@ public struct FileDownloadBridge: Bridge {
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 return
             }
+            // Use a FileManager obtained INSIDE this `@Sendable` completion closure
+            // rather than capturing the outer one: `FileManager` is non-Sendable, so
+            // capturing it would trip a Swift 6 "non-Sendable capture in a @Sendable
+            // closure" diagnostic. `.default` is the same shared instance — behavior
+            // unchanged.
+            let fm = FileManager.default
             // Replace any existing file at the destination, then move into place.
             try? fm.removeItem(at: dest)
             do {

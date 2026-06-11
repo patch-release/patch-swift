@@ -51,20 +51,24 @@ public struct AppBadgeBridge: Bridge {
     public init() {
         self.init(
             set: { count in
-                let apply: @Sendable () -> Void = {
+                // Concurrency hop: `applicationIconBadgeNumber` is main-actor-isolated;
+                // this setter is a synchronous nonisolated `@Sendable` closure. The
+                // assignment is fire-and-forget, so hop onto the main actor with
+                // `Task { @MainActor in … }` (capturing only the Sendable `Int`). A Task
+                // is used rather than `MainActor.assumeIsolated` (iOS 17+) to keep the
+                // iOS 16 floor.
+                Task { @MainActor in
                     UIApplication.shared.applicationIconBadgeNumber = count
-                }
-                if Thread.isMainThread {
-                    apply()
-                } else {
-                    DispatchQueue.main.sync { apply() }
                 }
             },
             get: {
-                let read: @Sendable () -> Int = {
+                // Synchronous getter: must return the real value to the guest, so it
+                // reads `applicationIconBadgeNumber` (main-actor) via a synchronous main
+                // hop. See `patchMainActorSyncRead` — bridge calls run off-main on
+                // `callQueue`, so this never deadlocks.
+                let value = patchMainActorSyncRead {
                     UIApplication.shared.applicationIconBadgeNumber
                 }
-                let value = Thread.isMainThread ? read() : DispatchQueue.main.sync { read() }
                 return Int32(clamping: value)
             })
     }

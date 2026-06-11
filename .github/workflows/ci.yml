@@ -45,3 +45,16 @@ jobs:
 
       - name: swift test
         run: swift test
+
+      # iOS build gate: `swift test` runs on macOS, where the UIKit/StoreKit host
+      # bridges are #if canImport(UIKit)-gated out. Build every scheme for the iOS
+      # Simulator so iOS-only Swift 6 concurrency / SwiftUI errors fail CI.
+      - name: xcodebuild (iOS Simulator)
+        run: |
+          for scheme in PatchSDK PatchSwiftUI PatchRender PatchViewIR; do
+            echo "=== Building $scheme for iOS Simulator ==="
+            xcodebuild build \
+              -scheme "$scheme" \
+              -destination 'generic/platform=iOS Simulator' \
+              CODE_SIGNING_ALLOWED=NO
+          done

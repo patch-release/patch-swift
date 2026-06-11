@@ -96,13 +96,16 @@ private final class BackgroundTaskStore: @unchecked Sendable {
         if nextToken <= 0 { nextToken = 1 } // wrap defensively, never to 0
         lock.unlock()
 
-        let beginOnMain: @Sendable () -> UIBackgroundTaskIdentifier = {
+        // Synchronous getter: the guest needs the task token back, so begin the
+        // background task on the main actor via a synchronous main hop (see
+        // `patchMainActorSyncRead`; bridge calls run off-main on `callQueue`, so this
+        // never deadlocks). `beginBackgroundTask` is main-actor-isolated.
+        let id = patchMainActorSyncRead {
             UIApplication.shared.beginBackgroundTask(withName: name) {
                 // Expiration handler: end the task so the system reclaims it.
                 self.end(token: token)
             }
         }
-        let id = Thread.isMainThread ? beginOnMain() : DispatchQueue.main.sync { beginOnMain() }
         if id == .invalid { return 0 }
         lock.lock(); live[token] = id; lock.unlock()
         return token
@@ -112,8 +115,11 @@ private final class BackgroundTaskStore: @unchecked Sendable {
         guard token != 0 else { return }
         lock.lock(); let id = live.removeValue(forKey: token); lock.unlock()
         guard let id else { return }
-        let endOnMain: @Sendable () -> Void = { UIApplication.shared.endBackgroundTask(id) }
-        if Thread.isMainThread { endOnMain() } else { DispatchQueue.main.async { endOnMain() } }
+        // Concurrency hop: `endBackgroundTask` is main-actor-isolated; ending is
+        // fire-and-forget, so hop onto the main actor with `Task { @MainActor in … }`
+        // (capturing the Sendable `UIBackgroundTaskIdentifier`). A Task is used rather
+        // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+        Task { @MainActor in UIApplication.shared.endBackgroundTask(id) }
     }
 }
 #endif

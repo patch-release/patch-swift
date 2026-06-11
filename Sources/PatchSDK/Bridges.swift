@@ -124,6 +124,27 @@ public struct BridgeContext {
     }
 }
 
+// MARK: - Synchronous main-actor read helper
+
+/// Run a `@MainActor` read synchronously and return its value, hopping to the
+/// main thread.
+///
+/// Some device bridges (badge/brightness/VoiceOver/device-info/etc.) expose a
+/// *synchronous* host getter whose guest call must return a real value, but the
+/// underlying UIKit state is `@MainActor`-isolated. Such a getter cannot use a
+/// fire-and-forget `Task { @MainActor in … }` (it needs the value back), and the
+/// SDK's iOS-16 floor rules out `MainActor.assumeIsolated` (treat it as 17+).
+///
+/// Every host->wasm invocation — and therefore every bridge getter closure — runs
+/// on `Patch.callQueue`, a private serial queue (see `Patch.swift`), NOT the main
+/// queue. So `DispatchQueue.main.sync` here can never re-enter the main queue and
+/// never deadlocks, and the `@MainActor` body makes the UIKit access well-isolated
+/// (no "main actor-isolated state from a nonisolated/Sendable closure" diagnostic).
+@inline(__always)
+func patchMainActorSyncRead<T: Sendable>(_ body: @escaping @MainActor () -> T) -> T {
+    DispatchQueue.main.sync { body() }
+}
+
 // MARK: - Bridge protocol + registry
 
 /// A native bridge: a set of host functions exposed to the guest under a module

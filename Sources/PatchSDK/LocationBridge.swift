@@ -199,7 +199,11 @@ private final class OneShotLocationDelegate: NSObject, CLLocationManagerDelegate
         selfRef = nil
     }
 
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    // `CLLocationManagerDelegate` is an `@objc` protocol; under Swift 6 its
+    // witnesses must be explicitly `@objc` (implicit-`@objc` inference for
+    // NSObject-subclass protocol witnesses is no longer applied). Behavior
+    // unchanged — only the existing ObjC dispatch is made explicit.
+    @objc func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { finish(nil); return }
         let millis = Int64((loc.timestamp.timeIntervalSince1970 * 1000).rounded())
         finish(LocationFix(
@@ -209,11 +213,11 @@ private final class OneShotLocationDelegate: NSObject, CLLocationManagerDelegate
             timestamp: millis))
     }
 
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    @objc func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         finish(nil)
     }
 
-    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    @objc func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         // If the user resolves authorization to denied/restricted, abandon the
         // request so the blocking caller isn't left waiting for the full timeout.
         switch manager.authorizationStatus {
