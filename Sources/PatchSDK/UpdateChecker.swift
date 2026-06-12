@@ -5,14 +5,16 @@ import Foundation
 /// Request body for `POST /api/v1/modules/check`.
 ///
 /// Field names are the snake_case the backend's `UpdateCheckRequest` pydantic
-/// model requires. `app_id` is a UUID string; `channel` defaults to
-/// "production". (`current_version`, `fingerprint`, `device_id`, `app_id` are
-/// required by the backend; the rest are optional.)
+/// model requires. The app is identified by `app_id` (backend UUID) or
+/// `app_key` (the `pak_…` key from `Patch.configure`) — the backend requires
+/// at least one and resolves `app_key` server-side, so a configuration that
+/// only carries the key still works. `channel` defaults to "production".
 public struct UpdateCheckRequest: Codable, Equatable, Sendable {
     public var current_version: String
     public var fingerprint: String
     public var device_id: String
-    public var app_id: String
+    public var app_id: String?
+    public var app_key: String?
     public var os_version: String?
     public var app_version: String?
     public var sdk_version: String?
@@ -28,7 +30,8 @@ public struct UpdateCheckRequest: Codable, Equatable, Sendable {
         current_version: String,
         fingerprint: String,
         device_id: String,
-        app_id: String,
+        app_id: String? = nil,
+        app_key: String? = nil,
         os_version: String? = nil,
         app_version: String? = nil,
         sdk_version: String? = nil,
@@ -39,6 +42,7 @@ public struct UpdateCheckRequest: Codable, Equatable, Sendable {
         self.fingerprint = fingerprint
         self.device_id = device_id
         self.app_id = app_id
+        self.app_key = app_key
         self.os_version = os_version
         self.app_version = app_version
         self.sdk_version = sdk_version
@@ -103,9 +107,11 @@ public struct UpdateCheckResponse: Codable, Equatable, Sendable {
 
 /// Telemetry event for `POST /api/v1/events` — mirrors the backend `EventCreate`.
 /// `event_type` is a free-form string in the schema; see `EventType` for the
-/// vocabulary the backend stats endpoint aggregates on.
+/// vocabulary the backend stats endpoint aggregates on. The app is identified
+/// by `app_id` or `app_key` (at least one required; resolved server-side).
 public struct DeviceEventPayload: Codable, Equatable, Sendable {
-    public var app_id: String
+    public var app_id: String?
+    public var app_key: String?
     public var device_id: String
     public var event_type: String
     public var module_version: String?
@@ -116,7 +122,8 @@ public struct DeviceEventPayload: Codable, Equatable, Sendable {
     public var duration_ms: Int?
 
     public init(
-        app_id: String,
+        app_id: String? = nil,
+        app_key: String? = nil,
         device_id: String,
         event_type: String,
         module_version: String? = nil,
@@ -127,6 +134,7 @@ public struct DeviceEventPayload: Codable, Equatable, Sendable {
         duration_ms: Int? = nil
     ) {
         self.app_id = app_id
+        self.app_key = app_key
         self.device_id = device_id
         self.event_type = event_type
         self.module_version = module_version

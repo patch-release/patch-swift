@@ -868,17 +868,22 @@ public final class Patch: @unchecked Sendable {
     /// identical and the imperative API is purely additive.
     @discardableResult
     func checkAndApply() async -> StartOutcome {
+        // `appID` (the backend UUID) is OPTIONAL: the backend resolves `appKey`
+        // server-side, so the snippet-only integration
+        // (`Patch.configure(.init(appKey: …))`) polls like any other. (Guarding
+        // on `appID` here used to silently disable ALL remote checks for
+        // exactly that integration — the quickstart-killing bug.)
         guard let cfg = currentConfiguration,
               let checker = updateChecker,
-              let storage = storage,
-              let appID = cfg.appID else { return .noModule }
+              let storage = storage else { return .noModule }
 
         let device = cfg.deviceID ?? "anon"
         let req = UpdateCheckRequest(
             current_version: storage.currentVersion ?? "0.0.0",
             fingerprint: cfg.fingerprint ?? "",
             device_id: device,
-            app_id: appID,
+            app_id: cfg.appID,
+            app_key: cfg.appKey,
             os_version: Patch.osVersion,
             app_version: Patch.appVersion,
             sdk_version: Patch.sdkVersion,
@@ -888,8 +893,8 @@ public final class Patch: @unchecked Sendable {
         let response: UpdateCheckResponse
         do { response = try await checker.check(req) }
         catch {
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.error.rawValue, error_message: "\(error)"))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .error, errorMessage: "\(error)"))
             return .noModule
         }
         guard response.has_update, cfg.autoApply else {
@@ -901,26 +906,39 @@ public final class Patch: @unchecked Sendable {
             let result = try await loader.acquireAndActivate(response) { [weak self] bytes in
                 try self?.activate(bytes: bytes)
             }
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.download.rawValue, module_version: result.version))
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.activation.rawValue, module_version: result.version))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .download, moduleVersion: result.version))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .activation, moduleVersion: result.version))
             return .activated(version: result.version)
         } catch {
             // New module failed (verify/activate). Recover down the chain and
             // report the fallback so the dashboard sees the failure.
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.error.rawValue,
-                module_version: response.version, error_message: "\(error)"))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .error, moduleVersion: response.version,
+                errorMessage: "\(error)"))
             let fb = FallbackManager(
                 storage: storage,
                 activate: { [weak self] bytes in try self?.activate(bytes: bytes) },
                 deactivate: { [weak self] in self?.deactivate() })
             let state = fb.recoverFromBadCurrent()
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.fallback.rawValue, module_version: storage.currentVersion))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .fallback, moduleVersion: storage.currentVersion))
             return .fallback(state)
         }
+    }
+
+    /// Build a telemetry payload carrying BOTH app identifiers (`app_id` when
+    /// configured, always `app_key`) so events resolve server-side however the
+    /// SDK was configured.
+    static func event(
+        _ cfg: PatchConfiguration, device: String, type: EventType,
+        moduleVersion: String? = nil, errorMessage: String? = nil
+    ) -> DeviceEventPayload {
+        DeviceEventPayload(
+            app_id: cfg.appID, app_key: cfg.appKey, device_id: device,
+            event_type: type.rawValue, module_version: moduleVersion,
+            error_message: errorMessage)
     }
 
     // MARK: - Imperative EAS-Expo-Updates-style API (W4 §5)
@@ -942,7 +960,7 @@ public final class Patch: @unchecked Sendable {
         case activation(Error)
         public var description: String {
             switch self {
-            case .notConfigured: return "Patch is not configured for remote updates (missing apiBaseURL/appID)"
+            case .notConfigured: return "Patch is not configured for remote updates (missing apiBaseURL)"
             case .noUpdateAvailable: return "no update is available to fetch"
             case .nothingStaged: return "no fetched update is staged; call fetchUpdate() first"
             case .check(let e): return "update check failed: \(e)"
@@ -953,23 +971,24 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// Build the `/modules/check` request from the current configuration + cache.
-    private func makeCheckRequest() -> (UpdateCheckRequest, cfg: PatchConfiguration, checker: UpdateChecker, appID: String, device: String)? {
+    /// `appID` is optional — `appKey` rides along and resolves server-side.
+    private func makeCheckRequest() -> (UpdateCheckRequest, cfg: PatchConfiguration, checker: UpdateChecker, device: String)? {
         guard let cfg = currentConfiguration,
               let checker = updateChecker,
-              let storage = storage,
-              let appID = cfg.appID else { return nil }
+              let storage = storage else { return nil }
         let device = cfg.deviceID ?? "anon"
         let req = UpdateCheckRequest(
             current_version: storage.currentVersion ?? "0.0.0",
             fingerprint: cfg.fingerprint ?? "",
             device_id: device,
-            app_id: appID,
+            app_id: cfg.appID,
+            app_key: cfg.appKey,
             os_version: Patch.osVersion,
             app_version: Patch.appVersion,
             sdk_version: Patch.sdkVersion,
             cohort: cfg.cohort,
             channel: cfg.channel.name)
-        return (req, cfg, checker, appID, device)
+        return (req, cfg, checker, device)
     }
 
     private func setState(_ s: PatchUpdateState) async {
@@ -983,15 +1002,15 @@ public final class Patch: @unchecked Sendable {
     /// `fetchUpdate()` can download it. Drives `updateState`.
     @discardableResult
     public func checkForUpdate() async throws -> UpdateInfo? {
-        guard let (req, _, checker, appID, device) = makeCheckRequest() else {
+        guard let (req, cfg, checker, device) = makeCheckRequest() else {
             throw UpdateError.notConfigured
         }
         await setState(.checking)
         let response: UpdateCheckResponse
         do { response = try await checker.check(req) }
         catch {
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.error.rawValue, error_message: "\(error)"))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .error, errorMessage: "\(error)"))
             await setState(.failed("\(error)"))
             throw UpdateError.check(error)
         }
@@ -1015,8 +1034,7 @@ public final class Patch: @unchecked Sendable {
     public func fetchUpdate() async throws -> Bool {
         guard let cfg = currentConfiguration,
               let checker = updateChecker,
-              let storage = storage,
-              let appID = cfg.appID else { throw UpdateError.notConfigured }
+              let storage = storage else { throw UpdateError.notConfigured }
         let device = cfg.deviceID ?? "anon"
 
         // Use the remembered response, or check now if none.
@@ -1032,15 +1050,15 @@ public final class Patch: @unchecked Sendable {
         let acquired: ModuleLoader.AcquiredModule
         do { acquired = try await loader.acquire(response) }
         catch {
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.error.rawValue,
-                module_version: response.version, error_message: "\(error)"))
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .error, moduleVersion: response.version,
+                errorMessage: "\(error)"))
             await setState(.failed("\(error)"))
             throw UpdateError.fetch(error)
         }
         lock.write { self._staged = acquired }
-        await checker.reportEvent(.init(app_id: appID, device_id: device,
-            event_type: EventType.download.rawValue, module_version: acquired.version))
+        await checker.reportEvent(Self.event(cfg, device: device,
+            type: .download, moduleVersion: acquired.version))
         await setState(.downloading(1))
         await setState(.readyToReload)
         return true
@@ -1056,17 +1074,16 @@ public final class Patch: @unchecked Sendable {
         guard let storage = storage else { throw UpdateError.notConfigured }
         guard let staged = lock.read({ _staged }) else { throw UpdateError.nothingStaged }
         let cfg = currentConfiguration
-        let appID = cfg?.appID
         let device = cfg?.deviceID ?? "anon"
         let checker = updateChecker
 
         do {
             try activate(bytes: staged.bytes)
         } catch {
-            if let appID, let checker {
-                await checker.reportEvent(.init(app_id: appID, device_id: device,
-                    event_type: EventType.error.rawValue,
-                    module_version: staged.version, error_message: "\(error)"))
+            if let cfg, let checker {
+                await checker.reportEvent(Self.event(cfg, device: device,
+                    type: .error, moduleVersion: staged.version,
+                    errorMessage: "\(error)"))
             }
             // The STAGED bytes failed to activate, but they were never installed
             // as `current` — the on-disk current slot is still the good module
@@ -1081,9 +1098,9 @@ public final class Patch: @unchecked Sendable {
                 activate: { [weak self] bytes in try self?.activate(bytes: bytes) },
                 deactivate: { [weak self] in self?.deactivate() })
             _ = fb.activateBest()
-            if let appID, let checker {
-                await checker.reportEvent(.init(app_id: appID, device_id: device,
-                    event_type: EventType.fallback.rawValue, module_version: storage.currentVersion))
+            if let cfg, let checker {
+                await checker.reportEvent(Self.event(cfg, device: device,
+                    type: .fallback, moduleVersion: storage.currentVersion))
             }
             lock.write { self._staged = nil }
             await setState(.failed("\(error)"))
@@ -1092,9 +1109,9 @@ public final class Patch: @unchecked Sendable {
         // Activation succeeded — persist as the new current and clear staging.
         try? storage.installCurrent(version: staged.version, sha256: staged.sha256, bytes: staged.bytes)
         lock.write { self._staged = nil; self._pendingResponse = nil }
-        if let appID, let checker {
-            await checker.reportEvent(.init(app_id: appID, device_id: device,
-                event_type: EventType.activation.rawValue, module_version: staged.version))
+        if let cfg, let checker {
+            await checker.reportEvent(Self.event(cfg, device: device,
+                type: .activation, moduleVersion: staged.version))
         }
         await setState(.idle)
     }
@@ -1116,7 +1133,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.0.0"
+    public static let sdkVersion = "1.0.3"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //
