@@ -39,7 +39,21 @@ let package = Package(
     dependencies: [
         // Pinned exactly to 0.2.2 — the version proven in poc/wasmkit-ios.
         // Use the swiftwasm URL; the swiftlang/wasmkit path does NOT resolve.
-        .package(url: "https://github.com/swiftwasm/WasmKit.git", exact: "0.2.2")
+        .package(url: "https://github.com/swiftwasm/WasmKit.git", exact: "0.2.2"),
+        // Cap swift-system below 1.7.0. WasmKit 0.2.2 requires swift-system with
+        // an OPEN upper bound (`from: "1.5.0"`), but its `SystemExtras` fails to
+        // compile against swift-system 1.7.0: 1.7.0 added a public top-level
+        // `struct Stat`, after which WasmKit's `var stat: stat = stat()` (a local
+        // shadowing the C `stat` type) mis-resolves the `stat()` initializer to
+        // `Stat` → "cannot convert value of type 'Stat' to specified type 'stat'".
+        // Without this cap, ANY consumer app whose dependency graph floats
+        // swift-system to 1.7.0 fails to build PatchSDK. We declare swift-system
+        // directly so the resolver intersects to 1.5.0..<1.7.0 (newest safe is
+        // 1.6.x). Fix submitted upstream: https://github.com/swiftwasm/WasmKit/pull/349
+        // TODO(remove-cap): once that PR (or an equivalent) ships in a WasmKit
+        // release we depend on, DROP this `swift-system` constraint and let it
+        // float again. Tracked in CLAUDE.md §5 / memory `wasmkit-swift-system-170-cap`.
+        .package(url: "https://github.com/apple/swift-system", "1.5.0" ..< "1.7.0")
     ],
     targets: [
         // System-library shim for libbz2 (ships in the macOS + iOS SDKs). Used by
@@ -70,23 +84,34 @@ let package = Package(
         .target(
             name: "PatchSDK",
             dependencies: [
-                // Binary-size note (Track D size pass): PatchSDK links ONLY these
-                // three WasmKit products. They transitively pull exactly the
-                // runtime — WasmParser, WasmTypes, SystemExtras, _CWasmKit,
-                // SystemPackage — and NOTHING ELSE. The text-format / component
-                // tooling (WAT, WIT) and the CLI's deps (NIO, ArgumentParser,
-                // swift-atomics/-collections/-log) are NOT products we depend on,
-                // so they are never compiled into or linked against the SDK. A
-                // release, dead-stripped arm64-iOS link map confirms it: the only
-                // statically linked objects are PatchSDK + the six above. The
-                // realistic dead-stripped contribution is ~1.1-1.5 MiB (see
-                // README "Binary size"); do NOT add WAT/WIT here.
+                // Binary-size note (Track D size pass): PatchSDK links these three
+                // WasmKit products. They transitively pull exactly the runtime —
+                // WasmParser, WasmTypes, SystemExtras, _CWasmKit, SystemPackage —
+                // and NOTHING ELSE. The text-format / component tooling (WAT, WIT)
+                // and the CLI's deps (NIO, ArgumentParser, swift-atomics/-collections
+                // /-log) are NOT products we depend on, so they are never compiled
+                // into or linked against the SDK. A release, dead-stripped arm64-iOS
+                // link map confirms it: the only statically linked objects are
+                // PatchSDK + the six above. The realistic dead-stripped contribution
+                // is ~1.1-1.5 MiB (see README "Binary size"); do NOT add WAT/WIT here.
                 .product(name: "WasmKit", package: "WasmKit"),
                 // WASI Preview 1 host shim — required to instantiate real
                 // Swift-compiled modules. iOS-safe (pure Swift).
                 .product(name: "WasmKitWASI", package: "WasmKit"),
                 // The core WASI module: WASIExitCode and friends.
                 .product(name: "WASI", package: "WasmKit"),
+                // SystemPackage (swift-system) — already pulled transitively by
+                // WasmKit's SystemExtras, so listing it here adds NOTHING to the
+                // link map. It is declared on the SHIPPED target on purpose: it
+                // anchors the `swift-system "1.5.0"..<"1.7.0"` cap (see the
+                // dependencies block above) into the product dependency closure so
+                // the cap PROPAGATES TO CONSUMER APPS. It must NOT live on the test
+                // target only — SwiftPM prunes test-target deps for consumers, so a
+                // test-only anchor lets a consuming app float swift-system back to
+                // 1.7.0 and hit the WasmKit `var stat: stat` build break (verified
+                // against a real app, IceCubesApp). Remove together with the cap when
+                // WasmKit PR #349 ships. iOS-safe (pure Swift).
+                .product(name: "SystemPackage", package: "swift-system"),
                 // libbz2 shim for diff decompression.
                 "CBZ2"
             ]
