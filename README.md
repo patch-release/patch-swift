@@ -205,14 +205,28 @@ Patch.shared.bridges.registerFunction(
 
 ---
 
-## Live SwiftUI rendering (optional)
+## Live SwiftUI view patching — out of the box (no code changes)
 
-`PatchSwiftUI` lets a module's SwiftUI view render as **real** SwiftUI on device
-and run its interaction logic in the sandbox. The guest emits a `ViewNode` tree
-across the boundary; `PatchRender` reconstitutes it into real `Text`, stacks,
-modifiers, and controls. A user interaction dispatches back into the guest,
-which re-emits the tree, and the host re-renders. `PatchViewIR` is the shared,
-dependency-free IR; depend on it alone to build or inspect a `ViewNode` tree.
+Your SwiftUI views are patchable **with zero changes to the views themselves** —
+no wrapper, no `PatchView`. Run `patchcli prepare` once (it's also part of
+`patchcli init`): it marks each `var body: some View` `dynamic` and generates
+`@_dynamicReplacement(for: body)` thunks (the same mechanism Xcode Previews uses),
+compiled into your app. When you ship an OTA patch, the engine lowers the changed
+view body to a `ViewNode` tree; on device the thunk renders it as **real** SwiftUI
+(`PatchRender` reconstitutes real `Text`, stacks, modifiers, and controls) and runs
+its interaction logic in the sandbox — otherwise it falls through to your original
+compiled `body`. Edit a view's text, a modifier, the layout, or add a subview, then
+`patchcli release` — it appears on devices with no App Store review.
+
+**Mixed views:** a body need not be fully lowerable. The lowered parts ride WASM
+(patchable); non-lowerable leaves (a custom child view, `Color(red:…)`, an
+unsupported modifier) render natively from compiled-in slot closures — so almost
+any view is routable, including interactive `Toggle`/`Stepper`/`TextField` screens.
+
+`Patch.shared.thunkBody(...)` is the entry the generated thunks call; `PatchViewIR`
+is the shared, dependency-free IR (depend on it alone to build or inspect a
+`ViewNode` tree). For an explicitly module-driven view you can still use
+`Patch.shared.patchView(viewBodyExport:)` directly.
 
 ---
 

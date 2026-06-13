@@ -201,6 +201,50 @@ public final class Patch: @unchecked Sendable {
     /// to the first additional instance that does. Empty for a legacy single `.wasm`.
     private var additional: [WASMRuntime] = []
 
+    /// Monotonic counter, incremented under `lock` every time the ACTIVE MODULE SET
+    /// changes (activate / hot-swap commit / hot-swap rollback / deactivate). Cheap to
+    /// read; the SwiftUI view-patching registry compares it per body evaluation to
+    /// know when its cached per-module state (the view manifest) is stale, instead of
+    /// re-querying the module. Guarded by `lock`.
+    private var _moduleEpoch: UInt64 = 0
+    /// Handlers fired ON THE MAIN QUEUE after the active module set changes. Used by
+    /// the SwiftUI view-patching layer to invalidate on-screen views when a patch
+    /// activates mid-session. Handlers MUST NOT assume any particular module is still
+    /// active (read state through the normal accessors). Guarded by `lock`.
+    private var _moduleChangeHandlers: [@Sendable (UInt64) -> Void] = []
+    /// One-shot guard for `ensureLocalActivationOnce()` (also set by
+    /// `activateBestLocal()` so the lazy path never re-runs the chain after `start()`).
+    /// Guarded by `lock`.
+    private var _localActivationAttempted = false
+
+    /// The current module-set epoch (see `_moduleEpoch`). 0 ⇒ nothing was ever
+    /// activated or deactivated in this process.
+    public var moduleEpoch: UInt64 { lock.read { _moduleEpoch } }
+
+    /// Register a handler fired on the MAIN queue whenever the active module set
+    /// changes (activation, hot-swap, rollback, deactivation), with the new epoch.
+    /// Handlers are held for the process lifetime — register once per subsystem.
+    public func onModuleSetChange(_ handler: @escaping @Sendable (UInt64) -> Void) {
+        lock.write { _moduleChangeHandlers.append(handler) }
+    }
+
+    /// Bump the epoch (must be called INSIDE a `lock.write` that mutates the module
+    /// set) — returns the new value for the post-release notification.
+    private func bumpModuleEpochLocked() -> UInt64 {
+        _moduleEpoch &+= 1
+        return _moduleEpoch
+    }
+
+    /// Fire the module-set-change handlers on the main queue (call AFTER releasing
+    /// `lock`/`callQueue` so a handler can safely read SDK state).
+    private func notifyModuleSetChanged(_ epoch: UInt64) {
+        let handlers = lock.read { _moduleChangeHandlers }
+        guard !handlers.isEmpty else { return }
+        DispatchQueue.main.async {
+            for h in handlers { h(epoch) }
+        }
+    }
+
     /// D3 bridges exposed to loaded modules. Apps add custom bridges here before
     /// `configure`/`start`; the defaults are installed by `configure`.
     public let bridges = BridgeRegistry()
@@ -367,7 +411,7 @@ public final class Patch: @unchecked Sendable {
         // Calls already dispatched to callQueue serialize against each other; the lock
         // protects the active-pointer swap itself.
         let built = try instantiateModuleSet(bytes: bytes)
-        lock.write {
+        let epoch = lock.write {
             self.active?.teardown()
             self.additional.forEach { $0.teardown() }
             self.active = built.primary
@@ -377,7 +421,9 @@ public final class Patch: @unchecked Sendable {
             // observed the freshly-swapped `active` but still hits a STALE cache entry
             // keyed against the OLD module, returning the wrong value.
             valueCache.clear()
+            return bumpModuleEpochLocked()
         }
+        notifyModuleSetChanged(epoch)
     }
 
     /// Instantiate the module-set from raw `bytes`: a single `WASMRuntime` for a legacy
@@ -448,7 +494,7 @@ public final class Patch: @unchecked Sendable {
         // Drain in-flight calls: by running the whole swap as a `callQueue` item,
         // any guest call already on the queue completes first, and no new call
         // can interleave until the swap returns.
-        try callQueue.sync {
+        let epoch = try callQueue.sync { () -> UInt64 in
             // (1) Build the replacement set OUTSIDE the module-state mutation. A
             // failure here leaves the active set untouched (the prior modules stay).
             let built = try instantiateModuleSet(bytes: bytes)
@@ -472,7 +518,15 @@ public final class Patch: @unchecked Sendable {
             func rollback(_ throwing: () -> Void) {
                 built.primary.teardown()
                 built.additional.forEach { $0.teardown() }
-                lock.write { self.active = prior.0; self.additional = prior.1 }
+                // The restore is a module-set change too: a concurrent reader may have
+                // observed the (not-yet-probed) new set, so bump + notify so any
+                // per-module caches resynchronize against the restored set.
+                let epoch = lock.write { () -> UInt64 in
+                    self.active = prior.0
+                    self.additional = prior.1
+                    return bumpModuleEpochLocked()
+                }
+                notifyModuleSetChanged(epoch)
                 throwing()
             }
             do {
@@ -489,18 +543,24 @@ public final class Patch: @unchecked Sendable {
             // New module set is good — retire the prior one and refresh caches.
             prior.0?.teardown()
             prior.1.forEach { $0.teardown() }
-            valueCache.clear()
+            return lock.write {
+                valueCache.clear()
+                return bumpModuleEpochLocked()
+            }
         }
+        notifyModuleSetChanged(epoch)
     }
 
     /// Drop the active module set (e.g. on rollback).
     public func deactivate() {
-        lock.write {
+        let epoch = lock.write { () -> UInt64 in
             self.active?.teardown()
             self.additional.forEach { $0.teardown() }
             self.active = nil
             self.additional = []
+            return bumpModuleEpochLocked()
         }
+        notifyModuleSetChanged(epoch)
     }
 
     // MARK: Calling into the active module
@@ -840,10 +900,39 @@ public final class Patch: @unchecked Sendable {
         return local
     }
 
+    /// Synchronously run the local fallback chain ONCE per process if nothing has
+    /// run it yet — the first-frame path for auto-patched SwiftUI views. `start()`
+    /// is async (the injected snippet wraps it in a `Task`), so the first body
+    /// evaluations can land BEFORE Phase 1 activates the cached module; a patched
+    /// view would then paint native for a frame (or until the next re-render on
+    /// OSes without the Observation-based invalidation). Calling this from the
+    /// first body evaluation closes that gap: if a cached/bundled module exists
+    /// it activates before the first paint.
+    ///
+    /// Bounded: modules larger than `maxSyncBytes` (default 8 MiB) are left to the
+    /// async `start()` so a huge full-Foundation module can't stall the first
+    /// frame; SwiftUI patch modules are typically tens of KiB.
+    public func ensureLocalActivationOnce(maxSyncBytes: Int = 8 << 20) {
+        let shouldRun: Bool = lock.write {
+            guard !_localActivationAttempted, configuration != nil else { return false }
+            _localActivationAttempted = true
+            return true
+        }
+        guard shouldRun else { return }
+        guard let storage = storage else { return }
+        // Size gate: only the CURRENT entry's recorded size is consulted (previous/
+        // bundled rungs only run when current is broken — rare enough to accept).
+        if let current = storage.manifest().current, current.size > maxSyncBytes { return }
+        _ = activateBestLocal(markAttempted: false)
+    }
+
     /// Activate the best locally-available module using the fallback chain. Safe
     /// to call offline. Returns the outcome.
     @discardableResult
-    public func activateBestLocal() -> StartOutcome {
+    public func activateBestLocal(markAttempted: Bool = true) -> StartOutcome {
+        if markAttempted {
+            lock.write { _localActivationAttempted = true }
+        }
         guard let storage = storage else { return .noModule }
         let fb = FallbackManager(
             storage: storage,

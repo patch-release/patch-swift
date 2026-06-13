@@ -172,7 +172,12 @@ let package = Package(
                 // production PATCH_SWIFTUI engine path (BodyLowering + SwiftUIGuestEmitter),
                 // exporting BOTH view_body AND the auto-generated dispatch. Proves the
                 // engine's dispatch codegen drives the SDK's Patch.dispatch end-to-end.
-                .copy("Fixtures/EngineSettingsView.wasm")
+                .copy("Fixtures/EngineSettingsView.wasm"),
+                // ENGINE-EMITTED auto-patch guest (a `Banner` view lowered 100%): a PMOD
+                // container exporting view_body__Banner + the `patch_view_manifest` the
+                // out-of-the-box view-patching registry reads. Drives the AutoPatch
+                // (thunkBody → manifest → PatchedBodyHost) integration tests.
+                .copy("Fixtures/AutoPatchBanner.wasm")
             ]
         )
     ]
