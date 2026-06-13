@@ -2131,9 +2131,10 @@ struct Renderer {
     }
 
     #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
-    func titleDisplayMode(_ s: String) -> ToolbarTitleDisplayMode {
-        // `ToolbarTitleDisplayMode` exists where `navigationBarTitleDisplayMode`
-        // takes it; map the three named modes.
+    func titleDisplayMode(_ s: String) -> NavigationBarItem.TitleDisplayMode {
+        // The type `navigationBarTitleDisplayMode(_:)` takes is
+        // `NavigationBarItem.TitleDisplayMode` (iOS 14+) — NOT the iOS-17-only
+        // `ToolbarTitleDisplayMode`. Map the three named modes.
         switch s {
         case "inline": return .inline
         case "large": return .large
