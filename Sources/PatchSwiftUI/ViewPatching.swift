@@ -251,21 +251,55 @@ public final class PatchViewPatchRegistry {
 public protocol _PatchScalarWrapper {
     func _patchRead() -> Any?
     func _patchWrite(_ newValue: Any)
+    /// Reconstruct the wrapper's CONCRETE value from a JSON fragment and write it
+    /// back, returning whether it wrote. Used for NON-scalar state (struct/array/
+    /// enum/Date/…) whose value the guest mutated: when the wrapper's `Value`
+    /// conforms to `Decodable`, the fragment decodes into it faithfully. A
+    /// `Value` that isn't `Decodable` returns false (no write — never wrong).
+    func _patchWriteJSON(_ jsonFragment: String) -> Bool
+}
+
+extension _PatchScalarWrapper {
+    /// Default: no JSON reconstruction (scalar-only wrappers / external conformers
+    /// keep working unchanged). The built-in wrappers override this.
+    public func _patchWriteJSON(_ jsonFragment: String) -> Bool { false }
 }
 
 extension State: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
     public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    public func _patchWriteJSON(_ jsonFragment: String) -> Bool {
+        guard let v = _patchDecodeJSON(Value.self, from: jsonFragment) else { return false }
+        wrappedValue = v; return true
+    }
 }
 
 extension Binding: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
     public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    public func _patchWriteJSON(_ jsonFragment: String) -> Bool {
+        guard let v = _patchDecodeJSON(Value.self, from: jsonFragment) else { return false }
+        wrappedValue = v; return true
+    }
 }
 
 extension AppStorage: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
     public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    // @AppStorage only stores property-list scalars (String/Int/Double/Bool/Data/
+    // URL/RawRepresentable), never a free struct/array, so the default no-op JSON
+    // write-back (from the protocol extension) is exactly right here.
+}
+
+/// Decode a JSON fragment into `V` IFF `V: Decodable` (a runtime check — `State`'s
+/// `Value` carries no Decodable bound). Returns nil for a non-Decodable `V` or a
+/// fragment that doesn't parse, so the write-back is skipped rather than wrong.
+@MainActor
+func _patchDecodeJSON<V>(_ type: V.Type, from jsonFragment: String) -> V? {
+    guard let decodableType = V.self as? any Decodable.Type,
+          let data = jsonFragment.data(using: .utf8) else { return nil }
+    guard let decoded = try? JSONDecoder().decode(decodableType, from: data) else { return nil }
+    return decoded as? V
 }
 
 /// One native storage location a guest state field writes back to: the wrapper
@@ -294,18 +328,24 @@ public enum PatchInstanceInputs {
         for child in Mirror(reflecting: instance).children {
             guard let rawLabel = child.label else { continue }
             if rawLabel.hasPrefix("_") {
-                // A property wrapper's backing storage (`_name`). Extract the
-                // CURRENT scalar value from the wrappers we understand.
+                // A property wrapper's backing storage (`_name`). Extract the CURRENT
+                // value from the wrappers we understand and marshal it — a scalar
+                // directly, a struct/array/enum/etc. via the recursive encoder, so the
+                // guest body reads the REAL value rather than its compiled-in default.
                 guard let wrapper = child.value as? _PatchScalarWrapper else { continue }
                 let key = String(rawLabel.dropFirst())
                 guard !key.isEmpty, let value = wrapper._patchRead(),
-                      let fragment = scalarJSONFragment(value) else { continue }
+                      let fragment = PatchValueEncoder.encode(value) else { continue }
                 fragments.append((key, fragment))
+                // Write-back is wired for any wrapper-backed field whose value
+                // round-trips through the guest (scalar today; richer types reconstruct
+                // on the way out when the wrapper's concrete type is reconstructable).
                 writebacks.append(PatchScalarWriteback(key: key, wrapper: wrapper))
             } else {
-                // A plain stored property (`let`/`var`). Marshal scalars; anything
-                // else stays guest-side-defaulted (the lowering bound a literal).
-                guard rawLabel != "body", let fragment = scalarJSONFragment(child.value) else { continue }
+                // A plain stored property (`let`/`var`). Marshal scalars directly and
+                // structs/arrays/enums/Optionals/Dates via the recursive encoder;
+                // a value the encoder can't represent stays guest-side-defaulted.
+                guard rawLabel != "body", let fragment = PatchValueEncoder.encode(child.value) else { continue }
                 fragments.append((rawLabel, fragment))
             }
         }
@@ -391,23 +431,47 @@ enum PatchFlatJSON {
     }
 
     private static func serialize(_ obj: [String: Any]) -> String {
-        var fragments: [(String, String)] = []
+        var fragments: [(key: String, json: String)] = []
         for (k, v) in obj {
             guard let frag = fragment(for: v) else { continue }
             fragments.append((k, frag))
         }
-        fragments.sort { $0.0 < $1.0 }
-        return "{" + fragments.map { "\"\($0.0)\":\($0.1)" }.joined(separator: ",") + "}"
+        fragments.sort { $0.key < $1.key }
+        return "{" + fragments.map {
+            "\(PatchInstanceInputs.quotedJSONString($0.key)):\($0.json)"
+        }.joined(separator: ",") + "}"
     }
 
+    /// A JSON fragment for any `JSONSerialization`-decoded value — scalars AND
+    /// nested objects/arrays/null. The merge can now carry a non-scalar input
+    /// (a struct/array `@State`) through unchanged instead of dropping it.
     private static func fragment(for value: Any) -> String? {
         // JSONSerialization yields NSNumber/NSString; disambiguate Bool first
         // (a Bool NSNumber would otherwise match the numeric casts).
+        if value is NSNull { return "null" }
         if let n = value as? NSNumber {
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
             return PatchInstanceInputs.scalarJSONFragment(n.doubleValue)
         }
         if let s = value as? String { return PatchInstanceInputs.quotedJSONString(s) }
+        if let obj = value as? [String: Any] { return serialize(obj) }
+        if let arr = value as? [Any] {
+            let parts = arr.compactMap { fragment(for: $0) }
+            // Preserve element count: if any element couldn't serialize, bail rather
+            // than silently shorten the array.
+            guard parts.count == arr.count else { return nil }
+            return "[" + parts.joined(separator: ",") + "]"
+        }
+        return nil
+    }
+
+    /// A JSON fragment string for a non-scalar `JSONSerialization` value (object /
+    /// array / null) — the input to a wrapper's Codable write-back. Returns nil for
+    /// a scalar (those take the cheap scalar write-back path instead).
+    static func fragmentForWriteback(_ value: Any) -> String? {
+        if value is [String: Any] || value is [Any] || value is NSNull {
+            return fragment(for: value)
+        }
         return nil
     }
 
@@ -545,9 +609,17 @@ public struct PatchedBodyHost: View {
         guard !writebacks.isEmpty,
               let state = PatchFlatJSON.parse(newStateJSON) else { return }
         for wb in writebacks {
-            guard let newValue = unbox(state[wb.key]) else { continue }
-            if PatchFlatJSON.scalarEqual(wb.wrapper._patchRead(), newValue) { continue }
-            wb.wrapper._patchWrite(newValue)
+            guard let raw = state[wb.key] else { continue }
+            if let newValue = unbox(raw) {
+                // Scalar field: cheap equality-suppressed scalar write.
+                if PatchFlatJSON.scalarEqual(wb.wrapper._patchRead(), newValue) { continue }
+                wb.wrapper._patchWrite(newValue)
+            } else if let fragment = PatchFlatJSON.fragmentForWriteback(raw) {
+                // Non-scalar field (object/array/null): reconstruct the concrete
+                // type from its JSON fragment when the wrapper's Value is Decodable.
+                // (`_patchWriteJSON` is a no-op for a non-Decodable Value — safe.)
+                _ = wb.wrapper._patchWriteJSON(fragment)
+            }
         }
     }
 
@@ -570,20 +642,25 @@ public struct PatchedBodyHost: View {
     nonisolated static func collectButtonActionIDs(_ node: ViewNode) -> [String] {
         var out: [String] = []
         func walk(_ n: ViewNode) {
-            if case .button(let actionID, _) = n.kind { out.append(actionID) }
+            if case .button(let actionID, _, _) = n.kind { out.append(actionID) }
             for child in n.childNodes { walk(child) }
+            // ALSO recurse into modifier content (sheet/alert/toolbar actions live in
+            // a MODIFIER subtree, not `childNodes`) so their Buttons auto-wire too.
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
         }
         walk(node)
         return out
     }
 
     /// Every `.opaque` node id in the tree — the leaves the thunk must supply a
-    /// native slot for (mixed views).
+    /// native slot for (mixed views). Walks both `childNodes` AND modifier content
+    /// (a sheet/alert/overlay body's opaque leaf must still be covered).
     nonisolated static func collectOpaqueIDs(_ node: ViewNode) -> [String] {
         var out: [String] = []
         func walk(_ n: ViewNode) {
             if case .opaque(let id, _) = n.kind { out.append(id) }
             for child in n.childNodes { walk(child) }
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
         }
         walk(node)
         return out

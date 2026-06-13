@@ -45,7 +45,12 @@ final class AutoPatchIntegrationTests: XCTestCase {
         try patch.activate(bytes: try bannerModule())
         let bytes = try patch.callPacked("patch_view_manifest", [])
         let manifest = try JSONDecoder().decode(PatchViewManifest.self, from: Data(bytes))
-        XCTAssertEqual(manifest.schemaVersion, PatchViewIRSchema.version)
+        // The fixture is a prebuilt module; assert the host SUPPORTS its stamped
+        // schema (the real runtime contract — minSupportedVersion…version) rather
+        // than exact equality, so an older-engine module still validates after a
+        // host-only schema bump.
+        XCTAssertTrue(PatchViewIRSchema.isSupported(manifest.schemaVersion),
+                      "manifest schema v\(manifest.schemaVersion) unsupported by host v\(PatchViewIRSchema.version)")
         guard let banner = manifest.views.first(where: { $0.type == "Banner" }) else {
             return XCTFail("manifest has no Banner entry: \(manifest.views.map(\.type))")
         }

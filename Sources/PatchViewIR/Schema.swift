@@ -33,9 +33,36 @@ public enum PatchViewIRSchema {
     /// the interactive controls toggle/slider/stepper/textField; the modifier set
     /// in `Modifier`; the `{root, coverage?}` BodyEmission + `{state, tree,
     /// coverage?}` DispatchResult envelopes).
-    public static let version = 1
+    /// v2 = the MODIFIER-surface + unified `IRShapeStyle` styling vocabulary
+    /// (foregroundStyle/background/fill/stroke/border/overlay/mask/shadow;
+    /// offset/position/aspectRatio/clipped/layoutPriority/safeAreaInset/
+    /// ignoresSafeArea/zIndex/containerRelativeFrame; rotation/scale/blur/
+    /// brightness/contrast/saturation/grayscale/hueRotation/colorInvert/blendMode;
+    /// the text-styling set; the built-in control-config style enums; the
+    /// long-press/drag/magnify/rotate gestures; onAppear/onDisappear/onChange/
+    /// task/onSubmit/onHover/sensoryFeedback lifecycle; animation/transition;
+    /// the `IRValue.point` payload) — AND additive leaf-views (styledText/dateText/
+    /// symbolImage/bundleImage/asyncImage/determinateProgress/gauge/link/shareLink/
+    /// secureField/textEditor/labeledContent/menu/contextMenu, the generalized
+    /// `label(title:icon:)`), containers (lazyV/HStack, lazyV/HGrid, grid/gridRow,
+    /// groupBox, disclosureGroup, viewThatFits, controlGroup, tabView), and shape
+    /// nodes (path, unevenRoundedRectangle, containerRelative). Purely additive: a
+    /// v2 host decodes v1 guests; the bump gates a newer guest against an older host.
+    /// v3 = the HOST-STATE tier (presentation/selection/navigation/focus/list-edit):
+    /// the `sheet`/`sheetItem`/`fullScreenCover`/`popover`/`alert`/`confirmationDialog`/
+    /// `navigationDestinationBool`/`toolbar`/`searchable`/`focused`/`onDelete`/`onMove`
+    /// modifiers; the `picker`/`datePicker`/`colorPicker`/`navigationLink`/
+    /// `navigationStackPath`/`boundDisclosureGroup`/`boundSection`/`boundTabView`/
+    /// `editButton` node kinds; `Button(role:)`; and the `IRValue.array` payload (nav
+    /// path / multi-select / index sets). Purely additive: a v3 host decodes v1/v2
+    /// guests; the bump gates a newer guest against an older host. NOTE: `.button`
+    /// gained a `role` field — a pre-v3 host can't decode a v3 button, which is why
+    /// the schema gate refuses a v3 guest on an older host (correct: it would mis-route).
+
+    public static let version = 3
 
     /// The oldest guest schema version this host's renderer can still decode.
+    /// v1/v2 trees use only cases that still exist, so a v3 host renders them.
     public static let minSupportedVersion = 1
 
     /// Whether a guest-stamped schema version is renderable by this host.
