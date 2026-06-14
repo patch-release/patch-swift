@@ -43,6 +43,19 @@ public struct IRColor: Equatable, Sendable {
 public enum ColorRef: Equatable, Sendable {
     case named(String)          // "blue", "primary", "secondary", "red", …
     case rgba(IRColor)
+    /// A DESIGN-SYSTEM color TOKEN supplied natively by the build-time thunk, keyed
+    /// by a content-stable id. The guest's lowered tree carries only the id; the host
+    /// app's `__patchTokens()` evaluates the real token expression (`Theme.Colors.ink`,
+    /// `Brand.accent`, any `<Type>.<member>[(args)]` of static type `Color`) → a
+    /// resolved `Color` it supplies under that id. This lets a token-using modifier
+    /// (`.foregroundStyle(Theme.Colors.ink)`, `.fill(Theme.Colors.accent)`) LOWER —
+    /// the modifier rides WASM (patchable), its VALUE is host-supplied (the same slot
+    /// mechanism as a mixed-view leaf, but for a color value). An OTA patch can
+    /// re-select among the tokens the build enumerated; it cannot invent a new native
+    /// token (that's the App Store wall). The renderer falls back to `.primary` if the
+    /// host supplies no value for the id (and `PatchedBodyHost` demotes the whole view
+    /// when a token id is uncovered — never renders a wrong color).
+    case hostToken(String)
 }
 
 // MARK: - Font
@@ -398,6 +411,29 @@ public struct IRToolbarItem: Equatable, Sendable {
     }
 }
 
+// MARK: - Canvas draw ops (C — GeometryReader/Canvas promotion)
+
+/// One serialized `GraphicsContext` draw command, replayed by a host `Canvas`
+/// using the in-binary `GraphicsContext`. The guest emits CONCRETE scalar
+/// geometry (coords/sizes/line widths the guest computed in WASM — including from
+/// the canvas size, injected as reserved `__canvas_width`/`__canvas_height`
+/// inputs), so a host `Canvas` replays them faithfully without any native draw
+/// code. The COMMON DECLARATIVE forms are modeled — `ctx.fill(Path, with:)`,
+/// `ctx.stroke(Path, with:, lineWidth:)`, `ctx.draw(Text, at:)`; an imperative /
+/// computed draw (a layer, a clip, a `GraphicsContext` transform, a custom
+/// `Shading`) is NOT modeled — the whole `Canvas` demotes to a native slot.
+public indirect enum IRDrawOp: Equatable, Sendable {
+    /// `ctx.fill(Path(<commands>), with: <style>)` — fill a path with a ShapeStyle.
+    case fillPath(commands: [IRPathCommand], style: IRShapeStyle)
+    /// `ctx.stroke(Path(<commands>), with: <style>, lineWidth: <w>)` — stroke a path.
+    case strokePath(commands: [IRPathCommand], style: IRShapeStyle, lineWidth: Double)
+    /// `ctx.draw(Text("…")[.font/.foregroundStyle], at: CGPoint(x:,y:)[, anchor:])` —
+    /// draw a (resolved) Text leaf at a point. `text` is a lowered Text subtree (so
+    /// its font/color/etc. modifiers replay); `anchor` is a named UnitPoint
+    /// ("center"|"topLeading"|… — default "center").
+    case drawText(text: [ViewNode], x: Double, y: Double, anchor: String)
+}
+
 // MARK: - Path commands (A.2 — NODE side only; fill/stroke are modifiers)
 
 /// A single `Path`/`CGPath` drawing command with concrete scalar coordinates. The
@@ -456,6 +492,15 @@ public enum Modifier: Equatable, Sendable {
     case disabled(Bool)
     /// `.fixedSize()` — the view sizes to its ideal in both dimensions.
     case fixedSize
+    /// `.font(<design-system font token>)` — a font from a design-system token
+    /// (`Theme.Font.body(13, weight: .semibold)`, any `<expr>` of static type `Font`)
+    /// supplied natively by the build-time thunk, keyed by a content-stable id. `Font`
+    /// has no introspectable descriptor, so (unlike a color) it can't ride the wire as
+    /// data — it rides as an OPAQUE host-supplied `Font` the renderer applies. The
+    /// guest tree carries only the id; the host's `__patchTokens()` evaluates the real
+    /// expression → a `Font`. Lets `.font(Theme.Font.body(...))` LOWER (the modifier
+    /// rides WASM; its value is host-supplied — the slot pattern, for a font value).
+    case fontToken(String)
 
     // MARK: Styling (the unified IRShapeStyle vocabulary)
 
@@ -963,6 +1008,31 @@ public indirect enum NodeKind: Equatable, Sendable {
     /// environment state. No payload (SwiftUI owns it once placed in a List).
     case editButton
 
+    /// `GeometryReader { proxy in <body> }` — promoted from slot-native to
+    /// host-state (C). The SDK renders a REAL `GeometryReader { proxy in … }`
+    /// wrapper; on each layout it injects `proxy.size.width`/`.height` (and
+    /// `.frame(in:.local)` origin) as RESERVED marshalled inputs
+    /// (`__geo_width`/`__geo_height`/`__geo_minX`/`__geo_minY`) and re-evaluates
+    /// the lowered child body — which READS those reserved inputs like any `@State`
+    /// scalar. `children` is the lowered body (built with the proxy member accesses
+    /// rewritten to the reserved input identifiers by the engine). A `proxy` use the
+    /// engine can't map (`proxy[anchor]`, `proxy.safeAreaInsets`, `proxy.size` whole)
+    /// → the whole GeometryReader stays a native slot. `id` is a content-stable token
+    /// so the SDK host wrapper can re-locate THIS reader in the re-emitted tree.
+    case geometryReader(id: String, children: [ViewNode])
+
+    /// `Canvas { ctx, size in <draws> }` — a serialized drawing-op replay (C). The
+    /// SDK renders a REAL `Canvas` and replays `ops` via the in-binary
+    /// `GraphicsContext` (no native draw code ships). The COMMON DECLARATIVE draw
+    /// forms (`ctx.fill`/`ctx.stroke`/`ctx.draw(Text,at:)`) serialize; an imperative/
+    /// computed draw demotes the whole Canvas to a native slot. The canvas size is
+    /// injected as reserved `__canvas_width`/`__canvas_height` inputs (like the geo
+    /// reader), so size-relative coords the guest computed ride through. (Engine note:
+    /// the engine currently SLOTS Canvas — faithfully parsing imperative
+    /// `GraphicsContext` closures is out of the demote-safe budget; this node + the
+    /// SDK replay are proven + round-trip for hand-written/future emission.)
+    case canvas(ops: [IRDrawOp])
+
     /// A node that referenced something non-lowerable (a custom
     /// `UIViewRepresentable`, an environment-dependent expression, etc.). The
     /// host renders this from a native side table keyed by `id`; `label`
@@ -1079,6 +1149,14 @@ extension ViewNode {
             return label + content
         case .boundSection(let header, _, let content, _):
             return header + content
+        case .geometryReader(_, let children):
+            return children
+        case .canvas(let ops):
+            // A Canvas's only recursive subtrees are its `drawText` Text leaves.
+            return ops.flatMap { op -> [ViewNode] in
+                if case .drawText(let text, _, _, _) = op { return text }
+                return []
+            }
         case .text, .styledText, .dateText, .image, .symbolImage, .bundleImage,
              .asyncImage, .spacer, .divider, .color, .shape, .progressView,
              .opaque, .slider, .textField, .secureField, .textEditor, .path,
@@ -1158,6 +1236,7 @@ extension IRPickerOption: Codable {}
 extension IRSelectionKind: Codable {}
 extension IRNavDestination: Codable {}
 extension IRToolbarItem: Codable {}
+extension IRDrawOp: Codable {}
 extension IRPathCommand: Codable {}
 extension IRRoundedCornerStyle: Codable {}
 extension Modifier: Codable {}

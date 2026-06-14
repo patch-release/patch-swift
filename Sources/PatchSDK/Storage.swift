@@ -113,6 +113,47 @@ public final class ModuleStorage: @unchecked Sendable {
         return modulesDir.appendingPathComponent("\(safe).wasm")
     }
 
+    private func overlayURL(version: String) -> URL {
+        let safe = version.replacingOccurrences(of: "/", with: "_")
+                          .replacingOccurrences(of: "..", with: "_")
+        return modulesDir.appendingPathComponent("\(safe).overlay")
+    }
+
+    // MARK: - Resource-overlay sidecar (Phase 1b)
+    //
+    // The resource overlay (named color/string/image overrides) rides the patch
+    // artifact as an outer `POVR` envelope, so it is already persisted inside the
+    // cached module bytes. These helpers additionally cache the EXTRACTED overlay
+    // chunk as a per-version sidecar file, so the SDK can verify + activate the
+    // overlay alongside the WASM module(s) without re-parsing the wrapper, and a
+    // test can prove the overlay round-trips through `ModuleStorage`. The sidecar is
+    // pruned in lock-step with its module file.
+
+    /// Cache the extracted overlay chunk for `version` (the raw `PROV` bytes). A nil
+    /// or empty chunk removes any existing sidecar (an overlay-free version).
+    public func installOverlay(version: String, overlayChunk: [UInt8]?) {
+        lock.lock(); defer { lock.unlock() }
+        let url = overlayURL(version: version)
+        guard let chunk = overlayChunk, !chunk.isEmpty else {
+            try? fm.removeItem(at: url)
+            return
+        }
+        try? writeAtomically(Data(chunk), to: url)
+    }
+
+    /// The cached overlay chunk for `version`, or nil when none is cached.
+    public func overlayChunk(version: String) -> [UInt8]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? Data(contentsOf: overlayURL(version: version)) else { return nil }
+        return [UInt8](data)
+    }
+
+    /// The cached overlay chunk for the CURRENT module version, or nil.
+    public func currentOverlayChunk() -> [UInt8]? {
+        guard let v = currentVersion else { return nil }
+        return overlayChunk(version: v)
+    }
+
     // MARK: - Bundled slot (in-app fallback)
 
     /// Register the app-bundled module as the bundled fallback slot.
@@ -152,6 +193,17 @@ public final class ModuleStorage: @unchecked Sendable {
         let dst = moduleURL(version: version)
         try writeAtomically(Data(bytes), to: dst)
 
+        // PHASE 1b: if the artifact is wrapped in a resource-overlay (`POVR`) envelope,
+        // cache the extracted overlay chunk as a per-version sidecar (so the SDK can
+        // activate the overlay alongside the WASM module without re-parsing the wrapper,
+        // and rollback/prune track it). The whole wrapped artifact is also stored above,
+        // so the overlay survives launches either way; the sidecar is the fast path.
+        if let decoded = PatchOverlayArtifact.decode(bytes), !decoded.overlay.isEmpty {
+            try? writeAtomically(Data(decoded.overlay), to: overlayURL(version: version))
+        } else {
+            try? fm.removeItem(at: overlayURL(version: version))
+        }
+
         // Demote the old current to previous (if it differs), and prune the
         // module file that previous used to point at (keep at most 2 on disk).
         if let oldCurrent = m.current, oldCurrent.version != version {
@@ -159,6 +211,7 @@ public final class ModuleStorage: @unchecked Sendable {
             if let oldPrev = m.previous, oldPrev.version != version,
                oldPrev.version != oldCurrent.version {
                 try? fm.removeItem(at: moduleURL(version: oldPrev.version))
+                try? fm.removeItem(at: overlayURL(version: oldPrev.version))
             }
             m.previous = oldCurrent
         }
@@ -179,6 +232,7 @@ public final class ModuleStorage: @unchecked Sendable {
 
         if let badCurrent = m.current, badCurrent.version != prev.version {
             try? fm.removeItem(at: moduleURL(version: badCurrent.version))
+            try? fm.removeItem(at: overlayURL(version: badCurrent.version))
         }
         m.current = prev
         m.previous = nil
@@ -190,7 +244,10 @@ public final class ModuleStorage: @unchecked Sendable {
     public func clearCurrent() {
         lock.lock(); defer { lock.unlock() }
         var m = readManifestLocked()
-        if let cur = m.current { try? fm.removeItem(at: moduleURL(version: cur.version)) }
+        if let cur = m.current {
+            try? fm.removeItem(at: moduleURL(version: cur.version))
+            try? fm.removeItem(at: overlayURL(version: cur.version))
+        }
         m.current = nil
         try? writeManifestLocked(m)
     }

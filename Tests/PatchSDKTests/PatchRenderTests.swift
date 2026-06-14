@@ -723,6 +723,29 @@ final class PatchRenderTests: XCTestCase {
         try assertRoundTrips(tree)
     }
 
+    /// The C-tier `geometryReader` + `canvas` nodes (and every `IRDrawOp` shape)
+    /// survive BOTH codecs intact — the wire-format contract the SDK renderer reads.
+    func testGeometryReaderAndCanvasWireRoundTrip() throws {
+        let tree = N.vstack([
+            N.geometryReader(id: "geo_ab12", [
+                N.text("child").frame(width: 100, height: 50),
+                N.color(.named("blue"))
+            ]),
+            N.canvas([
+                .fillPath(commands: [.addRect(x: 0, y: 0, width: 10, height: 10)],
+                          style: .color(.rgba(IRColor(r: 0.1, g: 0.2, b: 0.3, a: 1)))),
+                .strokePath(commands: [.move(x: 0, y: 0), .line(x: 5, y: 5), .closeSubpath],
+                            style: .color(.named("red")), lineWidth: 2.5),
+                .drawText(text: [N.text("T").bold()], x: 3, y: 4, anchor: "topLeading")
+            ])
+        ])
+        try assertRoundTrips(tree)
+        // Spot-check the describe dump reflects both nodes.
+        let d = tree.describe()
+        XCTAssertTrue(d.contains("GeometryReader(#geo_ab12,children:2)"), d)
+        XCTAssertTrue(d.contains("Canvas(ops:3)"), d)
+    }
+
     #if canImport(SwiftUI)
     /// The new host-state nodes + modifiers all render to real SwiftUI without trapping.
     @MainActor
@@ -756,6 +779,67 @@ final class PatchRenderTests: XCTestCase {
         XCTAssertNotNil(render(N.button("Delete", actionID: "d", role: .destructive)))
         XCTAssertNotNil(render(N.button("Cancel", actionID: "c", role: .cancel)))
         XCTAssertNotNil(render(N.button("Plain", actionID: "p")))
+    }
+
+    // MARK: - C — GeometryReader (host-state) + Canvas (draw-op replay)
+
+    /// A `geometryReader` node renders a REAL `GeometryReader` wrapper without
+    /// trapping — both with NO rebuild closure (static children render) and with a
+    /// rebuild closure (the proxy size/frame are passed and fresh children render).
+    @MainActor
+    func testGeometryReaderRendersRealGeometryReader() {
+        // The lowered child reads the reserved __geo_* inputs as bound guest scalars;
+        // here the IR child is a plain subtree (the reserved values arrive at the guest
+        // layer, not the renderer). The renderer just builds the GeometryReader host.
+        let reader = N.geometryReader(id: "geo_1", [
+            N.text("inside").frame(width: 100, height: 50)
+        ])
+        // No rebuild closure → static children render (a bare render(_:)).
+        XCTAssertNotNil(render(reader))
+        XCTAssertTrue(reader.describe().contains("GeometryReader(#geo_1,children:1)"), reader.describe())
+
+        // With a rebuild closure: the renderer's GeometryReader host invokes it on each
+        // layout with the live proxy size/frame, swapping in fresh children. We verify
+        // the closure is wired + invocable (the SwiftUI layout pass that calls it is
+        // covered by the live-module path; here we drive the resolve directly).
+        var seen: [(String, Double, Double, Double, Double)] = []
+        let rebuild = GeometryRebuild { id, w, h, x, y in
+            seen.append((id, w, h, x, y))
+            return [N.text("w=\(Int(w))")]
+        }
+        let ctx = RenderContext(geometryRebuild: rebuild)
+        XCTAssertNotNil(render(reader, context: ctx))
+        // Drive the resolve the way the host wrapper does on a layout pass.
+        let fresh = rebuild("geo_1", 320, 200, 0, 0)
+        XCTAssertEqual(seen.count, 1)
+        XCTAssertEqual(seen[0].1, 320)
+        XCTAssertEqual(fresh?.first?.describe(), "Text(\"w=320\")")
+    }
+
+    /// A `canvas` of the SUPPORTED draw ops (fillPath / strokePath / drawText with
+    /// scalar geometry) renders a REAL `Canvas` without trapping; describe reflects it.
+    @MainActor
+    func testCanvasRendersSupportedDrawOps() {
+        let canvas = N.canvas([
+            // fill an ellipse-ish path with a color
+            .fillPath(commands: [
+                .move(x: 0, y: 0), .addRect(x: 0, y: 0, width: 100, height: 80)
+            ], style: .color(.named("blue"))),
+            // stroke a diagonal line with a gradient
+            .strokePath(commands: [.move(x: 0, y: 0), .line(x: 100, y: 80)],
+                        style: .linearGradient(
+                            IRGradient(stops: [IRGradientStop(color: .named("red"), location: 0),
+                                               IRGradientStop(color: .named("orange"), location: 1)]),
+                            startPoint: .leading, endPoint: .trailing),
+                        lineWidth: 3),
+            // draw a styled Text leaf at a point
+            .drawText(text: [N.text("hi").font(.init(style: .caption)).foregroundColor(.named("white"))],
+                      x: 20, y: 40, anchor: "center")
+        ])
+        XCTAssertNotNil(render(canvas))
+        // describe()'s kind label is "Canvas(ops:3)"; the drawText Text leaf recurses
+        // as a child, so assert the label is present (not the whole multi-line dump).
+        XCTAssertTrue(canvas.describe().contains("Canvas(ops:3)"), canvas.describe())
     }
     #endif
 
@@ -809,4 +893,64 @@ final class PatchRenderTests: XCTestCase {
         XCTAssertEqual(captured[0].1, .array([.int(0), .int(2)]))
         XCTAssertEqual(captured[1].1, .array([.int(0), .int(2)]))
     }
+
+    // MARK: - Design-system TOKENS (v4: ColorRef.hostToken / Modifier.fontToken)
+
+    /// The new token cases round-trip through the JSON wire (the boundary the guest
+    /// emits and the host decodes), including a token nested in an `IRShapeStyle`.
+    func testHostTokenWireRoundTrip() throws {
+        let tree = N.vstack([
+            N.text("a").foregroundColor(.hostToken("ct_1")).fontToken("ft_1"),
+            N.shape(.capsule).fill(.color(.hostToken("ct_2"))),
+            N.text("b").tint(.hostToken("ct_3"))
+        ])
+        let emission = BodyEmission(root: tree, computeCoverage: true,
+                                    schemaVersion: PatchViewIRSchema.version)
+        let bytes = try ViewNodeWire.encode(emission)
+        XCTAssertEqual(try ViewNodeWire.decode(bytes).root, tree,
+                       "host-token color + fontToken survive the wire")
+        // The Foundation-free embedded emitter produces host-decodable bytes too.
+        XCTAssertEqual(try ViewNodeWire.decode(EmbeddedJSON.encode(emission)).root, tree)
+    }
+
+    #if canImport(SwiftUI)
+    /// The renderer applies a HOST-SUPPLIED token color: `color(.hostToken(id))`
+    /// returns the supplied color, and falls back to `.primary` when none is supplied.
+    @MainActor
+    func testRendererAppliesHostTokenColor() {
+        let table = HostTokenTable()
+        table.set("ct_x", .color(.red))
+        let r = Renderer(context: RenderContext(tokens: table))
+        XCTAssertEqual(r.color(.hostToken("ct_x")), Color.red,
+                       "a supplied token color is applied")
+        XCTAssertEqual(r.color(.hostToken("ct_missing")), Color.primary,
+                       "an unsupplied token color falls back to .primary (never wrong brand)")
+    }
+
+    /// The renderer applies a HOST-SUPPLIED token font via the `.fontToken` modifier
+    /// (renders without trapping; the supplied `Font` is opaque so we assert it routes).
+    @MainActor
+    func testRendererAppliesHostTokenFont() {
+        let table = HostTokenTable()
+        table.set("ft_x", .font(.system(size: 28, weight: .heavy)))
+        let r = Renderer(context: RenderContext(tokens: table))
+        XCTAssertNotNil(table.font(for: "ft_x"))
+        XCTAssertNil(table.font(for: "ft_missing"))
+        // The full apply path renders without trapping (supplied + missing both safe).
+        _ = render(N.text("x").fontToken("ft_x"), context: RenderContext(tokens: table))
+        _ = render(N.text("x").fontToken("ft_missing"), context: RenderContext(tokens: table))
+    }
+
+    /// A token nested in a `.fill` style resolves to the supplied color (the
+    /// `IRShapeStyle.color(.hostToken)` path through `renderShapeStyle`).
+    @MainActor
+    func testHostTokenInShapeStyleResolves() {
+        let table = HostTokenTable()
+        table.set("ct_fill", .color(.green))
+        let r = Renderer(context: RenderContext(tokens: table))
+        // Resolving must not trap; the color() path is exercised by renderShapeStyle.
+        _ = r.renderShapeStyle(.color(.hostToken("ct_fill")))
+        XCTAssertEqual(r.color(.hostToken("ct_fill")), Color.green)
+    }
+    #endif
 }

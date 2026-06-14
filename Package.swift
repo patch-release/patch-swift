@@ -30,11 +30,21 @@ let package = Package(
         // The native SwiftUI renderer (`render(_:)` + `PatchView`/`FrontierView`).
         // SwiftUI-only; depends on PatchViewIR.
         .library(name: "PatchRender", targets: ["PatchRender"]),
+        // The native UIKit renderer (`renderUIKit(_:)`). UIKit-only (iOS/tvOS/
+        // visionOS); a no-op on macOS/Linux. Depends on PatchViewIR (which carries
+        // the UIKitNode IR alongside the SwiftUI ViewNode IR).
+        .library(name: "PatchRenderUIKit", targets: ["PatchRenderUIKit"]),
         // The SwiftUI glue that drives a LIVE Patch module's view_body/dispatch
         // exports into the renderer (the on-device interactive loop). Depends on
         // the runtime + IR + renderer; kept separate so SwiftUI stays out of the
         // core PatchSDK module.
-        .library(name: "PatchSwiftUI", targets: ["PatchSwiftUI"])
+        .library(name: "PatchSwiftUI", targets: ["PatchSwiftUI"]),
+        // The UIKit glue that drives a LIVE Patch module's `uikit_configure` export
+        // into the UIKit renderer (the cell-patching host). Parallels PatchSwiftUI:
+        // it calls the guest over the packed-(ptr,len)+JSON ABI, decodes the
+        // `UIKitEmission`, renders it via `renderUIKit`, and installs it into a cell's
+        // `contentView`. Depends on the runtime (PatchSDK) + IR + the UIKit renderer.
+        .library(name: "PatchUIKit", targets: ["PatchUIKit"])
     ],
     dependencies: [
         // Pinned exactly to 0.2.2 — the version proven in poc/wasmkit-ios.
@@ -78,6 +88,17 @@ let package = Package(
         // adds runtime weight on its own.
         .target(
             name: "PatchRender",
+            dependencies: ["PatchViewIR"]
+        ),
+
+        // The native UIKit renderer: `renderUIKit(UIKitNode) -> UIView` + the
+        // slot table / dispatcher / target-action trampoline. UIKit is
+        // `#if canImport(UIKit)`-guarded inside the source, so this target is a
+        // no-op on platforms without UIKit (macOS / Linux) but builds real UIKit
+        // on the iOS/tvOS/visionOS family. Depends only on the IR (no WasmKit),
+        // so it never adds runtime weight on its own. Parallels PatchRender.
+        .target(
+            name: "PatchRenderUIKit",
             dependencies: ["PatchViewIR"]
         ),
 
@@ -129,13 +150,26 @@ let package = Package(
             dependencies: ["PatchSDK", "PatchViewIR", "PatchRender"]
         ),
 
+        // The UIKit glue: wires a LIVE Patch module to the UIKit renderer (calls the
+        // guest's `uikit_configure` over the packed-(ptr,len)+JSON ABI, decodes the
+        // `UIKitEmission`, renders it via `renderUIKit`, installs it into a cell's
+        // `contentView`, and wires control actions). The UIKit analogue of
+        // PatchSwiftUI — kept in its own target so UIKit stays out of the core
+        // PatchSDK module. Depends on the runtime (PatchSDK) + IR + the UIKit renderer.
+        .target(
+            name: "PatchUIKit",
+            dependencies: ["PatchSDK", "PatchViewIR", "PatchRenderUIKit"]
+        ),
+
         .testTarget(
             name: "PatchSDKTests",
             dependencies: [
                 "PatchSDK",
                 "PatchViewIR",
                 "PatchRender",
+                "PatchRenderUIKit",
                 "PatchSwiftUI",
+                "PatchUIKit",
                 .product(name: "WasmKit", package: "WasmKit")
             ],
             resources: [
@@ -177,7 +211,12 @@ let package = Package(
                 // container exporting view_body__Banner + the `patch_view_manifest` the
                 // out-of-the-box view-patching registry reads. Drives the AutoPatch
                 // (thunkBody → manifest → PatchedBodyHost) integration tests.
-                .copy("Fixtures/AutoPatchBanner.wasm")
+                .copy("Fixtures/AutoPatchBanner.wasm"),
+                // Typed UserDefaults get/set round-trip fixture (hand-written; imports
+                // patch_host.defaults_get_double / defaults_set_bool|int|double). Drives
+                // the UserDefaultsTypedBridge round-trip tests for the FusionRewriter's
+                // typed settings-toggle leaves.
+                .copy("Fixtures/UserDefaultsTypedFixture.wasm")
             ]
         )
     ]

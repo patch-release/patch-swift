@@ -273,6 +273,21 @@ public enum N {
     /// `EditButton()` — toggles the SDK-owned EditMode.
     public static var editButton: ViewNode { ViewNode(.editButton) }
 
+    /// `GeometryReader { proxy in <body> }` — the lowered `children` read the
+    /// reserved geo inputs (`__geo_width`/`__geo_height`/`__geo_minX`/`__geo_minY`)
+    /// the SDK host wrapper injects from the live `GeometryProxy`. `id` is a
+    /// content-stable token (the engine derives it from the closure source) so the
+    /// host can re-locate this reader in the re-emitted tree on a size change.
+    public static func geometryReader(id: String, _ children: [ViewNode]) -> ViewNode {
+        ViewNode(.geometryReader(id: id, children: children))
+    }
+
+    /// `Canvas { ctx, size in <draws> }` — `ops` are replayed by a real host
+    /// `Canvas` via the in-binary `GraphicsContext`.
+    public static func canvas(_ ops: [IRDrawOp]) -> ViewNode {
+        ViewNode(.canvas(ops: ops))
+    }
+
     // Native fallback
     public static func opaque(id: String, label: String) -> ViewNode {
         ViewNode(.opaque(id: id, label: label))
@@ -288,6 +303,9 @@ extension ViewNode {
                          design: IRFont.Design? = nil) -> ViewNode {
         with(.font(IRFont(size: size, weight: weight, design: design)))
     }
+    /// `.font(<design-system token>)` — the font value is host-supplied (the thunk's
+    /// `__patchTokens()[id]`), keyed by the content-stable `id` the build emitted.
+    public func fontToken(_ id: String) -> ViewNode { with(.fontToken(id)) }
     public func foregroundColor(_ c: ColorRef) -> ViewNode { with(.foregroundColor(c)) }
     public func foregroundColor(named: String) -> ViewNode { with(.foregroundColor(.named(named))) }
     public func bold() -> ViewNode { with(.bold) }

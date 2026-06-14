@@ -201,6 +201,15 @@ public final class Patch: @unchecked Sendable {
     /// to the first additional instance that does. Empty for a legacy single `.wasm`.
     private var additional: [WASMRuntime] = []
 
+    /// The active resource overlay (Phase 1b) — named color/string/image overrides
+    /// extracted from the patch artifact's outer `POVR` wrapper, mirroring the active
+    /// module set. Set on `activate`/`hotSwap`, restored on rollback, cleared on
+    /// `deactivate`. The on-device redirection (`ResourceOverlayRedirect.shared`) reads
+    /// the same value through its own copy; this field is the SDK's source of truth so
+    /// a hot-swap rollback can restore the PRIOR overlay in lock-step with the module
+    /// set. Guarded by `lock`. Nil when the active artifact carries no overlay.
+    private var _activeOverlay: PatchResourceOverlay.Table?
+
     /// Monotonic counter, incremented under `lock` every time the ACTIVE MODULE SET
     /// changes (activate / hot-swap commit / hot-swap rollback / deactivate). Cheap to
     /// read; the SwiftUI view-patching registry compares it per body evaluation to
@@ -416,6 +425,10 @@ public final class Patch: @unchecked Sendable {
             self.additional.forEach { $0.teardown() }
             self.active = built.primary
             self.additional = built.additional
+            // PHASE 1b: swap the active resource overlay in lock-step with the module
+            // set, so the named-lookup redirection (colors/strings/images) reflects the
+            // newly-active artifact (nil overlay ⇒ no overrides, falls through to bundle).
+            self._activeOverlay = built.overlay
             // Drop the per-pass value cache INSIDE the swap critical section (BUG-9):
             // clearing it after releasing the lock races a concurrent value reader that
             // observed the freshly-swapped `active` but still hits a STALE cache entry
@@ -423,6 +436,9 @@ public final class Patch: @unchecked Sendable {
             valueCache.clear()
             return bumpModuleEpochLocked()
         }
+        // Push the overlay to the process-wide redirection AFTER releasing the lock
+        // (installing the swizzles touches the ObjC runtime; keep it off the lock).
+        ResourceOverlayRedirect.shared.setActiveOverlay(built.overlay)
         notifyModuleSetChanged(epoch)
     }
 
@@ -431,13 +447,32 @@ public final class Patch: @unchecked Sendable {
     /// default-engine module, the rest are additive real-source/SwiftUI instances). Each
     /// gets the SAME WASI config + host-import surface. Any sub-module failing to
     /// instantiate fails the whole activation (atomic — the caller keeps the prior set).
+    ///
+    /// PHASE 1b: the artifact may be wrapped in an outer `POVR` envelope carrying a
+    /// resource overlay (named color/string/image overrides). This strips that wrapper
+    /// FIRST — it returns the decoded overlay table (nil when absent / malformed) and
+    /// instantiates the modules from the INNER bytes, so the WASM path is unchanged. A
+    /// raw `.wasm`/`PMOD` blob (no `POVR` magic) is handled exactly as before.
     private func instantiateModuleSet(bytes: [UInt8]) throws
-        -> (primary: WASMRuntime, additional: [WASMRuntime]) {
+        -> (primary: WASMRuntime, additional: [WASMRuntime], overlay: PatchResourceOverlay.Table?) {
         let cfg = lock.read { configuration }
         let wasi = cfg?.wasiConfig ?? .default
         let hostImports = bridges.hostImports()
 
-        let modules: [[UInt8]] = PatchModuleContainer.decode(bytes) ?? [bytes]
+        // Strip the resource-overlay wrapper (if present) before any WASM decoding.
+        // (The overlay CHUNK is persisted separately by `ModuleStorage.installCurrent`,
+        // which extracts it from the same wrapped bytes; here we only need the decoded
+        // table to drive the live redirection.)
+        var overlay: PatchResourceOverlay.Table?
+        let wasmBytes: [UInt8]
+        if let decoded = PatchOverlayArtifact.decode(bytes) {
+            wasmBytes = decoded.inner
+            overlay = PatchResourceOverlay.decode(decoded.overlay)
+        } else {
+            wasmBytes = bytes
+        }
+
+        let modules: [[UInt8]] = PatchModuleContainer.decode(wasmBytes) ?? [wasmBytes]
         var runtimes: [WASMRuntime] = []
         runtimes.reserveCapacity(modules.count)
         do {
@@ -468,7 +503,7 @@ public final class Patch: @unchecked Sendable {
             runtimes.forEach { $0.teardown() }
             throw error
         }
-        return (primary, Array(runtimes.dropFirst()))
+        return (primary, Array(runtimes.dropFirst()), overlay)
     }
 
     /// Atomically replace the active module with `bytes`, draining in-flight
@@ -501,13 +536,18 @@ public final class Patch: @unchecked Sendable {
 
             // (2) Swap under the write lock, retaining the prior set so we can roll
             // back if the new primary turns out to be unusable. Do NOT tear the prior
-            // ones down yet — they are our rollback target.
-            let prior = lock.write { () -> (WASMRuntime?, [WASMRuntime]) in
-                let p = (self.active, self.additional)
+            // ones down yet — they are our rollback target. The PRIOR overlay is part
+            // of the rollback snapshot too (Phase 1b), so a rollback restores the
+            // named-lookup redirection to exactly what it was before the swap.
+            let prior = lock.write { () -> (WASMRuntime?, [WASMRuntime], PatchResourceOverlay.Table?) in
+                let p = (self.active, self.additional, self._activeOverlay)
                 self.active = built.primary
                 self.additional = built.additional
+                self._activeOverlay = built.overlay
                 return p
             }
+            // Reflect the new overlay in the redirection (outside the lock).
+            ResourceOverlayRedirect.shared.setActiveOverlay(built.overlay)
 
             // (3) Probe the freshly-swapped module set. If ANY module cannot stand up
             // (e.g. an additive PMOD sub-module that instantiated but exports no
@@ -524,8 +564,11 @@ public final class Patch: @unchecked Sendable {
                 let epoch = lock.write { () -> UInt64 in
                     self.active = prior.0
                     self.additional = prior.1
+                    self._activeOverlay = prior.2
                     return bumpModuleEpochLocked()
                 }
+                // Restore the PRIOR overlay in the redirection (clean rollback).
+                ResourceOverlayRedirect.shared.setActiveOverlay(prior.2)
                 notifyModuleSetChanged(epoch)
                 throwing()
             }
@@ -558,9 +601,66 @@ public final class Patch: @unchecked Sendable {
             self.additional.forEach { $0.teardown() }
             self.active = nil
             self.additional = []
+            // PHASE 1b: clear the resource overlay too, so the named-lookup
+            // redirection falls all the way through to the bundle (native behavior).
+            self._activeOverlay = nil
             return bumpModuleEpochLocked()
         }
+        ResourceOverlayRedirect.shared.setActiveOverlay(nil)
         notifyModuleSetChanged(epoch)
+    }
+
+    // MARK: - Resource overlay (Phase 1b) — public lookup + manual activation
+    //
+    // The named-lookup REDIRECTION (UIColor(named:)/UIImage(named:)/NSLocalizedString)
+    // is installed automatically by swizzling when an overlay activates, so colors +
+    // strings are overridden with ZERO dev work. These APIs are the documented FALLBACK
+    // for the cases swizzling can't reach — chiefly SwiftUI's pure-Swift `Color(_:bundle:)`
+    // initializer, which is NOT an `@objc` accessor (on UIKit platforms `Color("name")`
+    // resolves through the swizzled `UIColor(named:)`, but a host can call this directly
+    // to be explicit / platform-independent).
+
+    /// The active resource overlay table, or nil when none is active.
+    public var activeResourceOverlay: PatchResourceOverlay.Table? {
+        lock.read { _activeOverlay }
+    }
+
+    /// Whether a resource overlay is currently active.
+    public var hasResourceOverlay: Bool { lock.read { _activeOverlay != nil } }
+
+    /// Look up an overridden color by name (the overlay's RGBA components, dark variant
+    /// selected by `dark`). Returns nil when there is no override — the caller then uses
+    /// the bundle color. This is the documented fallback for SwiftUI `Color("name")`.
+    public func overlayColor(named name: String, dark: Bool = false) -> (r: Double, g: Double, b: Double, a: Double)? {
+        guard let c = lock.read({ _activeOverlay })?.color(named: name) else { return nil }
+        let v = (dark ? c.dark : nil) ?? c.light
+        return (v.r, v.g, v.b, v.a)
+    }
+
+    /// Look up an overridden localized string, resolved with locale fallback (the
+    /// device's preferred locale → its language prefix → base). Returns nil when there
+    /// is no override (the caller then uses the bundle string). `table` scopes to a
+    /// `.strings` table name (nil/"" = the default table).
+    public func overlayLocalizedString(forKey key: String, table: String? = nil, locale: String? = nil) -> String? {
+        let loc = locale ?? Locale.preferredLanguages.first
+        return lock.read { _activeOverlay }?.string(forKey: key, table: table, locale: loc)
+    }
+
+    /// Look up overridden image bytes by name (inline-kind overrides only). Returns nil
+    /// when there is no inline override. The documented fallback for SwiftUI `Image("name")`.
+    public func overlayImageBytes(named name: String) -> [UInt8]? {
+        guard let img = lock.read({ _activeOverlay })?.image(named: name), img.kind == .inline else { return nil }
+        return img.payload
+    }
+
+    /// Manually activate a resource overlay table (bypassing the patch artifact) —
+    /// installs the named-lookup redirection from `table`, or clears it when nil. The
+    /// normal path is automatic (an overlay rides the patch's `POVR` wrapper and
+    /// activates with the module); this is for tests + advanced hosts that want to set
+    /// an overlay directly. NOTE: this does NOT touch the module set / epoch.
+    public func activateResourceOverlay(_ table: PatchResourceOverlay.Table?) {
+        lock.write { _activeOverlay = (table?.isEmpty == true) ? nil : table }
+        ResourceOverlayRedirect.shared.setActiveOverlay(table)
     }
 
     // MARK: Calling into the active module
@@ -1222,7 +1322,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.1.0"
+    public static let sdkVersion = "1.2.0"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

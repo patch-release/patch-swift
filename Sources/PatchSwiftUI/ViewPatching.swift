@@ -531,16 +531,22 @@ public struct PatchedBodyHost: View {
     /// Native renderers for this view's non-lowerable leaves (mixed views), keyed
     /// by the shipped tree's opaque-slot id. Empty for a fully-lowered view.
     let slots: [String: () -> AnyView]
+    /// Resolved DESIGN-SYSTEM TOKEN values (`Color`/`Font`) for this view's
+    /// `.hostToken(id)`/`.fontToken(id)` modifier values, keyed by the shipped tree's
+    /// token id. Empty for a view that uses no design-system tokens.
+    let tokens: [String: PatchHostToken]
 
     @State private var guestState: String = ""
 
     init(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
-         writebacks: [PatchScalarWriteback], slots: [String: () -> AnyView] = [:]) {
+         writebacks: [PatchScalarWriteback], slots: [String: () -> AnyView] = [:],
+         tokens: [String: PatchHostToken] = [:]) {
         self.typeName = typeName
         self.entry = entry
         self.propsJSON = propsJSON
         self.writebacks = writebacks
         self.slots = slots
+        self.tokens = tokens
     }
 
     public var body: some View {
@@ -572,9 +578,42 @@ public struct PatchedBodyHost: View {
             return AnyView(EmptyView())
         }
 
+        // DESIGN-SYSTEM TOKEN SAFETY NET: every `.hostToken(id)` color / `.fontToken(id)`
+        // font in the tree must have a resolved value from the thunk's `__patchTokens()`.
+        // If a patch introduced a token id the installed build doesn't supply (it changed
+        // native token code that isn't compiled in), we can't resolve it — DEMOTE the whole
+        // view rather than render a wrong/placeholder color. A patch that only re-arranges
+        // the lowered structure keeps the same token ids, so this never trips for ordinary
+        // text/layout/color-reselect edits among the build's enumerated tokens.
+        let neededTokenIDs = Self.collectTokenIDs(tree)
+        let uncoveredTokens = neededTokenIDs.filter { tokens[$0] == nil }
+        if !uncoveredTokens.isEmpty {
+            let name = typeName
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name) }
+            return AnyView(EmptyView())
+        }
+
         var context = RenderContext(showOpaqueStubs: false)
         // Fill the renderer's opaque table with the native leaf renderers.
         for id in neededIDs { if let make = slots[id] { context.opaques.set(id, make()) } }
+        // Fill the renderer's token table with the resolved design-system token values.
+        for id in neededTokenIDs { if let tok = tokens[id] { context.tokens.set(id, tok) } }
+        // GeometryReader (C): wire a rebuild closure so a `geometryReader` node re-
+        // evaluates its lowered child body against the LIVE proxy. On each layout the
+        // host merges the proxy's size/frame as reserved `__geo_*` inputs into the
+        // current state, re-invokes `view_body`, and returns THIS reader's children
+        // (matched by id) from the re-emitted tree. A rebuild failure returns nil and
+        // the renderer falls back to the statically-lowered children (demote-safe).
+        let geoExport = entry.export
+        let geoState = merged
+        context.geometryRebuild = GeometryRebuild { gid, w, h, minX, minY in
+            let geoJSON = "{\"__geo_width\":\(Self.numJSON(w)),\"__geo_height\":\(Self.numJSON(h)),"
+                + "\"__geo_minX\":\(Self.numJSON(minX)),\"__geo_minY\":\(Self.numJSON(minY))}"
+            let withGeo = PatchFlatJSON.merge(base: geoState, override: geoJSON)
+            guard let reTree = try? Patch.shared.viewBody(state: withGeo, export: geoExport),
+                  let children = Self.geometryChildren(in: reTree, id: gid) else { return nil }
+            return children
+        }
         if let dispatchExport = entry.dispatch {
             let stateBinding = $guestState
             let props = propsJSON
@@ -665,6 +704,60 @@ public struct PatchedBodyHost: View {
         walk(node)
         return out
     }
+
+    /// Every DESIGN-SYSTEM TOKEN id in the tree (`ColorRef.hostToken(id)` colors and
+    /// `Modifier.fontToken(id)` fonts, including a token nested in an `IRShapeStyle.color`
+    /// of a `.fill`/`.background(style)`/`.foregroundStyle`/`.stroke`/etc.). The thunk's
+    /// `__patchTokens()` must supply each — an uncovered id demotes the whole view (like
+    /// an opaque leaf). Walks node modifiers + modifier content + child nodes.
+    nonisolated static func collectTokenIDs(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func add(_ c: ColorRef) { if case .hostToken(let id) = c { out.append(id) } }
+        func add(_ s: IRShapeStyle) { if case .color(let c) = s { add(c) } }
+        func add(_ m: Modifier) {
+            switch m {
+            case .fontToken(let id): out.append(id)
+            case .foregroundColor(let c), .background(let c), .tint(let c): add(c)
+            case .accentColor(let c?): add(c)
+            case .shadow(let c?, _, _, _): add(c)
+            case .foregroundStyle(let layers): for s in layers { add(s) }
+            case .backgroundStyle(let s, _), .tintStyle(let s),
+                 .fill(let s, _), .stroke(let s, _), .strokeBorder(let s, _),
+                 .border(let s, _), .overlayStyle(let s, _): add(s)
+            default: break
+            }
+        }
+        func walk(_ n: ViewNode) {
+            for m in n.modifiers { add(m); for child in m.contentNodes { walk(child) } }
+            for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Find the `geometryReader` node with `id` in a re-emitted tree and return its
+    /// children (used by the GeometryReader rebuild closure). Walks `childNodes` AND
+    /// modifier content so a reader nested in a sheet/overlay body is still found.
+    nonisolated static func geometryChildren(in node: ViewNode, id: String) -> [ViewNode]? {
+        if case .geometryReader(let nid, let children) = node.kind, nid == id { return children }
+        for child in node.childNodes {
+            if let found = geometryChildren(in: child, id: id) { return found }
+        }
+        for m in node.modifiers {
+            for child in m.contentNodes {
+                if let found = geometryChildren(in: child, id: id) { return found }
+            }
+        }
+        return nil
+    }
+
+    /// A flat-JSON number fragment (integral doubles print as ints — matching the
+    /// guest's `_patchScanInt`/`_patchScanDouble` tolerance).
+    nonisolated static func numJSON(_ d: Double) -> String {
+        guard d.isFinite else { return "0" }
+        if d == d.rounded() && abs(d) < 1e15 { return String(Int(d)) }
+        return String(d)
+    }
 }
 
 // MARK: - The thunk entry point
@@ -679,11 +772,19 @@ extension Patch {
     /// for it. Each closure renders one leaf (a custom child view, an unsupported
     /// construct) keyed by the content-stable id the shipped tree carries.
     ///
+    /// `tokens` is a provider of resolved DESIGN-SYSTEM TOKEN values (`Color`/`Font`
+    /// for `Theme.Colors.ink` / `Theme.Font.body(…)`), keyed by the content-stable id
+    /// the tree carries in `.hostToken(id)`/`.fontToken(id)`. Like `slots`, it's invoked
+    /// only when routing. Defaulted so pre-existing generated thunks (which don't pass
+    /// it) keep compiling and behave exactly as before (no tokens → a token-using view
+    /// simply isn't routable, same as today).
+    ///
     /// Steady-state cost when NOT patched: a configuration check, an Observation
     /// read, an epoch compare and a dictionary lookup.
     @MainActor
     public func thunkBody(typeName: String, instance: Any,
-                          slots: () -> [String: () -> AnyView] = { [:] }) -> PatchedBodyHost? {
+                          slots: () -> [String: () -> AnyView] = { [:] },
+                          tokens: () -> [String: PatchHostToken] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return nil
@@ -692,7 +793,8 @@ extension Patch {
         return PatchedBodyHost(typeName: typeName, entry: entry,
                                propsJSON: extraction.json,
                                writebacks: extraction.writebacks,
-                               slots: slots())
+                               slots: slots(),
+                               tokens: tokens())
     }
 }
 #endif

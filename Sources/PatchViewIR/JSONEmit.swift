@@ -596,6 +596,19 @@ public enum EmbeddedJSON {
             }
         case .editButton:
             stringCase(&out, "editButton")
+        case .geometryReader(let id, let children):
+            singleAssoc(&out, "geometryReader") { o in
+                o.object { ob in
+                    ob.field("id") { $0.string(id) }
+                    ob.field("children") { v in v.array { ar in for c in children { ar.element { emitNode(c, into: &$0) } } } }
+                }
+            }
+        case .canvas(let ops):
+            singleAssoc(&out, "canvas") { o in
+                o.object { ob in
+                    ob.field("ops") { v in v.array { ar in for op in ops { ar.element { emitDrawOp(op, into: &$0) } } } }
+                }
+            }
         case .opaque(let id, let label):
             singleAssoc(&out, "opaque") { o in
                 o.object { ob in
@@ -606,10 +619,44 @@ public enum EmbeddedJSON {
         }
     }
 
+    /// `IRDrawOp` — Swift's synthesized enum Codable: a single-key object per case
+    /// whose value is an object of the case's labeled payload.
+    static func emitDrawOp(_ op: IRDrawOp, into out: inout JSONOut) {
+        switch op {
+        case .fillPath(let commands, let style):
+            singleAssoc(&out, "fillPath") { o in
+                o.object { ob in
+                    ob.field("commands") { v in v.array { ar in for c in commands { ar.element { emitPathCommand(c, into: &$0) } } } }
+                    ob.field("style") { emitShapeStyle(style, into: &$0) }
+                }
+            }
+        case .strokePath(let commands, let style, let lineWidth):
+            singleAssoc(&out, "strokePath") { o in
+                o.object { ob in
+                    ob.field("commands") { v in v.array { ar in for c in commands { ar.element { emitPathCommand(c, into: &$0) } } } }
+                    ob.field("style") { emitShapeStyle(style, into: &$0) }
+                    ob.field("lineWidth") { $0.number(lineWidth) }
+                }
+            }
+        case .drawText(let text, let x, let y, let anchor):
+            singleAssoc(&out, "drawText") { o in
+                o.object { ob in
+                    ob.field("text") { v in v.array { ar in for c in text { ar.element { emitNode(c, into: &$0) } } } }
+                    ob.field("x") { $0.number(x) }
+                    ob.field("y") { $0.number(y) }
+                    ob.field("anchor") { $0.string(anchor) }
+                }
+            }
+        }
+    }
+
     static func emitModifier(_ m: Modifier, into out: inout JSONOut) {
         switch m {
         case .font(let f):
             singleAssoc(&out, "font") { $0.object { $0.field("_0") { emitFont(f, into: &$0) } } }
+        case .fontToken(let id):
+            // Matches the host's synthesized Codable shape `{"fontToken":{"_0":id}}`.
+            singleAssoc(&out, "fontToken") { $0.object { $0.field("_0") { $0.string(id) } } }
         case .foregroundColor(let c):
             singleAssoc(&out, "foregroundColor") { $0.object { $0.field("_0") { emitColor(c, into: &$0) } } }
         case .bold: stringCase(&out, "bold")
@@ -1171,6 +1218,9 @@ public enum EmbeddedJSON {
                     } }
                 }
             }
+        case .hostToken(let id):
+            // Matches the host's synthesized Codable shape `{"hostToken":{"_0":id}}`.
+            singleAssoc(&out, "hostToken") { $0.object { $0.field("_0") { $0.string(id) } } }
         }
     }
 

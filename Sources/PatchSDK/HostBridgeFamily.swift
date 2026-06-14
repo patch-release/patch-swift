@@ -166,13 +166,32 @@ public struct ProcessInfoEnvBridge: Bridge {
     }
 }
 
-// MARK: - UserDefaultsTypedBridge (bool/int, flat patch_host shapes)
+// MARK: - UserDefaultsTypedBridge (typed get/set, flat patch_host shapes)
 //
-// The String `defaults_get` lives on `UserDefaultsBridge` (module `patch`). The
-// FusionRewriter additionally rewrites `bool(forKey:)` / `integer(forKey:)`, which
-// need typed shapes under the flat `patch_host` namespace:
-//   `defaults_get_bool(key,len) -> i32` tri-state (1 true, 0 false, -1 absent) ·
-//   `defaults_get_int(key,len)  -> i64` (0 if absent, matching integer(forKey:)).
+// The String `defaults_get`/`defaults_set` live on `UserDefaultsBridge` (module
+// `patch`). The FusionRewriter additionally rewrites the TYPED accessors —
+// `bool/integer/double(forKey:)` and `set(<bool|int|double>, forKey:)` — which
+// need flat scalar shapes under the `patch_host` namespace (the String forms
+// can't carry a typed value losslessly: a Bool stored as the literal "true" would
+// re-read wrong, so each scalar type gets its own host fn).
+//
+// ## Bridge boundary (what these serve / deliberately omit)
+//   GET: `defaults_get_bool(key,len) -> i32` tri-state (1 true, 0 false, -1 absent;
+//        absent collapses to `false` in the shim, matching `bool(forKey:)`) ·
+//        `defaults_get_int(key,len) -> i64` (0 if absent, like `integer(forKey:)`) ·
+//        `defaults_get_double(key,len) -> i64` (the Double's BIT PATTERN in an i64;
+//        0.0 if absent, like `double(forKey:)` — the guest reinterprets the bits).
+//   SET: `defaults_set_bool(key,len, i32)` · `defaults_set_int(key,len, i64)` ·
+//        `defaults_set_double(key,len, i64-bits)` — fire-and-forget, no result.
+//
+// NOT served (stay native / demote — no SAFE single-type value bridge):
+//   * `object(forKey:)` / `set(_:forKey:)` of an arbitrary `Any?` (array/dict/Data/
+//     custom plist) — the value has no fixed scalar shape to marshal, so a function
+//     using it is left native (the registry's `UserDefaults` .bridgeable tier still
+//     lets the WHOLE function run as a `bridged` native call; only the in-WASM
+//     lowering of THIS call is declined). `Data`/`[String]` round-trips would need a
+//     bespoke serializer — out of scope, kept honest.
+//   * `register(defaults:)`, `removePersistentDomain`, KVO observation — native.
 public struct UserDefaultsTypedBridge: Bridge {
     public let module = "patch_host"
     private let defaults: UserDefaults
@@ -193,6 +212,35 @@ public struct UserDefaultsTypedBridge: Bridge {
             let ctx = BridgeContext(caller: caller)
             let key = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
             return [.i64(UInt64(bitPattern: Int64(defaults.integer(forKey: key))))]
+        }
+        // double(forKey:) — return the Double's bit-pattern in an i64 (the same
+        // bits-in-an-i64 convention `FoundationBridge`/`json_get_f64` use; WASM
+        // host fns have no f64-result shape in this ABI). Absent → 0.0 (bits 0),
+        // matching `UserDefaults.double(forKey:)`.
+        imports.host(module, "defaults_get_double", [.i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let key = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            return [.i64(defaults.double(forKey: key).bitPattern)]
+        }
+        // Typed setters (fire-and-forget). A Bool is the i32 arg (1/0); an Int is the
+        // i64 arg; a Double is its bit-pattern in the i64 arg.
+        imports.host(module, "defaults_set_bool", [.i32, .i32, .i32], [], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let key = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            defaults.set(args[2].i32 != 0, forKey: key)
+            return []
+        }
+        imports.host(module, "defaults_set_int", [.i32, .i32, .i64], [], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let key = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            defaults.set(Int(Int64(bitPattern: args[2].i64)), forKey: key)
+            return []
+        }
+        imports.host(module, "defaults_set_double", [.i32, .i32, .i64], [], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let key = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            defaults.set(Double(bitPattern: args[2].i64), forKey: key)
+            return []
         }
     }
 }

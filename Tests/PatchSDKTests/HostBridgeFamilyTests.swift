@@ -206,6 +206,70 @@ final class HostBridgeFamilyTests: XCTestCase {
         XCTAssertEqual(try rt.invoke("call_defaults_int", [.i32(zp), .i32(zl)])[0].i64, 0)
     }
 
+    // MARK: - Typed UserDefaults get/set (double + bool/int/double set): WASM round trip
+    //
+    // The settings-toggle workhorse the FusionRewriter lowers: `set(<bool|int|double>,
+    // forKey:)` + `double(forKey:)`. Driven through `UserDefaultsTypedFixture.wasm`
+    // (imports the five patch_host typed fns, exports call_* trampolines), so each is
+    // the executing-WASM round trip: guest calls the bridge → SDK host performs the real
+    // UserDefaults set/get → re-readable from the SAME isolated suite.
+
+    private func typedFixtureBytes() throws -> [UInt8] {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "UserDefaultsTypedFixture", withExtension: "wasm"))
+        return [UInt8](try Data(contentsOf: url))
+    }
+
+    func testUserDefaultsTypedSetGetRoundTrip() throws {
+        let suite = "com.patch.bridge.typedset.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Only the typed bridge needs overriding; the fixture imports nothing else.
+        let registry = BridgeRegistry().registerDefaults()
+        registry.register(UserDefaultsTypedBridge(defaults: defaults))   // override default
+        let rt = try WASMRuntime(bytes: try typedFixtureBytes(), hostImports: registry.hostImports())
+
+        // set(true, forKey: "loud") → re-read the REAL bool from the suite.
+        let (bp, bl) = try writeString("loud", into: rt)
+        _ = try rt.invoke("call_set_bool", [.i32(bp), .i32(bl), .i32(1)])
+        XCTAssertEqual(defaults.bool(forKey: "loud"), true, "guest set the real UserDefaults bool")
+        // set(false, ...) flips it.
+        _ = try rt.invoke("call_set_bool", [.i32(bp), .i32(bl), .i32(0)])
+        XCTAssertEqual(defaults.bool(forKey: "loud"), false)
+
+        // set(7, forKey: "count").
+        let (ip, il) = try writeString("count", into: rt)
+        _ = try rt.invoke("call_set_int", [.i32(ip), .i32(il), .i64(UInt64(bitPattern: 7))])
+        XCTAssertEqual(defaults.integer(forKey: "count"), 7)
+        // A negative int round-trips through the i64 bit-pattern.
+        _ = try rt.invoke("call_set_int", [.i32(ip), .i32(il), .i64(UInt64(bitPattern: -42))])
+        XCTAssertEqual(defaults.integer(forKey: "count"), -42)
+
+        // set(0.75, forKey: "volume") via the Double bit-pattern.
+        let (dp, dl) = try writeString("volume", into: rt)
+        _ = try rt.invoke("call_set_double", [.i32(dp), .i32(dl), .i64(Double(0.75).bitPattern)])
+        XCTAssertEqual(defaults.double(forKey: "volume"), 0.75, accuracy: 1e-12)
+
+        // double(forKey: "volume") → the guest reads back the SAME 0.75 (as bits).
+        let bits = try rt.invoke("call_get_double", [.i32(dp), .i32(dl)])[0].i64
+        XCTAssertEqual(Double(bitPattern: bits), 0.75, accuracy: 1e-12,
+                       "guest read the real UserDefaults double through the bridge")
+
+        // Absent double → 0.0 (bits 0), matching UserDefaults.double(forKey:).
+        let (np, nl) = try writeString("never.set.double", into: rt)
+        XCTAssertEqual(try rt.invoke("call_get_double", [.i32(np), .i32(nl)])[0].i64, 0)
+    }
+
+    /// A guest importing the typed fns instantiates cleanly against `registerDefaults()`
+    /// — proving the (extended) UserDefaultsTypedBridge SERVES every typed import the
+    /// engine now emits (WasmKit rejects any unsatisfied import).
+    func testTypedUserDefaultsImportsServedByDefaults() throws {
+        let registry = BridgeRegistry().registerDefaults()
+        XCTAssertNoThrow(
+            try WASMRuntime(bytes: try typedFixtureBytes(), hostImports: registry.hostImports()),
+            "registerDefaults() must serve the typed UserDefaults get/set imports")
+    }
+
     // MARK: - Import parity (the audit spot-check)
 
     /// The flat `patch_host` import names the engine's FusionRewriter family emits.
@@ -217,6 +281,10 @@ final class HostBridgeFamilyTests: XCTestCase {
         "bundle_info_string", "bundle_resource_path",
         "process_env", "os_version",
         "defaults_get_bool", "defaults_get_int",
+        // Typed UserDefaults get/set: Double get + Bool/Int/Double setters. Served by
+        // the (extended) UserDefaultsTypedBridge. The String get/set are module
+        // "patch" (UserDefaultsBridge), not patch_host, so they are not in this set.
+        "defaults_get_double", "defaults_set_bool", "defaults_set_int", "defaults_set_double",
         // Breakthrough #6 networking (async) — same patch_host namespace. v1 emits
         // ONLY http_get (data(for:)/http_request deferred — URLRequest absent in the
         // WASM-SDK guest Foundation). The SDK still SERVES http_request (superset is

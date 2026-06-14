@@ -58,8 +58,14 @@ public enum PatchViewIRSchema {
     /// guests; the bump gates a newer guest against an older host. NOTE: `.button`
     /// gained a `role` field — a pre-v3 host can't decode a v3 button, which is why
     /// the schema gate refuses a v3 guest on an older host (correct: it would mis-route).
+    /// v4 = DESIGN-SYSTEM TOKENS: `ColorRef.hostToken(id)` (a custom color token —
+    /// `Theme.Colors.ink` — supplied natively by the build-time thunk, applied to
+    /// `foregroundStyle`/`background`/`tint`/`fill`/`stroke`/`shadow`) and the
+    /// `Modifier.fontToken(id)` case (a custom `Font` token — `Theme.Font.body(...)`).
+    /// Purely additive: a v4 host decodes v1/v2/v3 guests (older trees never carry the
+    /// new cases); the bump gates a newer guest against an older host.
 
-    public static let version = 3
+    public static let version = 4
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

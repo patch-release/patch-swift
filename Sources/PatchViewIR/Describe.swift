@@ -108,6 +108,8 @@ extension ViewNode {
         case .boundTabView(let sel, let kind, let tabs, let style, let e):
             return "TabView(selection:\(sel.label),kind:\(kind.rawValue),tabs:\(tabs.count),style:\(style.rawValue),event:#\(e.id))"
         case .editButton: return "EditButton"
+        case .geometryReader(let id, let c): return "GeometryReader(#\(id),children:\(c.count))"
+        case .canvas(let ops): return "Canvas(ops:\(ops.count))"
         case .opaque(let id, let label): return "Opaque(#\(id),\(label))"
         }
     }
@@ -123,6 +125,7 @@ extension Modifier {
             if let w = f.weight { parts.append(w.rawValue) }
             if let d = f.design { parts.append(d.rawValue) }
             return ".font(\(parts.joined(separator: ",")))"
+        case .fontToken(let id): return ".fontToken(\(id))"
         case .foregroundColor(let c): return ".fg(\(c.label))"
         case .bold: return ".bold"
         case .italic: return ".italic"
@@ -317,6 +320,7 @@ extension ColorRef {
         switch self {
         case .named(let n): return n
         case .rgba(let c): return "rgba(\(c.r),\(c.g),\(c.b),\(c.a))"
+        case .hostToken(let id): return "token(\(id))"
         }
     }
 }

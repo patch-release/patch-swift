@@ -43,6 +43,38 @@ public final class OpaqueTable {
     public func view(for id: String) -> AnyView? { views[id] }
 }
 
+/// A DESIGN-SYSTEM TOKEN value the host app supplies for a `.hostToken(id)` color
+/// or `.fontToken(id)` font in the lowered tree. The build-time thunk evaluates the
+/// real token expression (`Theme.Colors.ink`, `Theme.Font.body(13, weight: .semibold)`)
+/// NATIVELY → one of these, keyed by the content-stable id. So a token-using modifier
+/// rides WASM (patchable) while its concrete VALUE comes from the compiled-in app.
+/// A `Color` is resolved data; a `Font` is opaque (no introspectable descriptor), so
+/// it's carried as the live `Font` the renderer applies directly.
+public enum PatchHostToken: Sendable {
+    case color(Color)
+    case font(Font)
+}
+
+/// Maps a token id to its host-supplied `Color`/`Font`. Filled by `PatchedBodyHost`
+/// from the thunk's `__patchTokens()` before rendering, then read by the renderer
+/// when it hits a `.hostToken(id)` color or a `.fontToken(id)` modifier. A missing
+/// id is demote-handled upstream (PatchedBodyHost refuses to render a tree whose
+/// token id the thunk didn't cover), so the renderer's fallbacks here are belt-and-
+/// suspenders (`.primary` / no font change) rather than the primary safety net.
+public final class HostTokenTable {
+    private var tokens: [String: PatchHostToken] = [:]
+    public init() {}
+    public func set(_ id: String, _ token: PatchHostToken) { tokens[id] = token }
+    public func color(for id: String) -> Color? {
+        if case .color(let c)? = tokens[id] { return c }
+        return nil
+    }
+    public func font(for id: String) -> Font? {
+        if case .font(let f)? = tokens[id] { return f }
+        return nil
+    }
+}
+
 /// The sink an interactive control's binding fires when the user changes it:
 /// it carries the `EventID` (which UPDATE branch in the guest runs) and the new
 /// `IRValue`. The host forwards this to the guest's `dispatch` export, the guest
@@ -56,23 +88,52 @@ public final class Dispatcher {
     public func send(_ event: EventID, _ value: IRValue) { sink(event, value) }
 }
 
+/// Re-evaluate a `geometryReader` node's lowered child body against a LIVE
+/// `GeometryProxy`. Given the reader's content-stable `id` and the proxy's
+/// `size`/`frame(in:.local)` scalars, the host re-invokes the guest's `view_body`
+/// with those values merged as reserved `__geo_*` inputs and returns the children
+/// of the SAME `geometryReader` node in the re-emitted tree (matched by `id`).
+/// Returns nil when the rebuild can't run (no live module / decode failure) — the
+/// renderer then falls back to the statically-lowered children. `PatchedBodyHost`
+/// supplies this; a bare `render(_:)` leaves it nil.
+@MainActor
+public struct GeometryRebuild {
+    public typealias Resolve = @MainActor (_ id: String, _ width: Double, _ height: Double,
+                                           _ minX: Double, _ minY: Double) -> [ViewNode]?
+    let resolve: Resolve
+    public init(_ resolve: @escaping Resolve) { self.resolve = resolve }
+    func callAsFunction(_ id: String, _ w: Double, _ h: Double, _ x: Double, _ y: Double) -> [ViewNode]? {
+        resolve(id, w, h, x, y)
+    }
+}
+
 public struct RenderContext {
     public var actions: ActionTable
     public var opaques: OpaqueTable
+    /// Host-supplied DESIGN-SYSTEM TOKEN values (`.hostToken(id)` colors,
+    /// `.fontToken(id)` fonts) the thunk resolved from the app's compiled-in tokens.
+    public var tokens: HostTokenTable
     /// Where interactive controls send their events (the host forwards to the
     /// guest `dispatch`). When nil, controls render but are inert (read-only).
     public var dispatcher: Dispatcher?
     /// When true, an unregistered opaque slot renders a visible debug stub
     /// (instead of `EmptyView`), which is what the tests assert against.
     public var showOpaqueStubs: Bool
+    /// Re-evaluates a `geometryReader`'s child body against the live proxy (see
+    /// `GeometryRebuild`). When nil, a `geometryReader` renders its static children.
+    public var geometryRebuild: GeometryRebuild?
     public init(actions: ActionTable = ActionTable(),
                 opaques: OpaqueTable = OpaqueTable(),
+                tokens: HostTokenTable = HostTokenTable(),
                 dispatcher: Dispatcher? = nil,
-                showOpaqueStubs: Bool = true) {
+                showOpaqueStubs: Bool = true,
+                geometryRebuild: GeometryRebuild? = nil) {
         self.actions = actions
         self.opaques = opaques
+        self.tokens = tokens
         self.dispatcher = dispatcher
         self.showOpaqueStubs = showOpaqueStubs
+        self.geometryRebuild = geometryRebuild
     }
 }
 
@@ -740,6 +801,23 @@ struct Renderer {
             return AnyView(EmptyView())
             #endif
 
+        case .geometryReader(let id, let children):
+            // A REAL `GeometryReader { proxy in … }`. The wrapper injects the live
+            // proxy's size/frame as reserved `__geo_*` inputs and re-evaluates the
+            // lowered child body on each size change (via `context.geometryRebuild`);
+            // when no rebuild closure is wired (e.g. a direct `render(_:)`), it renders
+            // the statically-lowered `children` (correct for their emit-time size).
+            return AnyView(GeometryReaderHost(
+                id: id, staticChildren: children,
+                rebuild: context.geometryRebuild,
+                renderChildren: { self.renderChildren($0) }))
+
+        case .canvas(let ops):
+            // A REAL `Canvas` replaying the serialized draw ops via the in-binary
+            // `GraphicsContext` (no native draw code). `Canvas` is iOS 15+/macOS 12+/
+            // tvOS 15+/watchOS 8+; degrade to EmptyView where unavailable.
+            return canvasView(ops)
+
         case .opaque(let id, let label):
             if let v = context.opaques.view(for: id) { return v }
             if context.showOpaqueStubs {
@@ -765,6 +843,12 @@ struct Renderer {
         switch m {
         case .font(let f):
             return AnyView(v.font(font(f)))
+        case .fontToken(let id):
+            // A design-system font token: apply the host-supplied `Font` from the
+            // thunk's `__patchTokens()`. If none was supplied (PatchedBodyHost would
+            // normally have demoted), leave the inherited font — never a wrong font.
+            if let f = context.tokens.font(for: id) { return AnyView(v.font(f)) }
+            return v
         case .foregroundColor(let c):
             return AnyView(v.foregroundColor(color(c)))
         case .bold:
@@ -1243,6 +1327,12 @@ struct Renderer {
         switch ref {
         case .named(let name): return Renderer.systemColor(name)
         case .rgba(let c): return Color(.sRGB, red: c.r, green: c.g, blue: c.b, opacity: c.a)
+        case .hostToken(let id):
+            // A design-system color token: the value comes from the app's compiled-in
+            // token via the thunk's `__patchTokens()`. Fall back to `.primary` if the
+            // host supplied none for this id (PatchedBodyHost normally demotes the whole
+            // view in that case, so this is belt-and-suspenders, never a wrong brand color).
+            return context.tokens.color(for: id) ?? .primary
         }
     }
 
@@ -2360,6 +2450,115 @@ struct Renderer {
         return (0, 0, 0, 1)
         #endif
     }
+
+    // MARK: - Canvas (C) — replay serialized draw ops via a real GraphicsContext
+
+    /// A REAL `Canvas` replaying `[IRDrawOp]` with the in-binary `GraphicsContext`.
+    /// `Canvas` is iOS 15+/macOS 12+/tvOS 15+/watchOS 8+; degrade to `EmptyView`
+    /// where unavailable (a Canvas can't be approximated, so a no-op is honest).
+    func canvasView(_ ops: [IRDrawOp]) -> AnyView {
+        if #available(iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1, *) {
+            // The `drawText` ops resolve a Text leaf; we pre-render each op's Text to a
+            // real `Text` value so the GraphicsContext can resolve it. Capturing the
+            // ops keeps the Canvas closure `Sendable`-clean.
+            return AnyView(Canvas { ctx, size in
+                Self.replayCanvas(ops, into: &ctx, size: size)
+            })
+        }
+        return AnyView(EmptyView())
+    }
+
+    /// Replay the draw ops into a live `GraphicsContext`. Each op carries concrete
+    /// scalar geometry the guest computed, so this is a faithful, native-code-free
+    /// replay. A `drawText` op resolves its lowered Text leaf to a real `Text`.
+    @available(iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1, *)
+    static func replayCanvas(_ ops: [IRDrawOp], into ctx: inout GraphicsContext, size: CGSize) {
+        let r = Renderer(context: RenderContext(showOpaqueStubs: false))
+        for op in ops {
+            switch op {
+            case .fillPath(let commands, let style):
+                ctx.fill(r.buildPath(commands), with: r.canvasShading(style))
+            case .strokePath(let commands, let style, let lineWidth):
+                ctx.stroke(r.buildPath(commands), with: r.canvasShading(style),
+                           lineWidth: CGFloat(lineWidth))
+            case .drawText(let textNodes, let x, let y, let anchor):
+                let text = r.resolveTextLeaf(textNodes)
+                let resolved = ctx.resolve(text)
+                ctx.draw(resolved, at: CGPoint(x: x, y: y), anchor: r.canvasAnchor(anchor))
+            }
+        }
+    }
+
+    /// Map an `IRShapeStyle` to a `GraphicsContext.Shading`. A color/gradient/material
+    /// resolves; anything else falls back to the foreground (never traps).
+    @available(iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1, *)
+    func canvasShading(_ s: IRShapeStyle) -> GraphicsContext.Shading {
+        switch s {
+        case .color(let c):
+            return .color(color(c))
+        case .linearGradient(let g, let sp, let ep):
+            return .linearGradient(gradientValue(g), startPoint: cgPoint(sp, in: CGSize(width: 1, height: 1)),
+                                   endPoint: cgPoint(ep, in: CGSize(width: 1, height: 1)))
+        default:
+            // Materials / hierarchical / semantic styles aren't `Shading` cases;
+            // resolve to the style's nearest color (foreground) so the draw is faithful
+            // enough and never traps.
+            return .style(renderShapeStyle(s))
+        }
+    }
+
+    /// A `Gradient` from an `IRGradient` (Canvas shadings take `Gradient`, not the
+    /// `LinearGradient` view).
+    func gradientValue(_ g: IRGradient) -> Gradient {
+        Gradient(stops: g.stops.map { Gradient.Stop(color: color($0.color), location: CGFloat($0.location)) })
+    }
+
+    /// A unit point mapped into a concrete CGPoint within `size` (Canvas gradients
+    /// take absolute points, not UnitPoints).
+    private func cgPoint(_ p: IRUnitPoint, in size: CGSize) -> CGPoint {
+        let u = unitPointValue(p)
+        return CGPoint(x: u.x * size.width, y: u.y * size.height)
+    }
+
+    /// Resolve a lowered Text-leaf subtree (a `text`/`styledText` node + its
+    /// font/color modifiers) into a real `Text` for `ctx.draw`. A non-Text leaf
+    /// degrades to an empty `Text` (the op renders nothing rather than trapping).
+    func resolveTextLeaf(_ nodes: [ViewNode]) -> Text {
+        guard let node = nodes.first else { return Text("") }
+        var text: Text
+        switch node.kind {
+        case .text(let s): text = Text(s)
+        case .styledText(let s, let v, let m, let l):
+            text = styledText(s, verbatim: v, markdown: m, localized: l)
+        default: text = Text("")
+        }
+        // Apply the Text-level modifiers the leaf carried (font/color/bold/italic).
+        for mod in node.modifiers {
+            switch mod {
+            case .font(let f): text = text.font(font(f))
+            case .foregroundColor(let c): text = text.foregroundColor(color(c))
+            case .bold: text = text.bold()
+            case .italic: text = text.italic()
+            default: break
+            }
+        }
+        return text
+    }
+
+    /// A named UnitPoint anchor for `ctx.draw(_:at:anchor:)` (default `.center`).
+    func canvasAnchor(_ s: String) -> UnitPoint {
+        switch s {
+        case "topLeading": return .topLeading
+        case "top": return .top
+        case "topTrailing": return .topTrailing
+        case "leading": return .leading
+        case "trailing": return .trailing
+        case "bottomLeading": return .bottomLeading
+        case "bottom": return .bottom
+        case "bottomTrailing": return .bottomTrailing
+        default: return .center
+        }
+    }
 }
 
 // MARK: - Host-state wrapper Views (own real SwiftUI state the Renderer can't)
@@ -2448,4 +2647,30 @@ struct NavStackPathHost: View {
     }
 }
 #endif
+
+/// Owns a REAL `GeometryReader { proxy in … }` and re-evaluates the lowered child
+/// body against the live proxy. On each layout pass the proxy's `size` /
+/// `frame(in:.local)` are passed to `rebuild` (which re-invokes the guest's
+/// `view_body` with those values merged as reserved `__geo_*` inputs and returns
+/// THIS reader's children from the re-emitted tree); the children render through
+/// `renderChildren`. When `rebuild` is nil or returns nil (no live module / decode
+/// failure), the statically-lowered `staticChildren` render — so a bare
+/// `render(_:)` (and any rebuild failure) degrades to the emit-time layout, never a
+/// hole. `GeometryReader` is available on every SwiftUI platform.
+@MainActor
+struct GeometryReaderHost: View {
+    let id: String
+    let staticChildren: [ViewNode]
+    let rebuild: GeometryRebuild?
+    let renderChildren: ([ViewNode]) -> AnyView
+
+    var body: some View {
+        GeometryReader { proxy in
+            let frame = proxy.frame(in: .local)
+            let fresh = rebuild?(id, Double(proxy.size.width), Double(proxy.size.height),
+                                 Double(frame.minX), Double(frame.minY))
+            renderChildren(fresh ?? staticChildren)
+        }
+    }
+}
 #endif

@@ -141,5 +141,20 @@ final class AutoPatchIntegrationTests: XCTestCase {
         XCTAssertFalse(opaqueIDs.isEmpty, "expected opaque leaves for Card()/Color(red:)")
         XCTAssertTrue(opaqueIDs.allSatisfy { $0.hasPrefix("op_") }, "leaf ids: \(opaqueIDs)")
     }
+
+    /// `PatchedBodyHost.collectTokenIDs` finds EVERY design-system token id in a tree —
+    /// a `.hostToken` color directly on a modifier, a `.fontToken`, and a token nested
+    /// in an `IRShapeStyle.color` of a `.fill`. These are the ids the thunk's
+    /// `__patchTokens()` must cover (an uncovered one demotes the whole view).
+    func testCollectTokenIDsFindsColorAndFontTokens() throws {
+        let tree = N.vstack([
+            N.text("a").foregroundColor(.hostToken("ct_fg")).fontToken("ft_a"),
+            N.shape(.capsule).fill(.color(.hostToken("ct_fill"))),
+            N.text("b").background(.hostToken("ct_bg")).tint(.hostToken("ct_tint"))
+        ])
+        let ids = Set(PatchedBodyHost.collectTokenIDs(tree))
+        XCTAssertEqual(ids, ["ct_fg", "ft_a", "ct_fill", "ct_bg", "ct_tint"],
+                       "every color + font token id (incl. nested-in-fill) must be collected")
+    }
 }
 #endif

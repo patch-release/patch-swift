@@ -97,6 +97,46 @@ final class BridgeTests: XCTestCase {
         XCTAssertEqual(res2[0].i64, 0)
     }
 
+    // MARK: - NotificationCenter bridge (post fires a real observer)
+
+    /// The FusionRewriter lowers `NotificationCenter.default.post(name:object:nil)` to
+    /// `patch.notify_post`. Drive that host fn through the fixture and assert a REAL
+    /// observer on the (isolated) center fires with the exact name the guest passed.
+    func testNotificationCenterPostFiresObserver() throws {
+        let center = NotificationCenter()   // isolated — not .default, so no cross-talk
+        let rt = try makeRuntime(overrides: [NotificationCenterBridge(center: center)])
+
+        let fired = NotifyBox()
+        let token = center.addObserver(forName: Notification.Name("patch.didUpdate"),
+                                       object: nil, queue: nil) { note in
+            fired.record(note.name.rawValue)
+        }
+        defer { center.removeObserver(token) }
+
+        // Guest posts the name through patch.notify_post.
+        let (p, l) = try writeString("patch.didUpdate", into: rt)
+        _ = try rt.invoke("call_notify", [.i32(p), .i32(l)])
+
+        XCTAssertEqual(fired.names, ["patch.didUpdate"],
+                       "the posted notification must fire the observer with the guest's name")
+    }
+
+    /// A name the observer does NOT watch must not fire it (the bridge posts the exact
+    /// guest name, no aliasing).
+    func testNotificationCenterPostDoesNotFireUnrelatedObserver() throws {
+        let center = NotificationCenter()
+        let rt = try makeRuntime(overrides: [NotificationCenterBridge(center: center)])
+
+        let fired = NotifyBox()
+        let token = center.addObserver(forName: Notification.Name("some.other.name"),
+                                       object: nil, queue: nil) { _ in fired.record("X") }
+        defer { center.removeObserver(token) }
+
+        let (p, l) = try writeString("patch.didUpdate", into: rt)
+        _ = try rt.invoke("call_notify", [.i32(p), .i32(l)])
+        XCTAssertTrue(fired.names.isEmpty, "an unrelated observer must not fire")
+    }
+
     // MARK: - JSON bridge (canonicalize via host Foundation)
 
     func testJSONBridgeCanonicalizes() throws {
@@ -371,4 +411,12 @@ private final class KVBox: @unchecked Sendable {
     private var d: [String: [UInt8]] = [:]
     func set(_ k: String, _ v: [UInt8]) { lock.lock(); d[k] = v; lock.unlock() }
     func get(_ k: String) -> [UInt8]? { lock.lock(); defer { lock.unlock() }; return d[k] }
+}
+
+/// Thread-safe recorder for notification names an observer fired with.
+private final class NotifyBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _names: [String] = []
+    func record(_ name: String) { lock.lock(); _names.append(name); lock.unlock() }
+    var names: [String] { lock.lock(); defer { lock.unlock() }; return _names }
 }
