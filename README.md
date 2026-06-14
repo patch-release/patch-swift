@@ -1,13 +1,36 @@
 # Patch Swift SDK
 
-**Patch** ships over-the-air updates to native iOS and macOS apps. You write
-Swift; Patch compiles the changed code to a tiny WebAssembly module and delivers
-it to devices without an App Store release. This package is the **on-device
-runtime**: it downloads, verifies, caches, and executes those modules safely,
-with an always-correct fallback to your shipped app if anything goes wrong.
+> **Over-the-air (OTA) code updates for native Swift iOS apps** — write normal
+> Swift, ship a fix in minutes, no App Store review, instant rollback.
 
-> **Docs:** full guides and the API reference live at
-> **[docs.patchrelease.com](https://docs.patchrelease.com)**.
+[![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](https://swift.org)
+[![Platforms](https://img.shields.io/badge/platforms-iOS%2016%2B%20%C2%B7%20macOS%2014%2B%20%C2%B7%20tvOS%2016%2B%20%C2%B7%20visionOS%201%2B-blue.svg)](https://developer.apple.com)
+[![SwiftPM compatible](https://img.shields.io/badge/SwiftPM-compatible-brightgreen.svg)](https://swift.org/package-manager)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**Patch** ships over-the-air updates to native iOS and macOS apps. You write
+Swift; the Patch CLI compiles the changed code to a tiny WebAssembly module and
+delivers it to devices without an App Store release. This package is the
+**on-device runtime**: it downloads, verifies, caches, and executes those
+modules safely, with an always-correct fallback to your shipped app if anything
+goes wrong.
+
+**Yes — this updates *native* Swift.** It's a common misconception that native
+iOS code can't be updated over the air. CodePush and Expo / EAS Update update a
+React Native **JavaScript** bundle; [Shorebird](https://patchrelease.com/shorebird-alternative)
+updates a Flutter **Dart** bundle — none of them can touch native Swift. Patch
+is built for exactly that: covered Swift logic, async/await, and SwiftUI views
+ship as WebAssembly and run on-device in
+[WasmKit](https://github.com/swiftwasm/WasmKit) — no JavaScript bridge, no Dart,
+no web view, no cross-platform framework. OS-API code stays native
+automatically, with a fallback to your bundled binary so an update can't break
+the app. The model is permitted under Apple's Developer Program License
+Agreement §3.3.2 (downloaded interpreted code — the same provision CodePush and
+Expo rely on), and your signed binary is never modified.
+
+- **Website:** [patchrelease.com](https://patchrelease.com)
+- **Docs & API reference:** [docs.patchrelease.com](https://docs.patchrelease.com)
+- **Install the CLI:** `brew install patch-release/tap/patchcli`
 
 ---
 
