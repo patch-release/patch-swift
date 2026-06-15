@@ -703,6 +703,10 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "tint") { $0.object { $0.field("_0") { emitColor(c, into: &$0) } } }
         case .clipShape(let s):
             singleAssoc(&out, "clipShape") { $0.object { $0.field("_0") { emitShape(s, into: &$0) } } }
+        case .trim(let from, let to):
+            singleAssoc(&out, "trim") { o in
+                o.object { ob in ob.field("from") { $0.number(from) }; ob.field("to") { $0.number(to) } }
+            }
         case .disabled(let b):
             singleAssoc(&out, "disabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
         case .fixedSize:
@@ -835,6 +839,26 @@ public enum EmbeddedJSON {
                     ob.field("alignment") { v in if let a { v.string(a.rawValue) } else { v.null() } }
                 }
             }
+        case .allowsHitTesting(let b):
+            singleAssoc(&out, "allowsHitTesting") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .scrollClipDisabled(let b):
+            singleAssoc(&out, "scrollClipDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .scrollContentBackground(let vis):
+            singleAssoc(&out, "scrollContentBackground") { $0.object { $0.field("_0") { $0.string(vis) } } }
+        case .listRowSeparator(let vis, let edges):
+            singleAssoc(&out, "listRowSeparator") { o in
+                o.object { ob in ob.field("_0") { $0.string(vis) }; ob.field("edges") { $0.string(edges) } }
+            }
+        case .listRowBackground(let content):
+            singleAssoc(&out, "listRowBackground") { o in
+                o.object { ob in ob.field("_0") { v in v.array { ar in for n in content { ar.element { emitNode(n, into: &$0) } } } } }
+            }
+        case .listRowInsets(let i):
+            singleAssoc(&out, "listRowInsets") { $0.object { $0.field("_0") { emitInsets(i, into: &$0) } } }
+        case .listSectionSeparator(let vis, let edges):
+            singleAssoc(&out, "listSectionSeparator") { o in
+                o.object { ob in ob.field("_0") { $0.string(vis) }; ob.field("edges") { $0.string(edges) } }
+            }
 
         // MARK: Transforms & visual effects
         case .rotationEffect(let d, let anchor):
@@ -960,6 +984,10 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "buttonBorderShape") { $0.object { $0.field("_0") { $0.string(s) } } }
         case .controlSize(let s):
             singleAssoc(&out, "controlSize") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .tabViewStyle(let s):
+            singleAssoc(&out, "tabViewStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .indexViewStyle(let s):
+            singleAssoc(&out, "indexViewStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
         case .keyboardType(let s):
             singleAssoc(&out, "keyboardType") { $0.object { $0.field("_0") { $0.string(s) } } }
         case .textContentType(let s):
@@ -1116,6 +1144,34 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "navigationBarTitleDisplayMode") { $0.object { $0.field("_0") { $0.string(m) } } }
         case .navigationBarBackButtonHidden(let h):
             singleAssoc(&out, "navigationBarBackButtonHidden") { $0.object { $0.field("_0") { $0.bool(h) } } }
+        case .presentationDetents(let detents):
+            singleAssoc(&out, "presentationDetents") { o in
+                o.object { ob in ob.field("_0") { v in v.array { ar in for d in detents { ar.element { $0.string(d) } } } } }
+            }
+        case .presentationDragIndicator(let vis):
+            singleAssoc(&out, "presentationDragIndicator") { $0.object { $0.field("_0") { $0.string(vis) } } }
+        case .navigationBarTitle(let title, let mode):
+            singleAssoc(&out, "navigationBarTitle") { o in
+                o.object { ob in ob.field("_0") { $0.string(title) }; ob.field("displayMode") { $0.string(mode) } }
+            }
+        case .navigationViewStyle(let s):
+            singleAssoc(&out, "navigationViewStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .environmentValue(let key, let value):
+            singleAssoc(&out, "environmentValue") { o in
+                o.object { ob in ob.field("key") { $0.string(key) }; ob.field("value") { $0.string(value) } }
+            }
+        case .accessibilityLabel(let s):
+            singleAssoc(&out, "accessibilityLabel") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilityHint(let s):
+            singleAssoc(&out, "accessibilityHint") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilityValue(let s):
+            singleAssoc(&out, "accessibilityValue") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilityHidden(let b):
+            singleAssoc(&out, "accessibilityHidden") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .accessibilityAddTraits(let s):
+            singleAssoc(&out, "accessibilityAddTraits") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilityRemoveTraits(let s):
+            singleAssoc(&out, "accessibilityRemoveTraits") { $0.object { $0.field("_0") { $0.string(s) } } }
         case .searchable(let key, let query, let prompt, let event):
             singleAssoc(&out, "searchable") { o in
                 o.object { ob in
@@ -1138,6 +1194,51 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "onDelete") { $0.object { $0.field("_0") { emitEvent(e, into: &$0) } } }
         case .onMove(let e):
             singleAssoc(&out, "onMove") { $0.object { $0.field("_0") { emitEvent(e, into: &$0) } } }
+
+        // MARK: Scroll & layout (sweep — added at END)
+        case .scrollDisabled(let b):
+            singleAssoc(&out, "scrollDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .scrollIndicators(let vis, let axes):
+            singleAssoc(&out, "scrollIndicators") { o in
+                o.object { ob in ob.field("_0") { $0.string(vis) }; ob.field("axes") { $0.string(axes) } }
+            }
+        case .scrollTargetBehavior(let b):
+            singleAssoc(&out, "scrollTargetBehavior") { $0.object { $0.field("_0") { $0.string(b) } } }
+        case .scrollTargetLayout(let b):
+            singleAssoc(&out, "scrollTargetLayout") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .scrollBounceBehavior(let b, let axes):
+            singleAssoc(&out, "scrollBounceBehavior") { o in
+                o.object { ob in ob.field("_0") { $0.string(b) }; ob.field("axes") { $0.string(axes) } }
+            }
+        case .contentMargins(let edges, let length, let placement):
+            singleAssoc(&out, "contentMargins") { o in
+                o.object { ob in
+                    ob.field("edges") { $0.string(edges) }
+                    ob.field("length") { $0.number(length) }
+                    ob.field("placement") { $0.string(placement) }
+                }
+            }
+        case .safeAreaPadding(let edges, let length, let insets):
+            singleAssoc(&out, "safeAreaPadding") { o in
+                o.object { ob in
+                    ob.field("edges") { $0.string(edges) }
+                    ob.field("length") { v in if let length { v.number(length) } else { v.null() } }
+                    ob.field("insets") { v in if let insets { emitInsets(insets, into: &v) } else { v.null() } }
+                }
+            }
+        // Additional control styles (styles-views wave) — String payload.
+        case .textFieldStyle(let s):
+            singleAssoc(&out, "textFieldStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .datePickerStyle(let s):
+            singleAssoc(&out, "datePickerStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .groupBoxStyle(let s):
+            singleAssoc(&out, "groupBoxStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .controlGroupStyle(let s):
+            singleAssoc(&out, "controlGroupStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .disclosureGroupStyle(let s):
+            singleAssoc(&out, "disclosureGroupStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .tableStyle(let s):
+            singleAssoc(&out, "tableStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
 
         case .opaque(let s):
             singleAssoc(&out, "opaque") { $0.object { $0.field("_0") { $0.string(s) } } }

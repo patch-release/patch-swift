@@ -487,6 +487,11 @@ public enum Modifier: Equatable, Sendable {
     /// `.clipShape(shape)` — clips the view to a `ShapeKind` (Circle/Capsule/
     /// RoundedRectangle/Rectangle/Ellipse). The host rebuilds the concrete Shape.
     case clipShape(ShapeKind)
+    /// `Shape.trim(from:to:)` — trims a Shape to the `[from, to]` fraction of its
+    /// path (the progress-ring idiom: `Circle().trim(from: 0, to: progress)`). The
+    /// `from`/`to` are guest-computed Doubles (so a `progress` input drives it). Only
+    /// meaningful on a Shape node; on a non-Shape view the renderer ignores it.
+    case trim(from: Double, to: Double)
     /// `.disabled(Bool)` from a BOOL LITERAL (`true`/`false`). A non-literal
     /// `.disabled(expr)` stays native (slotted) — only the literal lowers.
     case disabled(Bool)
@@ -558,6 +563,26 @@ public enum Modifier: Equatable, Sendable {
     case zIndex(Double)
     /// `.containerRelativeFrame(_:alignment:)` — axes ("horizontal"|"vertical"|"all").
     case containerRelativeFrame(axes: String, alignment: IRAlignment?)
+    /// `.allowsHitTesting(_:)` from a BOOL LITERAL — whether the view participates
+    /// in hit testing (an overlay gradient often disables it). A non-literal
+    /// `.allowsHitTesting(expr)` slots (only the literal lowers).
+    case allowsHitTesting(Bool)
+    /// `.scrollClipDisabled(_:)` — disable a scroll view's content clipping (bool
+    /// literal; the no-arg form defaults to `true`).
+    case scrollClipDisabled(Bool)
+    /// `.scrollContentBackground(_:)` — Visibility ("automatic"|"hidden"|"visible")
+    /// of a scrollable container's (List/Form/TextEditor) background.
+    case scrollContentBackground(String)
+    /// `.listRowSeparator(_:edges:)` — Visibility ("automatic"|"hidden"|"visible")
+    /// of a List row's separator. `edges` is the Edge.Set ("all"|"top"|"bottom").
+    case listRowSeparator(String, edges: String)
+    /// `.listRowBackground(view)` — a List row's background view (a lowered subtree;
+    /// a non-lowerable backing becomes an opaque leaf inside it).
+    case listRowBackground([ViewNode])
+    /// `.listRowInsets(EdgeInsets)` — a List row's content insets.
+    case listRowInsets(IREdgeInsets)
+    /// `.listSectionSeparator(_:edges:)` — Visibility of a List section's separator.
+    case listSectionSeparator(String, edges: String)
 
     // MARK: Transforms & visual effects
 
@@ -638,6 +663,8 @@ public enum Modifier: Equatable, Sendable {
     case menuStyle(String)               // "automatic"|"button"|"borderlessButton"
     case buttonBorderShape(String)       // "automatic"|"capsule"|"roundedRectangle"|"circle"
     case controlSize(String)             // "mini"|"small"|"regular"|"large"|"extraLarge"
+    case tabViewStyle(String)            // "automatic"|"page"|"page.always"|"page.never"
+    case indexViewStyle(String)          // "page"|"page.always"|"page.never"
     case keyboardType(String)
     case textContentType(String)
     case autocorrectionDisabled(Bool)
@@ -731,6 +758,40 @@ public enum Modifier: Equatable, Sendable {
     case navigationBarTitleDisplayMode(String)
     /// `.navigationBarBackButtonHidden(_:)` (bool literal).
     case navigationBarBackButtonHidden(Bool)
+    /// `.presentationDetents([.medium, .large, .fraction(0.5), .height(200)])`. Each
+    /// detent is encoded as a string: "medium" | "large" | "fraction:<n>" |
+    /// "height:<n>". A `Set`-bound selection form (`selection:`) is NOT modeled
+    /// (the detents alone ride; the array form is the dominant idiom).
+    case presentationDetents([String])
+    /// `.presentationDragIndicator(_:)` — Visibility ("automatic"|"hidden"|"visible").
+    case presentationDragIndicator(String)
+    /// `.navigationBarTitle(_, displayMode:)` (legacy/deprecated nav title API) — the
+    /// title string + a display mode ("automatic"|"inline"|"large").
+    case navigationBarTitle(String, displayMode: String)
+    /// `.navigationViewStyle(_:)` — "automatic"|"stack"|"columns".
+    case navigationViewStyle(String)
+    /// `.environment(\.<key>, <value>)` for a small set of reconstructable
+    /// environment keys: `layoutDirection` ("leftToRight"|"rightToLeft"),
+    /// `colorScheme` ("light"|"dark"), `locale` (a BCP-47 identifier string). The
+    /// renderer applies the real per-key `.environment(...)`. An unrecognized key or
+    /// non-literal value slots (the modifier stays native).
+    case environmentValue(key: String, value: String)
+
+    // MARK: Accessibility (G8)
+
+    /// `.accessibilityLabel(_:)` — a string-literal label.
+    case accessibilityLabel(String)
+    /// `.accessibilityHint(_:)` — a string-literal hint.
+    case accessibilityHint(String)
+    /// `.accessibilityValue(_:)` — a string-literal value.
+    case accessibilityValue(String)
+    /// `.accessibilityHidden(_:)` — a bool literal.
+    case accessibilityHidden(Bool)
+    /// `.accessibilityAddTraits(_:)` — one or more trait names (`isButton`,
+    /// `isHeader`, `isSelected`, `isImage`, etc.) joined with "+".
+    case accessibilityAddTraits(String)
+    /// `.accessibilityRemoveTraits(_:)` — trait names joined with "+".
+    case accessibilityRemoveTraits(String)
 
     // MARK: Host-state — search / focus (B.2 / B.1)
 
@@ -754,6 +815,55 @@ public enum Modifier: Equatable, Sendable {
     /// `.array([.int])` = `[from₀, from₁, …, to]` (the source offsets then the
     /// destination); the guest reorders its array.
     case onMove(EventID)
+
+    // MARK: Scroll & layout (sweep — scroll/layout modifiers, added at END)
+    //
+    // These reapply as the real SwiftUI scroll/layout modifiers on-device; each
+    // carries pure data (a bool literal, a visibility/axes/behavior name string,
+    // or numeric lengths) so it is faithfully reconstructable. The OS-version
+    // floor is enforced in the renderer (older OS → no-op, faithful). A form the
+    // emitter can't reduce to this data slots instead (demote-safe).
+
+    /// `.scrollDisabled(_:)` (iOS 16+) — a bool literal disabling scrolling.
+    case scrollDisabled(Bool)
+    /// `.scrollIndicators(_:axes:)` (iOS 16+) — visibility ("automatic"|"visible"|
+    /// "hidden"|"never") + axes ("horizontal"|"vertical"|"all").
+    case scrollIndicators(String, axes: String)
+    /// `.scrollTargetBehavior(_:)` (iOS 17+) — "viewAligned" | "paging".
+    case scrollTargetBehavior(String)
+    /// `.scrollTargetLayout(isEnabled:)` (iOS 17+) — a bool literal.
+    case scrollTargetLayout(Bool)
+    /// `.scrollBounceBehavior(_:axes:)` (iOS 16.4+) — behavior ("automatic"|
+    /// "always"|"basedOnSize") + axes ("horizontal"|"vertical"|"all").
+    case scrollBounceBehavior(String, axes: String)
+    /// `.contentMargins([edges,] length[, for:])` (iOS 17+) — edges
+    /// ("all"|"top"|...|"horizontal"|"vertical"), a numeric length, and a
+    /// placement ("automatic"|"scrollContent"|"scrollIndicators").
+    case contentMargins(edges: String, length: Double, placement: String)
+    /// `.safeAreaPadding(_:)` / `.safeAreaPadding(_:_:)` (iOS 17+) — edges
+    /// ("all"|"top"|...|"horizontal"|"vertical") + an OPTIONAL numeric length
+    /// (nil = the system default). An `EdgeInsets` form lowers via `insets`.
+    case safeAreaPadding(edges: String, length: Double?, insets: IREdgeInsets?)
+    // MARK: Control config — additional built-in styles (styles-views wave)
+    //
+    // Each carries the built-in named style as a String (parallel to
+    // `pickerStyle`/`toggleStyle`/`gaugeStyle`). A custom style STRUCT is a call,
+    // not a `.case`, so the engine slots it (the modifier stays native) — the
+    // honest boundary. The renderer applies the real SwiftUI style; an
+    // unavailable static degrades to no-op.
+
+    /// `.textFieldStyle(_:)` — "automatic"|"plain"|"roundedBorder".
+    case textFieldStyle(String)
+    /// `.datePickerStyle(_:)` — "automatic"|"compact"|"graphical"|"wheel"|"field"|"stepperField".
+    case datePickerStyle(String)
+    /// `.groupBoxStyle(_:)` — "automatic" (the only built-in named style).
+    case groupBoxStyle(String)
+    /// `.controlGroupStyle(_:)` — "automatic"|"navigation"|"compactMenu"|"menu"|"palette".
+    case controlGroupStyle(String)
+    /// `.disclosureGroupStyle(_:)` — "automatic" (the only built-in named style).
+    case disclosureGroupStyle(String)
+    /// `.tableStyle(_:)` — "automatic"|"inset"|"bordered".
+    case tableStyle(String)
 
     /// A modifier we recognized syntactically but cannot lower (e.g.
     /// a continuous custom `.gesture(...)`, an arbitrary `.modifier(...)`).

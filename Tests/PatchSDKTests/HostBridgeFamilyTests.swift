@@ -285,6 +285,11 @@ final class HostBridgeFamilyTests: XCTestCase {
         // the (extended) UserDefaultsTypedBridge. The String get/set are module
         // "patch" (UserDefaultsBridge), not patch_host, so they are not in this set.
         "defaults_get_double", "defaults_set_bool", "defaults_set_int", "defaults_set_double",
+        // Foundation VALUE bridges (date math / ISO8601). `now_unix_millis` (the
+        // shell's real clock for Date().timeIntervalSince*) + iso8601_format/_parse
+        // (fixed-format ISO8601 string<->date). All served by FoundationBridge under
+        // the patch_host namespace.
+        "now_unix_millis", "iso8601_format", "iso8601_parse",
         // Breakthrough #6 networking (async) — same patch_host namespace. v1 emits
         // ONLY http_get (data(for:)/http_request deferred — URLRequest absent in the
         // WASM-SDK guest Foundation). The SDK still SERVES http_request (superset is

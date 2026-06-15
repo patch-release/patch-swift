@@ -317,6 +317,30 @@ final class BridgeTests: XCTestCase {
                        "2021-01-01")
     }
 
+    /// `iso8601_format` — fixed-format, locale-independent UTC internet-date-time.
+    func testISO8601FormatBridge() {
+        // 2021-01-01T00:00:00Z = 1_609_459_200_000 ms.
+        XCTAssertEqual(FoundationBridge.iso8601Format(unixMillis: 1_609_459_200_000),
+                       "2021-01-01T00:00:00Z")
+    }
+
+    /// `iso8601_parse` — round-trips a valid ISO8601 string to Unix millis; an
+    /// unparseable string returns the INT64_MIN nil sentinel.
+    func testISO8601ParseBridge() {
+        XCTAssertEqual(FoundationBridge.iso8601Parse("2021-01-01T00:00:00Z"), 1_609_459_200_000)
+        XCTAssertEqual(FoundationBridge.iso8601Parse("not a date"), FoundationBridge.iso8601ParseNil)
+        XCTAssertEqual(FoundationBridge.iso8601Parse(""), FoundationBridge.iso8601ParseNil)
+    }
+
+    /// ISO8601 format<->parse is an exact value round-trip (the property the fusion
+    /// `ISO8601DateFormatter().string(from:)`/`.date(from:)` bridges rely on).
+    func testISO8601FormatParseRoundTrip() {
+        for ms in [Int64(0), 1_609_459_200_000, 1_700_000_000_000] {
+            let s = FoundationBridge.iso8601Format(unixMillis: ms)
+            XCTAssertEqual(FoundationBridge.iso8601Parse(s), ms, "round-trip failed for \(ms) (\(s))")
+        }
+    }
+
     /// `decimal_op` registered as a host import and called from WasmKit through
     /// the FULL bridge path (guest -> patch_host.decimal_op -> real Decimal).
     /// Uses the embedded demo pricing module, asserting it computes $70.95.

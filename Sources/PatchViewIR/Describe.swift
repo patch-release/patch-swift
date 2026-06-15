@@ -145,6 +145,7 @@ extension Modifier {
                 + "minH:\(minH.label),idealH:\(idealH.label),maxH:\(maxH.label),a:\(a?.rawValue ?? "nil"))"
         case .tint(let c): return ".tint(\(c.label))"
         case .clipShape(let s): return ".clipShape(\(s.label))"
+        case .trim(let from, let to): return ".trim(from:\(from),to:\(to))"
         case .disabled(let b): return ".disabled(\(b))"
         case .fixedSize: return ".fixedSize"
 
@@ -182,6 +183,13 @@ extension Modifier {
         case .zIndex(let z): return ".zIndex(\(z))"
         case .containerRelativeFrame(let axes, let a):
             return ".containerRelativeFrame(axes:\(axes),a:\(a?.rawValue ?? "nil"))"
+        case .allowsHitTesting(let b): return ".allowsHitTesting(\(b))"
+        case .scrollClipDisabled(let b): return ".scrollClipDisabled(\(b))"
+        case .scrollContentBackground(let vis): return ".scrollContentBackground(\(vis))"
+        case .listRowSeparator(let vis, let edges): return ".listRowSeparator(\(vis),edges:\(edges))"
+        case .listRowBackground(let c): return ".listRowBackground(\(c.count) nodes)"
+        case .listRowInsets(let i): return ".listRowInsets(t:\(i.top),l:\(i.leading),b:\(i.bottom),tr:\(i.trailing))"
+        case .listSectionSeparator(let vis, let edges): return ".listSectionSeparator(\(vis),edges:\(edges))"
 
         // Transforms & visual effects
         case .rotationEffect(let d, let anchor):
@@ -231,6 +239,8 @@ extension Modifier {
         case .menuStyle(let s): return ".menuStyle(\(s))"
         case .buttonBorderShape(let s): return ".buttonBorderShape(\(s))"
         case .controlSize(let s): return ".controlSize(\(s))"
+        case .tabViewStyle(let s): return ".tabViewStyle(\(s))"
+        case .indexViewStyle(let s): return ".indexViewStyle(\(s))"
         case .keyboardType(let s): return ".keyboardType(\(s))"
         case .textContentType(let s): return ".textContentType(\(s))"
         case .autocorrectionDisabled(let b): return ".autocorrectionDisabled(\(b))"
@@ -277,12 +287,41 @@ extension Modifier {
         case .toolbar(let items): return ".toolbar(items:\(items.count))"
         case .navigationBarTitleDisplayMode(let m): return ".navBarTitleDisplayMode(\(m))"
         case .navigationBarBackButtonHidden(let h): return ".navBarBackButtonHidden(\(h))"
+        case .presentationDetents(let d): return ".presentationDetents(\(d.joined(separator: ",")))"
+        case .presentationDragIndicator(let vis): return ".presentationDragIndicator(\(vis))"
+        case .navigationBarTitle(let t, let m): return ".navigationBarTitle(\(t),mode:\(m))"
+        case .navigationViewStyle(let s): return ".navigationViewStyle(\(s))"
+        case .environmentValue(let k, let v): return ".environment(\\.\(k),\(v))"
+        case .accessibilityLabel(let s): return ".accessibilityLabel(\(s))"
+        case .accessibilityHint(let s): return ".accessibilityHint(\(s))"
+        case .accessibilityValue(let s): return ".accessibilityValue(\(s))"
+        case .accessibilityHidden(let b): return ".accessibilityHidden(\(b))"
+        case .accessibilityAddTraits(let s): return ".accessibilityAddTraits(\(s))"
+        case .accessibilityRemoveTraits(let s): return ".accessibilityRemoveTraits(\(s))"
         case .searchable(let k, let q, let p, let e):
             return ".searchable(key:\(k),query:\"\(q)\",prompt:\(p ?? "nil"),#\(e.id))"
         case .focused(let k, let t, let f, let e):
             return ".focused(key:\(k),equals:\(t),isFocused:\(f),#\(e.id))"
         case .onDelete(let e): return ".onDelete(#\(e.id))"
         case .onMove(let e): return ".onMove(#\(e.id))"
+
+        // Scroll & layout (sweep — added at END)
+        case .scrollDisabled(let b): return ".scrollDisabled(\(b))"
+        case .scrollIndicators(let vis, let axes): return ".scrollIndicators(\(vis),axes:\(axes))"
+        case .scrollTargetBehavior(let b): return ".scrollTargetBehavior(\(b))"
+        case .scrollTargetLayout(let b): return ".scrollTargetLayout(\(b))"
+        case .scrollBounceBehavior(let b, let axes): return ".scrollBounceBehavior(\(b),axes:\(axes))"
+        case .contentMargins(let edges, let length, let placement):
+            return ".contentMargins(edges:\(edges),length:\(length),placement:\(placement))"
+        case .safeAreaPadding(let edges, let length, let insets):
+            return ".safeAreaPadding(edges:\(edges),length:\(length.map { String($0) } ?? "nil"),insets:\(insets.map { "\($0)" } ?? "nil"))"
+        // Additional control styles (styles-views wave).
+        case .textFieldStyle(let s): return ".textFieldStyle(\(s))"
+        case .datePickerStyle(let s): return ".datePickerStyle(\(s))"
+        case .groupBoxStyle(let s): return ".groupBoxStyle(\(s))"
+        case .controlGroupStyle(let s): return ".controlGroupStyle(\(s))"
+        case .disclosureGroupStyle(let s): return ".disclosureGroupStyle(\(s))"
+        case .tableStyle(let s): return ".tableStyle(\(s))"
 
         case .opaque(let s): return ".opaque(\(s))"
         }

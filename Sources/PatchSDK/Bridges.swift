@@ -820,6 +820,45 @@ public struct FoundationBridge: Bridge {
         return f.string(from: Date(timeIntervalSince1970: Double(unixMillis) / 1000.0))
     }
 
+    // MARK: - Foundation VALUE bridges (Date / ISO8601 / NumberFormatter localized)
+    //
+    // These are the "common Foundation value API" bridges the FusionRewriter routes
+    // a real-source call site onto so a function that does date math / ISO8601
+    // string<->date / localized number formatting runs IN WASM at T0 (no in-module
+    // Foundation/ICU) by calling the native shell's real Foundation. Each maps a
+    // SINGLE, unambiguous developer call form to a deterministic host computation.
+    //
+    // FIDELITY DISCIPLINE (the safety bar): a bridge ships ONLY the forms whose
+    // semantics the host reproduces EXACTLY:
+    //   * ISO8601 string<->date is a FIXED, locale-INDEPENDENT, UTC wire format —
+    //     `ISO8601DateFormatter()` default options (`.withInternetDateTime`) — so
+    //     there is no locale/timezone to get wrong. This is the safest date bridge.
+    //   * the device CLOCK (`now_unix_millis`) is the one true host fact; a guest
+    //     `Date()` under the WASM SDK has no real clock, so reading the shell's is
+    //     STRICTLY more correct.
+    //   * localized number formatting passes the developer's EXPLICIT locale through
+    //     to the shell's real ICU (it is never silently defaulted to a wrong locale).
+
+    /// `iso8601_format` — a Unix-millis instant → an ISO 8601 internet-date-time
+    /// string (e.g. `2021-01-01T00:00:00Z`), using `ISO8601DateFormatter()` with its
+    /// DEFAULT options. Locale-independent + UTC — deterministic, no fidelity risk.
+    public static func iso8601Format(unixMillis: Int64) -> String {
+        let f = ISO8601DateFormatter()
+        return f.string(from: Date(timeIntervalSince1970: Double(unixMillis) / 1000.0))
+    }
+
+    /// `iso8601_parse` — an ISO 8601 internet-date-time string → Unix MILLIS, or the
+    /// sentinel `INT64_MIN` when the string does not parse (the guest treats it as
+    /// `nil`, matching `ISO8601DateFormatter().date(from:)` returning `nil`).
+    /// `INT64_MIN` is unreachable as a real instant, so it can never collide with a
+    /// genuine parsed value.
+    public static let iso8601ParseNil: Int64 = .min
+    public static func iso8601Parse(_ string: String) -> Int64 {
+        let f = ISO8601DateFormatter()
+        guard let d = f.date(from: string) else { return Self.iso8601ParseNil }
+        return Int64((d.timeIntervalSince1970 * 1000.0).rounded())
+    }
+
     public func register(into imports: inout Imports, store: Store) {
         // decimal_op(op, a, b, scale) -> i64 — exact base-10 Decimal in the host.
         imports.host(module, "decimal_op", [.i32, .i64, .i64, .i32], [.i64], store: store) { _, args in
@@ -916,6 +955,17 @@ public struct FoundationBridge: Bridge {
             let tz = try ctx.readString(ptr: args[3].i32, len: args[4].i32)
             let s = Self.dateFormat(unixMillis: Int64(bitPattern: args[0].i64), format: fmt, timeZone: tz)
             return [try ctx.packedResult(s)]
+        }
+        // iso8601_format(unixMillis) -> packed string (ISO 8601 internet-date-time, UTC).
+        imports.host(module, "iso8601_format", [.i64], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            return [try ctx.packedResult(Self.iso8601Format(unixMillis: Int64(bitPattern: args[0].i64)))]
+        }
+        // iso8601_parse(str ptr,len) -> i64 Unix MILLIS (INT64_MIN = unparseable/nil).
+        imports.host(module, "iso8601_parse", [.i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            return [.i64(UInt64(bitPattern: Self.iso8601Parse(s)))]
         }
     }
 }

@@ -400,6 +400,22 @@ extension ViewNode {
     public func containerRelativeFrame(axes: String, alignment: IRAlignment? = nil) -> ViewNode {
         with(.containerRelativeFrame(axes: axes, alignment: alignment))
     }
+    public func trim(from: Double, to: Double) -> ViewNode { with(.trim(from: from, to: to)) }
+    public func allowsHitTesting(_ enabled: Bool) -> ViewNode { with(.allowsHitTesting(enabled)) }
+    public func scrollClipDisabled(_ disabled: Bool) -> ViewNode { with(.scrollClipDisabled(disabled)) }
+    public func scrollContentBackground(_ visibility: String) -> ViewNode {
+        with(.scrollContentBackground(visibility))
+    }
+    public func listRowSeparator(_ visibility: String, edges: String = "all") -> ViewNode {
+        with(.listRowSeparator(visibility, edges: edges))
+    }
+    public func listRowBackground(_ content: [ViewNode]) -> ViewNode {
+        with(.listRowBackground(content))
+    }
+    public func listRowInsets(_ insets: IREdgeInsets) -> ViewNode { with(.listRowInsets(insets)) }
+    public func listSectionSeparator(_ visibility: String, edges: String = "all") -> ViewNode {
+        with(.listSectionSeparator(visibility, edges: edges))
+    }
 
     // MARK: Transforms & visual effects
 
@@ -462,6 +478,27 @@ extension ViewNode {
     public func menuStyle(_ s: String) -> ViewNode { with(.menuStyle(s)) }
     public func buttonBorderShape(_ s: String) -> ViewNode { with(.buttonBorderShape(s)) }
     public func controlSize(_ s: String) -> ViewNode { with(.controlSize(s)) }
+    public func presentationDetents(_ detents: [String]) -> ViewNode {
+        with(.presentationDetents(detents))
+    }
+    public func presentationDragIndicator(_ visibility: String) -> ViewNode {
+        with(.presentationDragIndicator(visibility))
+    }
+    public func navigationBarTitle(_ title: String, displayMode: String) -> ViewNode {
+        with(.navigationBarTitle(title, displayMode: displayMode))
+    }
+    public func navigationViewStyle(_ s: String) -> ViewNode { with(.navigationViewStyle(s)) }
+    public func environmentValue(key: String, value: String) -> ViewNode {
+        with(.environmentValue(key: key, value: value))
+    }
+    public func accessibilityLabel(_ s: String) -> ViewNode { with(.accessibilityLabel(s)) }
+    public func accessibilityHint(_ s: String) -> ViewNode { with(.accessibilityHint(s)) }
+    public func accessibilityValue(_ s: String) -> ViewNode { with(.accessibilityValue(s)) }
+    public func accessibilityHidden(_ b: Bool) -> ViewNode { with(.accessibilityHidden(b)) }
+    public func accessibilityAddTraits(_ s: String) -> ViewNode { with(.accessibilityAddTraits(s)) }
+    public func accessibilityRemoveTraits(_ s: String) -> ViewNode { with(.accessibilityRemoveTraits(s)) }
+    public func tabViewStyle(_ s: String) -> ViewNode { with(.tabViewStyle(s)) }
+    public func indexViewStyle(_ s: String) -> ViewNode { with(.indexViewStyle(s)) }
     public func keyboardType(_ s: String) -> ViewNode { with(.keyboardType(s)) }
     public func textContentType(_ s: String) -> ViewNode { with(.textContentType(s)) }
     public func autocorrectionDisabled(_ b: Bool = true) -> ViewNode { with(.autocorrectionDisabled(b)) }
@@ -560,4 +597,34 @@ extension ViewNode {
     }
     public func onDelete(event: String) -> ViewNode { with(.onDelete(EventID(event))) }
     public func onMove(event: String) -> ViewNode { with(.onMove(EventID(event))) }
+
+    // MARK: Scroll & layout (sweep — added at END)
+    public func scrollDisabled(_ disabled: Bool) -> ViewNode { with(.scrollDisabled(disabled)) }
+    public func scrollIndicators(_ visibility: String, axes: String = "all") -> ViewNode {
+        with(.scrollIndicators(visibility, axes: axes))
+    }
+    public func scrollTargetBehavior(_ behavior: String) -> ViewNode {
+        with(.scrollTargetBehavior(behavior))
+    }
+    public func scrollTargetLayout(isEnabled: Bool = true) -> ViewNode {
+        with(.scrollTargetLayout(isEnabled))
+    }
+    public func scrollBounceBehavior(_ behavior: String, axes: String = "vertical") -> ViewNode {
+        with(.scrollBounceBehavior(behavior, axes: axes))
+    }
+    public func contentMargins(edges: String = "all", _ length: Double,
+                               placement: String = "automatic") -> ViewNode {
+        with(.contentMargins(edges: edges, length: length, placement: placement))
+    }
+    public func safeAreaPadding(edges: String = "all", _ length: Double? = nil,
+                                insets: IREdgeInsets? = nil) -> ViewNode {
+        with(.safeAreaPadding(edges: edges, length: length, insets: insets))
+    }
+    // Additional control styles (styles-views wave).
+    public func textFieldStyle(_ s: String) -> ViewNode { with(.textFieldStyle(s)) }
+    public func datePickerStyle(_ s: String) -> ViewNode { with(.datePickerStyle(s)) }
+    public func groupBoxStyle(_ s: String) -> ViewNode { with(.groupBoxStyle(s)) }
+    public func controlGroupStyle(_ s: String) -> ViewNode { with(.controlGroupStyle(s)) }
+    public func disclosureGroupStyle(_ s: String) -> ViewNode { with(.disclosureGroupStyle(s)) }
+    public func tableStyle(_ s: String) -> ViewNode { with(.tableStyle(s)) }
 }

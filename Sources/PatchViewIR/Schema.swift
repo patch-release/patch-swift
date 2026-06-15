@@ -64,8 +64,17 @@ public enum PatchViewIRSchema {
     /// `Modifier.fontToken(id)` case (a custom `Font` token — `Theme.Font.body(...)`).
     /// Purely additive: a v4 host decodes v1/v2/v3 guests (older trees never carry the
     /// new cases); the bump gates a newer guest against an older host.
+    /// v5 = SCROLL & LAYOUT modifiers: the `scrollDisabled`/`scrollIndicators`/
+    /// `scrollTargetBehavior`/`scrollTargetLayout`/`scrollBounceBehavior`/
+    /// `contentMargins`/`safeAreaPadding` `Modifier` cases (the high-value scroll/
+    /// layout modifiers that previously slotted; each carries pure data the renderer
+    /// reapplies as the real SwiftUI modifier, OS-floor-guarded). Purely additive: a
+    /// v5 host decodes v1–v4 guests (older trees never carry the new cases); the bump
+    /// gates a newer guest (one that uses a scroll/layout modifier) against an older
+    /// host that can't decode the new case (it would collapse the whole view, so the
+    /// gate correctly refuses the module → native fallback).
 
-    public static let version = 4
+    public static let version = 5
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

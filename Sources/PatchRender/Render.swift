@@ -50,9 +50,23 @@ public final class OpaqueTable {
 /// rides WASM (patchable) while its concrete VALUE comes from the compiled-in app.
 /// A `Color` is resolved data; a `Font` is opaque (no introspectable descriptor), so
 /// it's carried as the live `Font` the renderer applies directly.
+///
+/// A `number` is a design-system `CGFloat`/`Double` constant (`Theme.Radius.lg`) used
+/// in a NUMERIC position (`.cornerRadius(…)`, `.padding(…)`, `frame`). Unlike a
+/// color/font (applied by the renderer over the tree), a numeric token is consumed
+/// INSIDE the guest body, so `PatchedBodyHost` merges it into the guest's input JSON
+/// under a reserved `__numtok_<id>` key (like a `__geo_*` input) rather than handing it
+/// to the renderer — the body then reads the real token value in WASM.
 public enum PatchHostToken: Sendable {
     case color(Color)
     case font(Font)
+    case number(Double)
+    /// A host-resolved STRING used as `Text(…)` content whose expression isn't
+    /// guest-reconstructable (an enum's computed-String member like `confidence.label`).
+    /// Like a `number`, it's consumed INSIDE the guest body, so `PatchedBodyHost` merges
+    /// it into the guest's input JSON under a reserved `__strtok_<id>` key (not handed to
+    /// the renderer) — the body reads the real String in WASM as the text content.
+    case string(String)
 }
 
 /// Maps a token id to its host-supplied `Color`/`Font`. Filled by `PatchedBodyHost`
@@ -185,17 +199,42 @@ struct Renderer {
     /// UNFILLED stroked outline — `stroke(style:)` (iOS 13+) gives the outline shape and
     /// `foregroundStyle` (iOS 15+) colors it (avoids the iOS-17-only `stroke(_:style:)`).
     /// Returns nil for non-shape nodes or shapes without a stroke modifier.
-    private func strokedShapeIfNeeded(_ node: ViewNode) -> AnyView? {
-        let baseShape: AnyShape
+    /// The concrete `AnyShape` for a `.shape`/`.path` node, with a `.trim(from:to:)`
+    /// modifier applied (the progress-ring idiom). Returns nil for a non-shape node.
+    private func baseShape(for node: ViewNode) -> AnyShape? {
+        var baseShape: AnyShape
         switch node.kind {
         case .shape(let k): baseShape = shapeValue(k)
         case .path(let cmds): baseShape = AnyShape(buildPath(cmds))
         default: return nil
         }
+        // `Shape.trim(from:to:)` — trim the path BEFORE stroke/fill (so a progress
+        // ring's input drives the arc). Trim returns an opaque Shape; re-erase it.
+        for m in node.modifiers {
+            if case .trim(let from, let to) = m {
+                baseShape = AnyShape(baseShape.trim(from: CGFloat(from), to: CGFloat(to)))
+            }
+        }
+        return baseShape
+    }
+
+    private func strokedShapeIfNeeded(_ node: ViewNode) -> AnyView? {
+        guard let baseShape = baseShape(for: node) else { return nil }
         let strokeMod = node.modifiers.first { m in
             if case .stroke = m { return true }; if case .strokeBorder = m { return true }; return false
         }
-        guard let strokeMod else { return nil }
+        // No stroke, but a trim is present + the node IS a shape: render the trimmed
+        // shape (filled by a `.fill`/`.foregroundColor` modifier, or default fill).
+        // Without this a `Circle().trim(...).fill(...)` would lose the trim (the
+        // default fill path rebuilds the UNtrimmed shape from `renderKind`).
+        let hasTrim = node.modifiers.contains { if case .trim = $0 { return true }; return false }
+        guard let strokeMod else {
+            if hasTrim {
+                let rest = node.modifiers.filter { if case .trim = $0 { return false }; return true }
+                return applyModifiers(rest, to: AnyView(baseShape))
+            }
+            return nil
+        }
         let s: IRShapeStyle, st: IRStrokeStyle
         switch strokeMod {
         case .stroke(let style, let stroke), .strokeBorder(let style, let stroke): s = style; st = stroke
@@ -203,7 +242,9 @@ struct Renderer {
         }
         let outline = AnyView(baseShape.stroke(style: strokeStyle(st)).foregroundStyle(renderShapeStyle(s)))
         let rest = node.modifiers.filter { m in
-            if case .stroke = m { return false }; if case .strokeBorder = m { return false }; return true
+            if case .stroke = m { return false }; if case .strokeBorder = m { return false }
+            if case .trim = m { return false }   // already applied to baseShape
+            return true
         }
         return applyModifiers(rest, to: outline)
     }
@@ -899,6 +940,11 @@ struct Renderer {
             return AnyView(v.tint(color(c)))
         case .clipShape(let k):
             return AnyView(v.clipShape(shapeValue(k)))
+        case .trim:
+            // `Shape.trim(from:to:)` is a Shape method, applied to the concrete
+            // `AnyShape` in `baseShape(for:)` (the shape render path). On a
+            // type-erased non-Shape view there's no analogue — faithful no-op.
+            return v
         case .disabled(let b):
             return AnyView(v.disabled(b))
         case .fixedSize:
@@ -969,6 +1015,42 @@ struct Renderer {
                 return AnyView(v.containerRelativeFrame(axisSet(axes), alignment: zalignment(a)))
             }
             return v
+            #endif
+        case .allowsHitTesting(let b):
+            return AnyView(v.allowsHitTesting(b))
+        case .scrollClipDisabled(let b):
+            // `.scrollClipDisabled(_:)` is iOS 17+; older OS → no-op (faithful).
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.scrollClipDisabled(b))
+            }
+            return v
+        case .scrollContentBackground(let vis):
+            // `.scrollContentBackground(_:)` is iOS 16+; older OS → no-op (faithful).
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                return AnyView(v.scrollContentBackground(titleVisibility(vis)))
+            }
+            return v
+        case .listRowSeparator(let vis, let edges):
+            #if os(iOS) || os(macOS) || os(visionOS)
+            if #available(iOS 15, macOS 13, *) {
+                return AnyView(v.listRowSeparator(titleVisibility(vis), edges: verticalEdgeSet(edges)))
+            }
+            return v
+            #else
+            _ = (vis, edges); return v
+            #endif
+        case .listRowBackground(let content):
+            return AnyView(v.listRowBackground(renderChildren(content)))
+        case .listRowInsets(let i):
+            return AnyView(v.listRowInsets(edgeInsets(i)))
+        case .listSectionSeparator(let vis, let edges):
+            #if os(iOS) || os(macOS) || os(visionOS)
+            if #available(iOS 15, macOS 13, *) {
+                return AnyView(v.listSectionSeparator(titleVisibility(vis), edges: verticalEdgeSet(edges)))
+            }
+            return v
+            #else
+            _ = (vis, edges); return v
             #endif
 
         // MARK: Transforms & visual effects
@@ -1086,6 +1168,10 @@ struct Renderer {
             return applyButtonBorderShape(s, to: v)
         case .controlSize(let s):
             return applyControlSize(s, to: v)
+        case .tabViewStyle(let s):
+            return applyTabViewStyle(s, to: v)
+        case .indexViewStyle(let s):
+            return applyIndexViewStyle(s, to: v)
         case .keyboardType(let s):
             #if os(iOS) || os(tvOS) || os(visionOS)
             return AnyView(v.keyboardType(keyboardType(s)))
@@ -1256,9 +1342,53 @@ struct Renderer {
             return AnyView(v.sheet(isPresented: binding) { renderChildren(destination) })
             #endif
 
+        // MARK: Host-state — presentation sizing (B.2)
+        case .presentationDetents(let detents):
+            // `.presentationDetents(_:)` is iOS 16+ / macOS 13+; older OS → no-op.
+            if #available(iOS 16, macOS 13, *) {
+                let set = presentationDetentSet(detents)
+                if !set.isEmpty { return AnyView(v.presentationDetents(set)) }
+            }
+            return v
+        case .presentationDragIndicator(let vis):
+            if #available(iOS 16, macOS 13, *) {
+                return AnyView(v.presentationDragIndicator(titleVisibility(vis)))
+            }
+            return v
+
         // MARK: Host-state — navigation chrome / toolbar (B.2)
         case .toolbar(let items):
             return applyToolbar(items, to: v)
+        case .navigationBarTitle(let title, let mode):
+            // Legacy `.navigationBarTitle(_, displayMode:)` → the modern equivalents.
+            #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            var nv = AnyView(v)
+            if #available(iOS 14, tvOS 14, watchOS 7, *) {
+                nv = AnyView(nv.navigationTitle(title)
+                    .navigationBarTitleDisplayMode(titleDisplayMode(mode)))
+            }
+            return nv
+            #else
+            _ = (title, mode); return v
+            #endif
+        case .navigationViewStyle(let s):
+            return applyNavigationViewStyle(s, to: v)
+        case .environmentValue(let key, let value):
+            return applyEnvironmentValue(key: key, value: value, to: v)
+
+        // MARK: Accessibility (G8)
+        case .accessibilityLabel(let s):
+            return AnyView(v.accessibilityLabel(Text(s)))
+        case .accessibilityHint(let s):
+            return AnyView(v.accessibilityHint(Text(s)))
+        case .accessibilityValue(let s):
+            return AnyView(v.accessibilityValue(Text(s)))
+        case .accessibilityHidden(let b):
+            return AnyView(v.accessibilityHidden(b))
+        case .accessibilityAddTraits(let s):
+            return AnyView(v.accessibilityAddTraits(accessibilityTraits(s)))
+        case .accessibilityRemoveTraits(let s):
+            return AnyView(v.accessibilityRemoveTraits(accessibilityTraits(s)))
         case .navigationBarTitleDisplayMode(let m):
             #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
             return AnyView(v.navigationBarTitleDisplayMode(titleDisplayMode(m)))
@@ -1312,6 +1442,89 @@ struct Renderer {
         // real ForEach is in scope); here they're a faithful no-op so the wire stays
         // intact if one lands on a non-ForEach node.
         case .onDelete, .onMove:
+            return v
+
+        // MARK: Scroll & layout (sweep — added at END). Each enforces its OS floor;
+        // an older OS no-ops faithfully (the modifier had no effect there anyway).
+        case .scrollDisabled(let disabled):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                return AnyView(v.scrollDisabled(disabled))
+            }
+            return v
+        case .scrollIndicators(let vis, let axes):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                return AnyView(v.scrollIndicators(scrollIndicatorVisibility(vis), axes: axisSet(axes)))
+            }
+            return v
+        case .scrollTargetBehavior(let behavior):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(visionOS)
+            if #available(iOS 17, macOS 14, tvOS 17, visionOS 1, *) {
+                switch behavior {
+                case "paging": return AnyView(v.scrollTargetBehavior(.paging))
+                default: return AnyView(v.scrollTargetBehavior(.viewAligned))
+                }
+            }
+            return v
+            #else
+            _ = behavior; return v
+            #endif
+        case .scrollTargetLayout(let enabled):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.scrollTargetLayout(isEnabled: enabled))
+            }
+            return v
+        case .scrollBounceBehavior(let behavior, let axes):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(visionOS) || os(watchOS)
+            if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, visionOS 1, *) {
+                let b: ScrollBounceBehavior
+                switch behavior {
+                case "always": b = .always
+                case "basedOnSize": b = .basedOnSize
+                default: b = .automatic
+                }
+                return AnyView(v.scrollBounceBehavior(b, axes: axisSet(axes)))
+            }
+            return v
+            #else
+            _ = (behavior, axes); return v
+            #endif
+        case .contentMargins(let edges, let length, let placement):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(visionOS) || os(watchOS)
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                let place: ContentMarginPlacement
+                switch placement {
+                case "scrollContent": place = .scrollContent
+                case "scrollIndicators": place = .scrollIndicators
+                default: place = .automatic
+                }
+                return AnyView(v.contentMargins(edgeSet(edges), CGFloat(length), for: place))
+            }
+            return v
+            #else
+            _ = (edges, length, placement); return v
+            #endif
+        case .safeAreaPadding(let edges, let length, let insets):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                if let insets {
+                    return AnyView(v.safeAreaPadding(edgeInsets(insets)))
+                }
+                if let length {
+                    return AnyView(v.safeAreaPadding(edgeSet(edges), CGFloat(length)))
+                }
+                return AnyView(v.safeAreaPadding(edgeSet(edges)))
+            }
+        // MARK: Control config — additional built-in styles (styles-views wave)
+        case .textFieldStyle(let s):
+            return applyTextFieldStyle(s, to: v)
+        case .datePickerStyle(let s):
+            return applyDatePickerStyle(s, to: v)
+        case .controlGroupStyle(let s):
+            return applyControlGroupStyle(s, to: v)
+        case .groupBoxStyle, .disclosureGroupStyle, .tableStyle:
+            // `.groupBoxStyle(.automatic)`/`.disclosureGroupStyle(.automatic)` have no
+            // non-default built-in named static on iOS; `Table` (and `.tableStyle`)
+            // is unavailable on iOS. Carry the intent but degrade to a no-op rather
+            // than risk an unavailable static — the named-style data still rides.
             return v
 
         case .opaque:
@@ -1862,6 +2075,21 @@ struct Renderer {
         return set.isEmpty ? .all : set
     }
 
+    /// `.listRowSeparator`/`.listSectionSeparator` take a `VerticalEdge.Set` (only
+    /// top/bottom). Map our edge string, ignoring horizontal edges (no analogue).
+    func verticalEdgeSet(_ e: String) -> VerticalEdge.Set {
+        var set: VerticalEdge.Set = []
+        for token in e.split(separator: "+") {
+            switch token {
+            case "all", "vertical": return .all
+            case "top": set.insert(.top)
+            case "bottom": set.insert(.bottom)
+            default: break
+            }
+        }
+        return set.isEmpty ? .all : set
+    }
+
     func axisSet(_ a: String) -> Axis.Set {
         var set: Axis.Set = []
         for token in a.split(separator: "+") {
@@ -1987,6 +2215,78 @@ struct Renderer {
         }
     }
 
+    // MARK: Additional built-in styles (styles-views wave)
+
+    private func applyTextFieldStyle(_ s: String, to v: AnyView) -> AnyView {
+        // `.textFieldStyle(_:)` — `.roundedBorder`/`.plain`/`.automatic`. The
+        // rounded-border style is iOS/macOS/visionOS-only (not tvOS/watchOS).
+        switch s {
+        case "roundedBorder":
+            #if os(iOS) || os(macOS) || os(visionOS)
+            return AnyView(v.textFieldStyle(.roundedBorder))
+            #else
+            return AnyView(v.textFieldStyle(.automatic))
+            #endif
+        case "plain":
+            return AnyView(v.textFieldStyle(.plain))
+        default:
+            return AnyView(v.textFieldStyle(.automatic))
+        }
+    }
+
+    private func applyDatePickerStyle(_ s: String, to v: AnyView) -> AnyView {
+        // `.datePickerStyle(_:)` — DatePicker itself is unavailable on tvOS/watchOS,
+        // so the styles are iOS/macOS/visionOS-only; degrade to the input view there.
+        #if os(iOS) || os(macOS) || os(visionOS)
+        switch s {
+        case "compact":
+            if #available(iOS 14, macOS 10.15.4, *) { return AnyView(v.datePickerStyle(.compact)) }
+            return AnyView(v.datePickerStyle(.automatic))
+        case "graphical":
+            if #available(iOS 14, macOS 10.15.4, *) { return AnyView(v.datePickerStyle(.graphical)) }
+            return AnyView(v.datePickerStyle(.automatic))
+        case "wheel":
+            #if os(iOS) || os(visionOS)
+            return AnyView(v.datePickerStyle(.wheel))
+            #else
+            return AnyView(v.datePickerStyle(.automatic))
+            #endif
+        default:
+            return AnyView(v.datePickerStyle(.automatic))
+        }
+        #else
+        _ = s
+        return v
+        #endif
+    }
+
+    private func applyControlGroupStyle(_ s: String, to v: AnyView) -> AnyView {
+        // `.controlGroupStyle(_:)` — `.navigation`/`.compactMenu`/`.menu`/`.palette`/
+        // `.automatic`. Each named static is version-gated + niche; the most portable
+        // is `.navigation` (iOS 16+). Anything unavailable degrades to `.automatic`.
+        #if os(iOS) || os(macOS) || os(visionOS)
+        switch s {
+        case "navigation":
+            if #available(iOS 16, macOS 13, *) { return AnyView(v.controlGroupStyle(.navigation)) }
+            return AnyView(v.controlGroupStyle(.automatic))
+        case "menu":
+            if #available(iOS 16.4, macOS 13.3, *) { return AnyView(v.controlGroupStyle(.menu)) }
+            return AnyView(v.controlGroupStyle(.automatic))
+        case "compactMenu":
+            if #available(iOS 16.4, macOS 13.3, *) { return AnyView(v.controlGroupStyle(.compactMenu)) }
+            return AnyView(v.controlGroupStyle(.automatic))
+        case "palette":
+            if #available(iOS 17, macOS 14, *) { return AnyView(v.controlGroupStyle(.palette)) }
+            return AnyView(v.controlGroupStyle(.automatic))
+        default:
+            return AnyView(v.controlGroupStyle(.automatic))
+        }
+        #else
+        _ = s
+        return v
+        #endif
+    }
+
     private func applyListStyle(_ s: IRListStyle, to v: AnyView) -> AnyView {
         #if os(watchOS)
         return AnyView(v.listStyle(.automatic))
@@ -2065,6 +2365,46 @@ struct Renderer {
         default:
             return AnyView(v.pickerStyle(.automatic))
         }
+    }
+
+    /// `.tabViewStyle(.page[indexDisplayMode:])`. `PageTabViewStyle` is iOS/watchOS/
+    /// visionOS only (NOT macOS/tvOS) — degrade to `.automatic` elsewhere. The
+    /// string carries the index-display mode ("page" = automatic, "page.always",
+    /// "page.never").
+    private func applyTabViewStyle(_ s: String, to v: AnyView) -> AnyView {
+        #if os(iOS) || os(watchOS) || os(visionOS)
+        switch s {
+        case "page.always":
+            return AnyView(v.tabViewStyle(.page(indexDisplayMode: .always)))
+        case "page.never":
+            return AnyView(v.tabViewStyle(.page(indexDisplayMode: .never)))
+        case "page":
+            return AnyView(v.tabViewStyle(.page))
+        default:
+            return AnyView(v.tabViewStyle(.automatic))
+        }
+        #else
+        _ = s
+        return AnyView(v.tabViewStyle(.automatic))
+        #endif
+    }
+
+    /// `.indexViewStyle(.page[backgroundDisplayMode:])`. `PageIndexViewStyle` is
+    /// iOS/visionOS only. The string's suffix is the background-display mode.
+    private func applyIndexViewStyle(_ s: String, to v: AnyView) -> AnyView {
+        #if os(iOS) || os(visionOS)
+        switch s {
+        case "page.always":
+            return AnyView(v.indexViewStyle(.page(backgroundDisplayMode: .always)))
+        case "page.never":
+            return AnyView(v.indexViewStyle(.page(backgroundDisplayMode: .never)))
+        default:
+            return AnyView(v.indexViewStyle(.page(backgroundDisplayMode: .automatic)))
+        }
+        #else
+        _ = s
+        return v
+        #endif
     }
 
     private func applyToggleStyle(_ s: String, to v: AnyView) -> AnyView {
@@ -2218,6 +2558,102 @@ struct Renderer {
         case "hidden": return .hidden
         default: return .automatic
         }
+    }
+
+    // MARK: Scroll & layout (sweep — added at END)
+
+    /// `.scrollIndicators(_:)` takes a `ScrollIndicatorVisibility` (iOS 16+). Map our
+    /// string ("automatic"|"visible"|"hidden"|"never").
+    @available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *)
+    func scrollIndicatorVisibility(_ s: String) -> ScrollIndicatorVisibility {
+        switch s {
+        case "visible": return .visible
+        case "hidden": return .hidden
+        case "never": return .never
+        default: return .automatic
+        }
+    }
+
+    /// Map trait names (joined with "+") → `AccessibilityTraits`. Unknown names drop.
+    func accessibilityTraits(_ s: String) -> AccessibilityTraits {
+        var traits = AccessibilityTraits()
+        for token in s.split(separator: "+").map(String.init) {
+            switch token {
+            case "isButton": traits.insert(.isButton)
+            case "isHeader": traits.insert(.isHeader)
+            case "isSelected": traits.insert(.isSelected)
+            case "isImage": traits.insert(.isImage)
+            case "isLink": traits.insert(.isLink)
+            case "isSearchField": traits.insert(.isSearchField)
+            case "isStaticText":
+                if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                    traits.insert(.isStaticText)
+                }
+            case "isToggle":
+                if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                    traits.insert(.isToggle)
+                }
+            case "isModal": traits.insert(.isModal)
+            case "isSummaryElement": traits.insert(.isSummaryElement)
+            case "updatesFrequently": traits.insert(.updatesFrequently)
+            case "playsSound": traits.insert(.playsSound)
+            case "startsMediaSession": traits.insert(.startsMediaSession)
+            case "allowsDirectInteraction": traits.insert(.allowsDirectInteraction)
+            case "causesPageTurn": traits.insert(.causesPageTurn)
+            default: break
+            }
+        }
+        return traits
+    }
+
+    /// Map the detent strings ("medium"|"large"|"fraction:<n>"|"height:<n>") to a
+    /// `Set<PresentationDetent>`. Unknown tokens are dropped (an empty set → no-op).
+    @available(iOS 16, macOS 13, *)
+    func presentationDetentSet(_ detents: [String]) -> Set<PresentationDetent> {
+        var set: Set<PresentationDetent> = []
+        for d in detents {
+            switch d {
+            case "medium": set.insert(.medium)
+            case "large": set.insert(.large)
+            default:
+                if d.hasPrefix("fraction:"), let n = Double(d.dropFirst("fraction:".count)) {
+                    set.insert(.fraction(CGFloat(n)))
+                } else if d.hasPrefix("height:"), let n = Double(d.dropFirst("height:".count)) {
+                    set.insert(.height(CGFloat(n)))
+                }
+            }
+        }
+        return set
+    }
+
+    /// `.environment(\.<key>, <value>)` for the reconstructable keys. An unknown key
+    /// (shouldn't reach here — the emitter gates) is a faithful no-op.
+    func applyEnvironmentValue(key: String, value: String, to v: AnyView) -> AnyView {
+        switch key {
+        case "layoutDirection":
+            return AnyView(v.environment(\.layoutDirection,
+                                         value == "rightToLeft" ? .rightToLeft : .leftToRight))
+        case "colorScheme":
+            return AnyView(v.environment(\.colorScheme, value == "dark" ? .dark : .light))
+        case "locale":
+            return AnyView(v.environment(\.locale, Locale(identifier: value)))
+        default:
+            return v
+        }
+    }
+
+    /// `.navigationViewStyle(_:)` — "stack" → StackNavigationViewStyle (the only
+    /// broadly-supported named style worth reconstituting; columns/automatic →
+    /// automatic). Available on iOS/tvOS/watchOS; a no-op elsewhere.
+    func applyNavigationViewStyle(_ s: String, to v: AnyView) -> AnyView {
+        #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        switch s {
+        case "stack": return AnyView(v.navigationViewStyle(.stack))
+        default: return AnyView(v.navigationViewStyle(.automatic))
+        }
+        #else
+        _ = s; return v
+        #endif
     }
 
     #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)

@@ -550,7 +550,18 @@ public struct PatchedBodyHost: View {
     }
 
     public var body: some View {
-        let merged = PatchFlatJSON.merge(base: propsJSON, override: guestState)
+        var merged = PatchFlatJSON.merge(base: propsJSON, override: guestState)
+        // INPUT-RIDING HOST TOKENS: a `Theme.Radius.lg`-style NUMERIC constant the guest
+        // consumes inside a `.cornerRadius(…)`/`.padding(…)`/`frame` position, and a
+        // host STRING (an enum's computed-String `Text(…)` content like `confidence.label`)
+        // the guest reads as text. The thunk resolved each natively; merge them into the
+        // guest's input JSON under their reserved `__numtok_<id>`/`__strtok_<id>` keys
+        // BEFORE building the tree, exactly like a `__geo_*` input. (Color/font tokens are
+        // applied by the renderer over the tree instead — handled below.)
+        let inputTokenJSON = Self.inputTokenJSON(from: tokens)
+        if let inputTokenJSON {
+            merged = PatchFlatJSON.merge(base: merged, override: inputTokenJSON)
+        }
         let tree: ViewNode
         do {
             tree = try Patch.shared.viewBody(state: merged, export: entry.export)
@@ -619,8 +630,13 @@ public struct PatchedBodyHost: View {
             let props = propsJSON
             let wbs = writebacks
             let name = typeName
+            // The dispatch rebuilds the tree IN WASM, so its `_patchBuildTree` needs the
+            // input-riding token inputs too (a `Double(__numtok_<id>)` numeric token, a
+            // `__strtok_<id>` string token) in the rebuilt body.
+            let tokJSON = inputTokenJSON
             let dispatcher = Dispatcher { event, value in
-                let current = PatchFlatJSON.merge(base: props, override: stateBinding.wrappedValue)
+                var current = PatchFlatJSON.merge(base: props, override: stateBinding.wrappedValue)
+                if let tokJSON { current = PatchFlatJSON.merge(base: current, override: tokJSON) }
                 do {
                     let result = try Patch.shared.dispatch(
                         state: current, event: event, value: value, export: dispatchExport)
@@ -757,6 +773,55 @@ public struct PatchedBodyHost: View {
         guard d.isFinite else { return "0" }
         if d == d.rounded() && abs(d) < 1e15 { return String(Int(d)) }
         return String(d)
+    }
+
+    /// Build the flat JSON object that injects every INPUT-RIDING HOST TOKEN into the
+    /// guest's input blob: a `.number` token keyed by its reserved `__numtok_<id>` key
+    /// (the guest reads `Double(__numtok_<id>)` in a numeric position) and a `.string`
+    /// token keyed by `__strtok_<id>` (the guest reads it as `Text(…)` content). Only
+    /// `.number`/`.string` tokens are emitted; color/font tokens ride the rendered tree
+    /// instead. Returns nil when there are none (the common case → no extra merge). The
+    /// id derivation must match the engine's `numericTokenInputKey`/`stringTokenInputKey`
+    /// (`__numtok_`/`__strtok_` + the content-stable hash the thunk keyed the token by).
+    nonisolated static func inputTokenJSON(from tokens: [String: PatchHostToken]) -> String? {
+        var pieces: [String] = []
+        for (id, tok) in tokens {
+            switch tok {
+            case .number(let value):
+                pieces.append("\"__numtok_\(id)\":\(numJSON(value))")
+            case .string(let value):
+                pieces.append("\"__strtok_\(id)\":\(jsonString(value))")
+            case .color, .font:
+                continue
+            }
+        }
+        guard !pieces.isEmpty else { return nil }
+        return "{" + pieces.joined(separator: ",") + "}"
+    }
+
+    /// Minimal JSON string encoder for a host-token String value (the guest's flat-JSON
+    /// scanner reads a standard double-quoted JSON string). Escapes the control set the
+    /// scanner can choke on: `"`, `\`, and the C0 controls (newline/tab/etc.). This is
+    /// the same shape `EmbeddedJSON` emits guest-side, so the scanner round-trips it.
+    nonisolated static func jsonString(_ s: String) -> String {
+        var out = "\""
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    out += String(format: "\\u%04x", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        out += "\""
+        return out
     }
 }
 

@@ -122,6 +122,38 @@ final class PatchViewPatchingTests: XCTestCase {
         XCTAssertEqual(PatchValueEncoder.encode(Status.paused), #"{"case":"paused"}"#)
     }
 
+    func testEncodeRawValueEnumUsesCaseNameNotRawValue() {
+        // A RAW-VALUE enum input (the engine's `.enumValue` reconstruction) must marshal
+        // by CASE NAME — the guest's mirroring enum decodes the `{"case":"<name>"}` shape
+        // by name, NOT by raw value. (`String(describing:)` of a bare case is the case
+        // name even when the raw value differs, e.g. an explicit `= "ACTIVE"`.)
+        enum StringStatus: String { case active = "ACTIVE", archived = "ARCHIVED" }
+        XCTAssertEqual(PatchValueEncoder.encode(StringStatus.active), #"{"case":"active"}"#)
+        XCTAssertEqual(PatchValueEncoder.encode(StringStatus.archived), #"{"case":"archived"}"#)
+        enum IntMedal: Int { case gold = 1, silver = 2, bronze = 3 }
+        XCTAssertEqual(PatchValueEncoder.encode(IntMedal.gold), #"{"case":"gold"}"#)
+        XCTAssertEqual(PatchValueEncoder.encode(IntMedal.bronze), #"{"case":"bronze"}"#)
+    }
+
+    func testExtractMarshalsSingleStructInputAsNestedObject() {
+        // A SINGLE flat-struct stored property (the engine's `.flatStruct` input) marshals
+        // as a NESTED JSON OBJECT under its key — exactly what the guest's single-object
+        // scanner (`_patchScan<Type>Row`) reads.
+        struct Product { let name: String; let price: Double; let inStock: Bool }
+        struct Row { let item: Product }
+        let e = PatchInstanceInputs.extract(from: Row(item: Product(name: "Widget", price: 9, inStock: true)))
+        XCTAssertEqual(e.json, #"{"item":{"inStock":true,"name":"Widget","price":9}}"#)
+    }
+
+    func testExtractMarshalsEnumInputAsCaseObject() {
+        // A single raw-value enum stored property marshals as `{"key":{"case":"<name>"}}`
+        // — what the guest's enum case scanner reads.
+        enum Status: String { case active, archived }
+        struct Badge { let status: Status }
+        let e = PatchInstanceInputs.extract(from: Badge(status: .archived))
+        XCTAssertEqual(e.json, #"{"status":{"case":"archived"}}"#)
+    }
+
     func testEncodeEnumWithPayload() {
         enum Shape { case circle(Double); case rect(w: Int, h: Int) }
         XCTAssertEqual(PatchValueEncoder.encode(Shape.circle(2.0)),
@@ -347,6 +379,34 @@ final class PatchViewPatchingTests: XCTestCase {
         XCTAssertFalse(m.views[1].thunkSafe)
     }
 
+    /// SOUNDNESS ANCHOR for the same-name view collision. The SDK routes a live view
+    /// to its lowered body SOLELY by the unqualified type-name string the manifest is
+    /// keyed on (`entries[typeName]`) — there is no module qualifier at this boundary.
+    /// So if a manifest ever carried TWO entries of the same `type` (two `CardView`s),
+    /// the registry's `out[entry.type] = entry` reduction COLLAPSES them: only one
+    /// survives, and BOTH live `CardView` thunks (which both bake `typeName:"CardView"`)
+    /// would route through whichever won. That mis-route is exactly why the ENGINE must
+    /// exclude every claimant of a colliding name from emission (so the manifest never
+    /// advertises a `CardView` at all). This test pins the SDK side of that invariant:
+    /// same-typed entries are NOT distinguishable here.
+    func testSameTypeManifestEntriesCollapseToOne() throws {
+        let json = """
+        {"schemaVersion":1,"views":[
+          {"type":"CardView","export":"view_body__CardView","dispatch":null,"thunkSafe":true},
+          {"type":"CardView","export":"view_body__CardView__alt","dispatch":null,"thunkSafe":true}
+        ]}
+        """
+        let m = try JSONDecoder().decode(PatchViewManifest.self, from: Data(json.utf8))
+        XCTAssertEqual(m.views.count, 2, "the wire format can DECODE two same-typed entries…")
+        // …but the registry keys its lookup by `type`, so two same-typed entries can
+        // address only ONE slot — there is no way to route two same-named live views.
+        var byType: [String: PatchViewManifest.Entry] = [:]
+        for entry in m.views { byType[entry.type] = entry }
+        XCTAssertEqual(byType.count, 1,
+                       "same-typed entries COLLAPSE — the SDK can't disambiguate, so the "
+                       + "engine must never emit a colliding name")
+    }
+
     // MARK: - Button action collection
 
     func testCollectButtonActionIDs() {
@@ -357,6 +417,55 @@ final class PatchViewPatchingTests: XCTestCase {
             ]))
         ]))
         XCTAssertEqual(Set(PatchedBodyHost.collectButtonActionIDs(tree)), ["act1", "act2"])
+    }
+
+    // MARK: - Input-riding host tokens (number + string, merged into the guest input JSON)
+
+    /// `.number` host tokens are emitted into the guest input blob keyed by their
+    /// reserved `__numtok_<id>` key (the guest reads them in WASM); `.color`/`.font`
+    /// tokens are NOT (they ride the rendered tree instead).
+    func testInputTokenJSONEmitsOnlyNumberTokens() throws {
+        let tokens: [String: PatchHostToken] = [
+            "nt_abc": .number(20),
+            "nt_def": .number(13.5),
+            "ct_xyz": .color(.red),     // must be excluded
+            "ft_uvw": .font(.body),     // must be excluded
+        ]
+        let json = try XCTUnwrap(PatchedBodyHost.inputTokenJSON(from: tokens))
+        // Parse it back so order-independence is guaranteed.
+        let parsed = try XCTUnwrap(PatchFlatJSON.parse(json))
+        XCTAssertEqual((parsed["__numtok_nt_abc"] as? NSNumber)?.doubleValue, 20)
+        XCTAssertEqual((parsed["__numtok_nt_def"] as? NSNumber)?.doubleValue, 13.5)
+        // No color/font token leaked into the input JSON.
+        XCTAssertNil(parsed["__numtok_ct_xyz"])
+        XCTAssertNil(parsed["__numtok_ft_uvw"])
+        XCTAssertEqual(parsed.keys.count, 2, "only the two numeric tokens are injected")
+    }
+
+    /// `.string` host tokens are emitted into the guest input blob keyed by their
+    /// reserved `__strtok_<id>` key, JSON-escaped, so the guest reads the real String
+    /// (the ConfidencePill `confidence.label` mechanism). `.color`/`.font` are excluded.
+    func testInputTokenJSONEmitsStringTokensEscaped() throws {
+        let tokens: [String: PatchHostToken] = [
+            "st_abc": .string("HIGH"),
+            "st_def": .string("AI \"powered\"\nnext"),  // needs escaping
+            "nt_n": .number(5),
+            "ct_c": .color(.red),       // excluded
+        ]
+        let json = try XCTUnwrap(PatchedBodyHost.inputTokenJSON(from: tokens))
+        let parsed = try XCTUnwrap(PatchFlatJSON.parse(json))
+        XCTAssertEqual(parsed["__strtok_st_abc"] as? String, "HIGH")
+        XCTAssertEqual(parsed["__strtok_st_def"] as? String, "AI \"powered\"\nnext",
+                       "the string token must round-trip with quotes/newline escaped")
+        XCTAssertEqual((parsed["__numtok_nt_n"] as? NSNumber)?.doubleValue, 5)
+        XCTAssertNil(parsed["__strtok_ct_c"])
+        XCTAssertEqual(parsed.keys.count, 3, "two string + one number, no color")
+    }
+
+    /// No input-riding tokens → nil (so the host skips the extra merge entirely).
+    func testInputTokenJSONNilWhenNoInputTokens() {
+        XCTAssertNil(PatchedBodyHost.inputTokenJSON(from: [:]))
+        XCTAssertNil(PatchedBodyHost.inputTokenJSON(from: ["ct_x": .color(.blue)]))
     }
 }
 #endif

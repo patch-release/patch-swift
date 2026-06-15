@@ -350,6 +350,8 @@ final class PatchRenderTests: XCTestCase {
                 .border(.color(.named("gray")), width: 2),
             N.text("bg").background(alignment: .topLeading, [N.color(.named("yellow"))]),
             N.text("ov").overlay(alignment: .bottom, [N.text("x")]).overlay(.color(.named("red")), in: .circle),
+            N.shape(.circle).trim(from: 0, to: 0.75)
+                .stroke(.color(.named("blue")), IRStrokeStyle(lineWidth: 8)),
             N.text("mask").mask(alignment: .center, [N.shape(.circle)]),
             N.text("shadow").shadow(color: .named("black"), radius: 4, x: 0, y: 2),
             N.text("tint").tint(.linearGradient(grad, startPoint: .leading, endPoint: .trailing)),
@@ -359,8 +361,22 @@ final class PatchRenderTests: XCTestCase {
                 .clipped(antialiased: true).fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2).zIndex(3)
                 .ignoresSafeArea(regions: "container", edges: "top+bottom")
-                .containerRelativeFrame(axes: "horizontal", alignment: .center),
+                .containerRelativeFrame(axes: "horizontal", alignment: .center)
+                .allowsHitTesting(false).scrollClipDisabled(true)
+                .scrollContentBackground("hidden"),
+            N.text("row").listRowSeparator("hidden", edges: "top")
+                .listRowBackground([N.color(.named("blue"))])
+                .listRowInsets(IREdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                .listSectionSeparator("visible", edges: "all"),
             N.text("sai").safeAreaInset(edge: "bottom", alignment: .center, spacing: 4, [N.text("inset")]),
+            // Scroll & layout (sweep — added at END)
+            N.list([N.text("r")]).scrollDisabled(true)
+                .scrollIndicators("hidden", axes: "vertical")
+                .scrollTargetBehavior("paging").scrollTargetLayout(isEnabled: true)
+                .scrollBounceBehavior("basedOnSize", axes: "vertical")
+                .contentMargins(edges: "horizontal", 16, placement: "scrollContent")
+                .safeAreaPadding(edges: "top", 12, insets: nil)
+                .safeAreaPadding(edges: "all", nil, insets: IREdgeInsets(top: 1, leading: 2, bottom: 3, trailing: 4)),
             // Transforms / effects
             N.text("t").rotationEffect(degrees: 45, anchor: .topLeading)
                 .rotation3DEffect(degrees: 30, x: 1, y: 0, z: 0, anchor: .center, anchorZ: 0, perspective: 1)
@@ -380,11 +396,37 @@ final class PatchRenderTests: XCTestCase {
             N.button("b", actionID: "b").buttonStyle(.borderedProminent).buttonBorderShape("capsule")
                 .controlSize("large"),
             N.list([N.text("row")]).listStyle(.insetGrouped),
+            // Additional control styles (styles-views wave).
+            N.textField("s", text: "", event: "s").textFieldStyle("roundedBorder"),
+            N.text("dp").datePickerStyle("compact"),
+            N.groupBox(label: [N.text("g")], [N.text("x")]).groupBoxStyle("automatic"),
+            N.controlGroup([N.button("c", actionID: "c")]).controlGroupStyle("navigation"),
+            N.disclosureGroup(label: [N.text("d")], [N.text("x")]).disclosureGroupStyle("automatic"),
+            N.list([N.text("t")]).tableStyle("inset"),
             N.textField("p", text: "", event: "tf")
                 .keyboardType("emailAddress").textContentType("emailAddress")
                 .autocorrectionDisabled(true).textInputAutocapitalization("never")
                 .submitLabel("go"),
             N.text("scheme").preferredColorScheme("dark").accentColor(.named("indigo")),
+            // G4/G5 paged carousel + page styles.
+            N.tabView(tabs: [
+                IRTab(tag: "0", tabItem: [], content: [N.text("p1")]),
+                IRTab(tag: "1", tabItem: [], content: [N.text("p2")]),
+            ]).tabViewStyle("page.always").indexViewStyle("page.never"),
+            // G36 presentation sizing + G9 legacy nav API.
+            N.text("d").presentationDetents(["medium", "large", "fraction:0.3", "height:200"])
+                .presentationDragIndicator("visible"),
+            N.text("n").navigationBarTitle("Home", displayMode: "inline")
+                .navigationViewStyle("stack"),
+            // G7 per-key environment values.
+            N.text("e").environmentValue(key: "layoutDirection", value: "rightToLeft")
+                .environmentValue(key: "colorScheme", value: "dark")
+                .environmentValue(key: "locale", value: "he"),
+            // G8 accessibility.
+            N.text("acc").accessibilityLabel("Label").accessibilityHint("Hint")
+                .accessibilityValue("Value").accessibilityHidden(false)
+                .accessibilityAddTraits("isButton+isHeader")
+                .accessibilityRemoveTraits("isImage"),
             // Gestures
             N.text("g").onLongPressGesture(minimumDuration: 0.4, event: "lp")
                 .dragGesture(minDistance: 5, onChanged: "dc", onEnded: "de")
@@ -471,9 +513,21 @@ final class PatchRenderTests: XCTestCase {
                 .mask(alignment: .center, [N.shape(.circle)])
                 .aspectRatio(1.0, contentMode: .fit).clipped(antialiased: true)
                 .zIndex(1).layoutPriority(1),
+            // G3 progress ring: a trimmed, stroked Circle.
+            N.shape(.circle).trim(from: 0, to: 0.7)
+                .stroke(.color(.named("blue")), IRStrokeStyle(lineWidth: 8)),
+            // A trimmed FILLED shape (no stroke) — exercises the trim-without-stroke arm.
+            N.shape(.circle).trim(from: 0.1, to: 0.6).fill(.color(.named("red")), eoFill: false),
             N.button("Go", actionID: "go")
                 .buttonStyle(.bordered).buttonBorderShape("capsule").controlSize("large"),
             N.list([N.text("r")]).listStyle(.plain),
+            // Additional control styles (styles-views wave) — render-apply must not crash.
+            N.textField("s", text: "", event: "s").textFieldStyle("roundedBorder"),
+            N.text("dp").datePickerStyle("graphical"),
+            N.controlGroup([N.button("c", actionID: "c")]).controlGroupStyle("navigation"),
+            N.groupBox(label: [N.text("g")], [N.text("x")]).groupBoxStyle("automatic"),
+            N.disclosureGroup(label: [N.text("d")], [N.text("x")]).disclosureGroupStyle("automatic"),
+            N.list([N.text("t")]).tableStyle("inset"),
             N.text("g")
                 .onLongPressGesture(minimumDuration: 0.3, event: "lp")
                 .dragGesture(minDistance: 8, onChanged: "dc", onEnded: "de")
