@@ -155,14 +155,34 @@ public struct PatchCellWiring {
     /// reads it as a `.double` input in the numeric position. The UIKit analogue of the
     /// SwiftUI `.number` host token — no renderer-table application, no wire-format change.
     public var numberTokens: [String: () -> Double]
+    /// VIEW-ATTACHED GESTURE WIRINGS (Lever 1 — `addGestureRecognizer`): keyed by the
+    /// rendered node's id (the source view's local name), each closure does the REAL native
+    /// wiring against `self` + the rendered view — `{ v in v.addGestureRecognizer(
+    /// UITapGestureRecognizer(target: self, action: #selector(self.handleTap))) }`. The
+    /// `#selector` is a compile-time `#selector` in the generated thunk, so a patch can't
+    /// change the selector (it's baked into the native shell) — only the layout/styling the
+    /// gesture's view rides over WASM is OTA-patchable. The host applies each to the matching
+    /// rendered view after building the tree (a view that didn't end up in the tree is
+    /// silently skipped). A view may carry several gestures.
+    public var gestureWirings: [String: [(UIView) -> Void]]
+    /// METHOD-LEVEL OBSERVER EFFECTS (Lever 2 — `NotificationCenter.default.addObserver`):
+    /// each closure re-runs the VERBATIM `NotificationCenter.default.addObserver(self,
+    /// selector: #selector(self.onKeyboard(_:)), name: …, object: …)` against `self`
+    /// (selector resolved natively). The host runs each ONCE at install, after rendering.
+    /// Not view-attached — a side effect of the construction method.
+    public var observerEffects: [() -> Void]
     public init(slots: [String: () -> UIView] = [:],
                 actions: [String: () -> Void] = [:],
                 colorTokens: [String: () -> UIColor] = [:],
-                numberTokens: [String: () -> Double] = [:]) {
+                numberTokens: [String: () -> Double] = [:],
+                gestureWirings: [String: [(UIView) -> Void]] = [:],
+                observerEffects: [() -> Void] = []) {
         self.slots = slots
         self.actions = actions
         self.colorTokens = colorTokens
         self.numberTokens = numberTokens
+        self.gestureWirings = gestureWirings
+        self.observerEffects = observerEffects
     }
 }
 
@@ -233,7 +253,21 @@ extension Patch {
         }
         let context = UIKitRenderContext(slots: slotTable, dispatcher: dispatcher,
                                          showSlotStubs: false, tokens: tokenTable)
-        let rendered = renderUIKit(emission.root, context: context)
+        let (rendered, viewsByID) = renderUIKitIndexed(emission.root, context: context)
+
+        // Lever 1: apply the view-attached GESTURE WIRINGS. Each is keyed by the source
+        // view's local name (the rendered node's id); the thunk's closure does the real
+        // native `addGestureRecognizer(<gesture>(target: self, action: #selector(...)))`
+        // against the matching rendered view. A wiring whose view didn't end up in the tree
+        // is silently skipped (the gesture's view isn't visible anyway) — never a demote.
+        for (nodeID, applies) in w.gestureWirings {
+            guard let view = viewsByID[nodeID] else { continue }
+            for apply in applies { apply(view) }
+        }
+        // Lever 2: run the method-level OBSERVER EFFECTS once at install. Each re-runs the
+        // verbatim `NotificationCenter.default.addObserver(self, selector: #selector(...))`
+        // against `self` (selector resolved natively in the thunk).
+        for effect in w.observerEffects { effect() }
 
         // Install into contentView: clear any prior PATCH-installed root, then add the
         // new one pinned to the content view's edges. The prior root is tagged so a

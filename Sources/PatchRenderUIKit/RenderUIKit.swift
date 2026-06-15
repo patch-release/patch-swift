@@ -136,6 +136,18 @@ public func renderUIKit(_ node: UIKitNode,
     UIKitRenderer(context: context).render(node)
 }
 
+/// Render + ALSO return the node-id → rendered-`UIView` index the renderer builds
+/// internally (the same `byID` map it uses to resolve sibling constraints). The host
+/// uses this to apply view-attached GESTURE WIRINGS (Lever 1) to the exact rendered
+/// view a node carries (`UIKitViewProps.id` = the source view's local name). The root
+/// is also keyed under its own id when it has one.
+@MainActor
+public func renderUIKitIndexed(_ node: UIKitNode,
+                               context: UIKitRenderContext = UIKitRenderContext())
+    -> (root: UIView, viewsByID: [String: UIView]) {
+    UIKitRenderer(context: context).renderIndexed(node)
+}
+
 /// The `identifier` this renderer stamps on every `NSLayoutConstraint` it
 /// activates from the IR — so a caller (or a test) can distinguish Patch's
 /// IR-derived constraints from UIKit's own internal ones (e.g. a `UIStackView`'s
@@ -155,6 +167,12 @@ struct UIKitRenderer {
     /// Build the view tree, then resolve+activate constraints in a SECOND pass
     /// (so sibling references can be resolved by id across the whole subtree).
     func render(_ node: UIKitNode) -> UIView {
+        renderIndexed(node).root
+    }
+
+    /// As `render`, but also returns the node-id → view index (the same `byID` map the
+    /// constraint pass uses). Used by the host to apply view-attached gesture wirings.
+    func renderIndexed(_ node: UIKitNode) -> (root: UIView, viewsByID: [String: UIView]) {
         var byID: [String: UIView] = [:]
         let root = buildView(node, into: &byID)
         var constraints: [NSLayoutConstraint] = []
@@ -163,7 +181,7 @@ struct UIKitRenderer {
             c.identifier = patchUIKitConstraintIdentifier
         }
         NSLayoutConstraint.activate(constraints)
-        return root
+        return (root, byID)
     }
 
     // MARK: View construction (pass 1)

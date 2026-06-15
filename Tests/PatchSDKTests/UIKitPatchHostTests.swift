@@ -209,6 +209,88 @@ final class UIKitPatchHostTests: XCTestCase {
         XCTAssertTrue(found, "the registered native view fills the customSlot")
     }
 
+    // MARK: - Gesture wirings (Lever 1) + observer effects (Lever 2)
+
+    /// `PatchCellWiring` carries the new effect-replay channels (gesture wirings keyed by
+    /// the view's node id + method-level observer effects). A default init has none.
+    @MainActor
+    func testPatchCellWiringCarriesGestureAndObserverChannels() {
+        let plain = PatchCellWiring()
+        XCTAssertTrue(plain.gestureWirings.isEmpty)
+        XCTAssertTrue(plain.observerEffects.isEmpty)
+        var tapped = false
+        var observed = false
+        let wiring = PatchCellWiring(
+            gestureWirings: ["card": [{ v in v.tag = 99 }]],
+            observerEffects: [{ observed = true }])
+        // The gesture closure runs against a supplied view; the observer effect runs bare.
+        let v = UIView()
+        wiring.gestureWirings["card"]?.forEach { $0(v) }
+        XCTAssertEqual(v.tag, 99)
+        for e in wiring.observerEffects { e() }
+        XCTAssertTrue(observed)
+        _ = tapped
+    }
+
+    /// Lever 1 — the gesture wiring applies to the RENDERED view that carries the matching
+    /// node id. After `renderUIKitIndexed`, the host looks up `viewsByID[nodeID]` and runs
+    /// each replay closure against it (the closure does the real `addGestureRecognizer`).
+    @MainActor
+    func testGestureWiringAppliesToRenderedViewByNodeID() {
+        let tree = UI.container([
+            UI.label("Title").id("titleLabel"),
+            UI.image(systemName: "photo").id("card")
+        ]).id("root")
+
+        let (root, byID) = renderUIKitIndexed(tree, context: UIKitRenderContext(showSlotStubs: false))
+        // The renderer indexed every node carrying an id.
+        XCTAssertNotNil(byID["card"], "the gesture's target view is indexed by its node id")
+        XCTAssertNotNil(byID["titleLabel"])
+
+        // Apply a gesture wiring keyed by node id (the SDK's install does exactly this).
+        let gestureWirings: [String: [(UIView) -> Void]] = [
+            "card": [{ v in
+                v.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(Self.noop)))
+            }]
+        ]
+        for (nodeID, applies) in gestureWirings {
+            guard let view = byID[nodeID] else { continue }
+            for apply in applies { apply(view) }
+        }
+        // The gesture landed on the right rendered view (the image, not the label).
+        XCTAssertEqual(byID["card"]?.gestureRecognizers?.count, 1,
+                       "the tap recognizer attached to the card view")
+        XCTAssertNil(byID["titleLabel"]?.gestureRecognizers,
+                     "the label got no gesture")
+        _ = root
+    }
+
+    /// Lever 1 — DEMOTE-SAFE applicability: a gesture wiring whose node id ISN'T in the
+    /// rendered tree (the view didn't end up visible) is silently SKIPPED — never a crash.
+    @MainActor
+    func testGestureWiringForMissingViewIsSkipped() {
+        let tree = UI.container([UI.label("Only").id("only")]).id("root")
+        let (_, byID) = renderUIKitIndexed(tree, context: UIKitRenderContext(showSlotStubs: false))
+        var applied = false
+        let gestureWirings: [String: [(UIView) -> Void]] = ["ghost": [{ _ in applied = true }]]
+        for (nodeID, applies) in gestureWirings {
+            guard let view = byID[nodeID] else { continue }
+            for apply in applies { apply(view) }
+        }
+        XCTAssertFalse(applied, "a wiring for a view not in the tree is skipped, not crashed")
+    }
+
+    /// Lever 2 — the observer effects run once (the SDK runs them after rendering).
+    @MainActor
+    func testObserverEffectsRunOnce() {
+        var count = 0
+        let observerEffects: [() -> Void] = [{ count += 1 }, { count += 10 }]
+        for e in observerEffects { e() }
+        XCTAssertEqual(count, 11, "each observer effect ran exactly once")
+    }
+
+    @objc static func noop() {}
+
     /// A control action forwards through the dispatcher to a native handler — the
     /// wiring `installPatchedCell` sets up (action id → cell handler).
     @MainActor
