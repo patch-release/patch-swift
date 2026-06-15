@@ -296,6 +296,10 @@ final class HostBridgeFamilyTests: XCTestCase {
         // calendar_component are also SERVED — superset is fine for emitted ⊆ served —
         // but not yet targeted by a v1 rewrite.)
         "relative_date_format", "number_format", "calendar_date_op",
+        // LEVER: Regex (the shell's real ICU NSRegularExpression). The engine's regex
+        // leaves emit these; all served by FoundationBridge. (regex_find existed; the
+        // new test/capture/count/replace shapes are added this pass.)
+        "regex_test", "regex_capture", "regex_count", "regex_replace",
         // Breakthrough #6 networking (async) — same patch_host namespace. v1 emits
         // ONLY http_get (data(for:)/http_request deferred — URLRequest absent in the
         // WASM-SDK guest Foundation). The SDK still SERVES http_request (superset is

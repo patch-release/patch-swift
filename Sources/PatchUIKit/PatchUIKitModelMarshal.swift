@@ -43,6 +43,37 @@ public enum PatchUIKitModelMarshal {
         return "{" + fragments.map { "\(quoted($0.key)):\($0.json)" }.joined(separator: ",") + "}"
     }
 
+    /// Merge resolved DESIGN-SYSTEM NUMERIC TOKEN values into a flat model JSON object.
+    /// Each token (`id` → resolved `Double`) is injected under its reserved
+    /// `__numtok_<id>` key — the same key the guest's lowered body reads in a numeric
+    /// position (a constraint constant, `cornerRadius`, `spacing`, …) via
+    /// `_patchScanDouble`. This is the UIKit analogue of the SwiftUI numeric host token:
+    /// the value rides the INPUT JSON (no renderer-table application, no wire-format
+    /// change). A token the guest doesn't actually read is a harmless unused key; the
+    /// engine's build-time scope check guarantees every key the guest reads is supplied
+    /// by the matching thunk (the id derivation — FNV over the source — agrees), so an
+    /// absent key only arises from a stale patch and degrades to the input default, never
+    /// a crash. Token keys never collide with model fields (the engine refuses to
+    /// host-tokenize a numeric that references a marshalled field).
+    public static func merging(modelJSON: String, numberTokens: [String: Double]) -> String {
+        guard !numberTokens.isEmpty else { return modelJSON }
+        let tokenFragments = numberTokens
+            .map { (key: "__numtok_\($0.key)", json: numFragment($0.value)) }
+            .sorted { $0.key < $1.key }
+            .map { "\(quoted($0.key)):\($0.json)" }
+        let trimmed = modelJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The model JSON is a flat object (`{…}` or `{}`); splice the token entries in.
+        guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}") else {
+            // Not an object (shouldn't happen — `flatJSON` always emits one). Fall back
+            // to a token-only object so the guest still reads its tokens.
+            return "{" + tokenFragments.joined(separator: ",") + "}"
+        }
+        let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+        let joined = tokenFragments.joined(separator: ",")
+        if inner.isEmpty { return "{" + joined + "}" }
+        return "{" + inner + "," + joined + "}"
+    }
+
     /// A JSON fragment for a supported scalar / scalar array, else nil (dropped).
     static func fragment(for value: Any) -> String? {
         switch value {

@@ -309,6 +309,52 @@ final class BridgeTests: XCTestCase {
         XCTAssertEqual(FoundationBridge.regexCount("abc", pattern: "([unclosed"), 0)  // bad pattern → 0
     }
 
+    /// `regex_test` — does the pattern match ANYWHERE (the validation TEST form). An
+    /// invalid pattern → false (matching a `try?` init returning nil → no match).
+    func testRegexTestBridge() {
+        XCTAssertTrue(FoundationBridge.regexTest("user@example.com", pattern: "^[^@]+@[^@]+\\.[^@]+$"))
+        XCTAssertFalse(FoundationBridge.regexTest("not-an-email", pattern: "^[^@]+@[^@]+\\.[^@]+$"))
+        // Matches ANYWHERE (not anchored): a digit appears somewhere.
+        XCTAssertTrue(FoundationBridge.regexTest("abc123", pattern: "[0-9]+"))
+        XCTAssertFalse(FoundationBridge.regexTest("abc", pattern: "[0-9]+"))
+        XCTAssertFalse(FoundationBridge.regexTest("abc", pattern: "([unclosed"))  // bad pattern → false
+    }
+
+    /// `regex_capture` — capture-group extraction in the FIRST match. Group 0 = whole
+    /// match; group N = the Nth capture; out-of-range / no-match / bad-pattern → nil; a
+    /// non-participating optional group → nil.
+    func testRegexCaptureBridge() {
+        let pat = "([A-Z]{3})-([0-9]{4})"
+        XCTAssertEqual(FoundationBridge.regexCapture("order ABC-1234 ships", pattern: pat, group: 0), "ABC-1234")
+        XCTAssertEqual(FoundationBridge.regexCapture("order ABC-1234 ships", pattern: pat, group: 1), "ABC")
+        XCTAssertEqual(FoundationBridge.regexCapture("order ABC-1234 ships", pattern: pat, group: 2), "1234")
+        // Group index out of range → nil.
+        XCTAssertNil(FoundationBridge.regexCapture("ABC-1234", pattern: pat, group: 3))
+        // No match → nil.
+        XCTAssertNil(FoundationBridge.regexCapture("nope", pattern: pat, group: 0))
+        // A non-participating optional group → nil (the optional did not match).
+        XCTAssertNil(FoundationBridge.regexCapture("ab", pattern: "a(x)?b", group: 1))
+        // Bad pattern / negative group → nil.
+        XCTAssertNil(FoundationBridge.regexCapture("abc", pattern: "([unclosed", group: 0))
+        XCTAssertNil(FoundationBridge.regexCapture("abc", pattern: "a", group: -1))
+    }
+
+    /// `regex_replace` — ICU template replace over ALL matches (`$1` back-refs). An
+    /// invalid pattern returns the input UNCHANGED (never lossy).
+    func testRegexReplaceBridge() {
+        XCTAssertEqual(FoundationBridge.regexReplace("a1 b22 c333", pattern: "[0-9]+", template: "#"),
+                       "a# b# c#")
+        // Template back-reference: swap "first last" → "last, first".
+        XCTAssertEqual(FoundationBridge.regexReplace("John Smith", pattern: "(\\w+) (\\w+)", template: "$2, $1"),
+                       "Smith, John")
+        // No match → unchanged.
+        XCTAssertEqual(FoundationBridge.regexReplace("abc", pattern: "[0-9]+", template: "#"), "abc")
+        // Invalid pattern → input unchanged (no-op, never wrong).
+        XCTAssertEqual(FoundationBridge.regexReplace("keep me", pattern: "([unclosed", template: "x"), "keep me")
+        // Replace the whole string away → empty result.
+        XCTAssertEqual(FoundationBridge.regexReplace("xxxx", pattern: "x+", template: ""), "")
+    }
+
     /// `date_format` — DateFormatter pattern over a Unix-millis instant (UTC default).
     func testDateFormatBridge() {
         // 2021-01-01T00:00:00Z = 1_609_459_200_000 ms.

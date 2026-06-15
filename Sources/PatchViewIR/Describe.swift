@@ -57,6 +57,7 @@ extension ViewNode {
             return "ZStack(align:\(a?.rawValue ?? "center"))"
         case .group: return "Group"
         case .forEach: return "ForEach"
+        case .indexedForEachSlot(let id, _, let label): return "IndexedForEachSlot(#\(id),\(label))"
         case .scrollView(let axis, _): return "ScrollView(axis:\(axis.rawValue))"
         case .list: return "List"
         case .section(let h, let f, _):
@@ -354,6 +355,33 @@ extension Modifier {
         case .selectionDisabled(let b): return ".selectionDisabled(\(b))"
         case .moveDisabled(let b): return ".moveDisabled(\(b))"
         case .deleteDisabled(let b): return ".deleteDisabled(\(b))"
+
+        // Accessibility / help / a11y-config (modifier-coverage sweep v7)
+        case .help(let s): return ".help(\(s))"
+        case .accessibilityIdentifier(let s): return ".accessibilityIdentifier(\(s))"
+        case .accessibilitySortPriority(let p): return ".accessibilitySortPriority(\(p))"
+        case .accessibilityRespondsToUserInteraction(let b): return ".accessibilityRespondsToUserInteraction(\(b))"
+        case .accessibilityIgnoresInvertColors(let b): return ".accessibilityIgnoresInvertColors(\(b))"
+        case .privacySensitive(let b): return ".privacySensitive(\(b))"
+        case .speechAlwaysIncludesPunctuation(let b): return ".speechAlwaysIncludesPunctuation(\(b))"
+        case .speechSpellsOutCharacters(let b): return ".speechSpellsOutCharacters(\(b))"
+        case .speechAnnouncementsQueued(let b): return ".speechAnnouncementsQueued(\(b))"
+        case .speechAdjustedPitch(let p): return ".speechAdjustedPitch(\(p))"
+        // Text / symbol / input config (sweep v7)
+        case .scrollDismissesKeyboard(let s): return ".scrollDismissesKeyboard(\(s))"
+        case .fontWidth(let s): return ".fontWidth(\(s))"
+        case .textScale(let s): return ".textScale(\(s))"
+        case .symbolEffectsRemoved(let b): return ".symbolEffectsRemoved(\(b))"
+        case .findDisabled(let b): return ".findDisabled(\(b))"
+        case .replaceDisabled(let b): return ".replaceDisabled(\(b))"
+        case .statusBarHidden(let b): return ".statusBarHidden(\(b))"
+        case .contentShape(let s, let eoFill): return ".contentShape(\(s),eoFill:\(eoFill))"
+        case .coordinateSpaceNamed(let s): return ".coordinateSpaceNamed(\(s))"
+        // Presentation config (sweep v7)
+        case .interactiveDismissDisabled(let b): return ".interactiveDismissDisabled(\(b))"
+        case .presentationCornerRadius(let r): return ".presentationCornerRadius(\(r))"
+        case .presentationContentInteraction(let s): return ".presentationContentInteraction(\(s))"
+        case .presentationCompactAdaptation(let s): return ".presentationCompactAdaptation(\(s))"
 
         case .opaque(let s): return ".opaque(\(s))"
         }

@@ -216,7 +216,12 @@ let package = Package(
                 // patch_host.defaults_get_double / defaults_set_bool|int|double). Drives
                 // the UserDefaultsTypedBridge round-trip tests for the FusionRewriter's
                 // typed settings-toggle leaves.
-                .copy("Fixtures/UserDefaultsTypedFixture.wasm")
+                .copy("Fixtures/UserDefaultsTypedFixture.wasm"),
+                // Regex round-trip fixture (hand-written; imports patch_host.regex_test /
+                // regex_capture / regex_count / regex_replace). Drives the FoundationBridge
+                // regex round-trip tests for the FusionRewriter's regex leaves (the signed
+                // app's real ICU NSRegularExpression).
+                .copy("Fixtures/RegexFixture.wasm")
             ]
         )
     ]

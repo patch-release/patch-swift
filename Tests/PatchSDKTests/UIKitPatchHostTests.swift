@@ -88,6 +88,46 @@ final class UIKitPatchHostTests: XCTestCase {
                        #"{"s":"a\"b\\c\nd"}"#)
     }
 
+    // MARK: - Numeric host-token merge (Lever D for numbers)
+
+    /// A resolved DESIGN-SYSTEM NUMERIC TOKEN is merged into the flat model JSON under its
+    /// reserved `__numtok_<id>` key (the guest reads it as a `.double` input in a numeric
+    /// position). The token rides the INPUT JSON, like the SwiftUI numeric token.
+    func testNumberTokenMergedIntoModelJSON() {
+        struct M { let title: String }
+        let base = PatchUIKitModelMarshal.flatJSON(from: M(title: "Hi"))
+        let merged = PatchUIKitModelMarshal.merging(
+            modelJSON: base, numberTokens: ["uint_radius": 12, "uint_inset": 8.5])
+        // Both token keys present alongside the model field; numbers folded cleanly.
+        XCTAssertTrue(merged.contains(#""__numtok_uint_radius":12"#), merged)
+        XCTAssertTrue(merged.contains(#""__numtok_uint_inset":8.5"#), merged)
+        XCTAssertTrue(merged.contains(#""title":"Hi""#), merged)
+        // Still a single well-formed flat object.
+        XCTAssertTrue(merged.hasPrefix("{") && merged.hasSuffix("}"))
+        XCTAssertEqual(merged.filter { $0 == "{" }.count, 1, "no nested object: \(merged)")
+    }
+
+    /// Merging into an EMPTY model object (a cell with no model fields, only tokens)
+    /// produces a token-only object — no leading/trailing comma.
+    func testNumberTokenMergedIntoEmptyModel() {
+        let merged = PatchUIKitModelMarshal.merging(modelJSON: "{}", numberTokens: ["uint_x": 4])
+        XCTAssertEqual(merged, #"{"__numtok_uint_x":4}"#)
+    }
+
+    /// No tokens → the model JSON is returned UNCHANGED (the common unpatched-numeric
+    /// path pays nothing, byte-identical). This is ALSO the MISSING-TOKEN fallback: a
+    /// numeric token the thunk doesn't supply isn't merged, so the guest's
+    /// `_patchScanDouble("__numtok_<id>")` misses and the body uses its input DEFAULT (0)
+    /// — a degraded value, never a crash (the build-time id agreement guarantees a current
+    /// build supplies every key its guest reads; an absent key only arises from a stale
+    /// patch).
+    func testNoNumberTokensLeavesModelUnchanged() {
+        let base = #"{"title":"Hi"}"#
+        let merged = PatchUIKitModelMarshal.merging(modelJSON: base, numberTokens: [:])
+        XCTAssertEqual(merged, base)
+        XCTAssertFalse(merged.contains("__numtok_"), "no token key injected when unsupplied")
+    }
+
     // MARK: - Host install (UIKit only)
 
     #if canImport(UIKit)
@@ -120,6 +160,34 @@ final class UIKitPatchHostTests: XCTestCase {
         XCTAssertEqual((stack?.arrangedSubviews[0] as? UILabel)?.text, "Ada Lovelace")
         // The rendered tree fills the content view (its frame is non-zero after layout).
         XCTAssertGreaterThan(rendered.frame.width, 0)
+    }
+
+    /// `collectColorTokenIDs` finds every `ColorRef.hostToken(id)` across the tree's
+    /// color positions (Lever D) — the ids `installPatchedCell` must have a resolver for
+    /// (a missing one demotes the cell). Covers the common props (bg/tint) + leaf colors.
+    func testCollectColorTokenIDsAcrossPositions() {
+        let tree = UI.stack(axis: .vertical, arranged: [
+            UI.label("Hi", textColor: .hostToken("uict_ink")).id("l"),
+            UI.button("Go", titleColor: .hostToken("uict_btn"), action: "go").id("b"),
+            UI.image(systemName: "star", tintColor: .hostToken("uict_star")).id("i")
+        ]).background(.hostToken("uict_bg"))
+        let ids = Set(Patch.collectColorTokenIDs(tree))
+        XCTAssertEqual(ids, ["uict_ink", "uict_btn", "uict_star", "uict_bg"],
+                       "every color-token id across props + leaf payloads is collected")
+        // A token-free tree yields no ids (an unpatched cell pays nothing).
+        let plain = UI.container([UI.label("x").id("x")]).background(.named("blue"))
+        XCTAssertTrue(Patch.collectColorTokenIDs(plain).isEmpty)
+    }
+
+    /// `PatchCellWiring` carries `numberTokens` (the thunk-supplied NUMERIC design-token
+    /// resolvers). A default init has none (a cell with no numeric tokens); the resolvers
+    /// are stored as given and evaluate the cell's real design constant natively.
+    @MainActor
+    func testPatchCellWiringCarriesNumberTokens() {
+        let plain = PatchCellWiring()
+        XCTAssertTrue(plain.numberTokens.isEmpty)
+        let wiring = PatchCellWiring(numberTokens: ["uint_r": { 16 }])
+        XCTAssertEqual(wiring.numberTokens["uint_r"]?(), 16)
     }
 
     /// A customSlot pulls the cell's native view (the slot closure renders the live

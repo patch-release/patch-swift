@@ -129,6 +129,30 @@ final class UIKitRenderTests: XCTestCase {
     }
 
     @MainActor
+    func testColorTokenResolvesFromTokenTable() {
+        // A node whose background + label color are design-system TOKENS (Lever D).
+        let label = UI.label("Hi", textColor: .hostToken("uict_ink")).id("l")
+        let tree = UI.container([label]).background(.hostToken("uict_bg"))
+        let tokens = UIKitTokenTable()
+        tokens.setColor("uict_bg", .systemPurple)
+        tokens.setColor("uict_ink", .systemTeal)
+        let root = renderUIKit(tree, context: UIKitRenderContext(tokens: tokens))
+        XCTAssertEqual(root.backgroundColor, .systemPurple, "root bg resolves from the token table")
+        let labelView = try? XCTUnwrap(root.subviews.first as? UILabel)
+        XCTAssertEqual(labelView?.textColor, .systemTeal, "label color resolves from the token table")
+    }
+
+    @MainActor
+    func testMissingColorTokenFallsBackToVisibleDefault() {
+        // A token id with NO resolver in the table falls back to .label (visible, safe) —
+        // never a crash. (The HOST demotes before this in practice, but the renderer is
+        // robust either way.)
+        let tree = UI.container([]).background(.hostToken("uict_absent"))
+        let root = renderUIKit(tree, context: UIKitRenderContext(tokens: UIKitTokenTable()))
+        XCTAssertEqual(root.backgroundColor, .label, "a missing token falls back to .label")
+    }
+
+    @MainActor
     func testUnregisteredSlotRendersVisibleStub() {
         let tree = UI.container([UI.slot(id: "missing", label: "MKMapView")])
         let root = renderUIKit(tree, context: UIKitRenderContext(showSlotStubs: true))

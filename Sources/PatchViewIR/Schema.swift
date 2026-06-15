@@ -87,8 +87,33 @@ public enum PatchViewIRSchema {
     /// v1–v5 guests (older trees never carry the new cases); the bump gates a newer
     /// guest (one using a v6 modifier) against an older host that can't decode the new
     /// case (it would collapse the whole view, so the gate correctly refuses → native).
+    /// v7 = ACCESSIBILITY / HELP / TEXT-INPUT / PRESENTATION-config modifiers: the
+    /// `help`/`accessibilityIdentifier`/`accessibilitySortPriority`/
+    /// `accessibilityRespondsToUserInteraction`/`accessibilityIgnoresInvertColors`/
+    /// `privacySensitive`/`speechAlwaysIncludesPunctuation`/`speechSpellsOutCharacters`/
+    /// `speechAnnouncementsQueued`/`speechAdjustedPitch`/`scrollDismissesKeyboard`/
+    /// `fontWidth`/`textScale`/`symbolEffectsRemoved`/`findDisabled`/`replaceDisabled`/
+    /// `statusBarHidden`/`contentShape`/`coordinateSpaceNamed`/`interactiveDismissDisabled`/
+    /// `presentationCornerRadius`/`presentationContentInteraction`/
+    /// `presentationCompactAdaptation` `Modifier` cases (declarative string/bool/scalar/
+    /// ShapeKind config that previously slotted; the renderer reapplies the real SwiftUI
+    /// modifier, OS-floor-guarded). Purely additive: a v7 host decodes v1–v6 guests (older
+    /// trees never carry the new cases); the bump gates a newer guest (one using a v7
+    /// modifier) against an older host that can't decode the new case (it would collapse
+    /// the whole view, so the gate correctly refuses → native fallback).
+    /// v8 = PER-ROW INDEXED NATIVE-ACTION SLOTS: the `indexedForEachSlot(id:countKey:label:)`
+    /// `NodeKind` case — a `ForEach` over a BODY-LOCAL collection the guest can't
+    /// reconstruct, whose rows are a custom child view with a PER-ROW native action
+    /// closure (`AccountChip(...) { schedule.selectedOwnerId = owner.id }`). The
+    /// build-time thunk natively evaluates the body-local collection and supplies a
+    /// per-row factory `(Int) -> AnyView` (closing over `self`); the host reads the row
+    /// count from a reserved `__rowcount_<id>` input (rides the input JSON, like
+    /// `__numtok_*`) and reconstitutes `count` rows. Purely additive: a v8 host decodes
+    /// v1–v7 guests (older trees never carry the new case); the bump gates a newer guest
+    /// (one using an indexed-row slot) against an older host that can't decode the new
+    /// case (it would collapse the whole view, so the gate correctly refuses → native).
 
-    public static let version = 6
+    public static let version = 8
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

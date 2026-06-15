@@ -538,18 +538,25 @@ public struct PatchedBodyHost: View {
     /// `.hostToken(id)`/`.fontToken(id)` modifier values, keyed by the shipped tree's
     /// token id. Empty for a view that uses no design-system tokens.
     let tokens: [String: PatchHostToken]
+    /// PER-ROW INDEXED NATIVE-ACTION SLOTS for this view's `.indexedForEachSlot` nodes,
+    /// keyed by the shipped tree's slot id. Each carries the host-evaluated row count
+    /// (`collection.count`) + a per-row factory `(Int) -> AnyView` (the thunk's, closing
+    /// over `self`). Empty for a view with no body-local-collection per-row slots.
+    let rowSlots: [String: PatchRowSlot]
 
     @State private var guestState: String = ""
 
     init(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
          writebacks: [PatchScalarWriteback], slots: [String: ([String]) -> AnyView] = [:],
-         tokens: [String: PatchHostToken] = [:]) {
+         tokens: [String: PatchHostToken] = [:],
+         rowSlots: [String: PatchRowSlot] = [:]) {
         self.typeName = typeName
         self.entry = entry
         self.propsJSON = propsJSON
         self.writebacks = writebacks
         self.slots = slots
         self.tokens = tokens
+        self.rowSlots = rowSlots
     }
 
     public var body: some View {
@@ -614,6 +621,20 @@ public struct PatchedBodyHost: View {
             return AnyView(EmptyView())
         }
 
+        // PER-ROW INDEXED SLOT SAFETY NET: every `.indexedForEachSlot(id:…)` node in the
+        // tree must have a per-row factory + count from the thunk's `__patchRowSlots()`.
+        // If a patch introduced an indexed-slot id the installed build doesn't supply (it
+        // changed native row code that isn't compiled in), we can't render the rows —
+        // DEMOTE the whole view rather than show a hole. A patch that only re-arranges the
+        // lowered structure keeps the same slot ids, so this never trips for ordinary edits.
+        let neededRowIDs = Self.collectRowSlotIDs(tree)
+        let uncoveredRows = neededRowIDs.filter { rowSlots[$0] == nil }
+        if !uncoveredRows.isEmpty {
+            let name = typeName
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name) }
+            return AnyView(EmptyView())
+        }
+
         var context = RenderContext(showOpaqueStubs: false)
         // Fill the renderer's opaque table with the native leaf renderers. A
         // PARAMETERIZED slot's factory is applied to the emission's `slotArgs[id]`
@@ -627,6 +648,14 @@ public struct PatchedBodyHost: View {
         }
         // Fill the renderer's token table with the resolved design-system token values.
         for id in neededTokenIDs { if let tok = tokens[id] { context.tokens.set(id, tok) } }
+        // Fill the renderer's per-row indexed-slot table: each carries the host-evaluated
+        // row count + the thunk's per-row factory (closing over `self`, so each row's real
+        // per-row native action works). The renderer reconstitutes `count` rows.
+        for id in neededRowIDs {
+            if let slot = rowSlots[id] {
+                context.rowSlots.set(id, count: slot.count, factory: slot.factory)
+            }
+        }
         // GeometryReader (C): wire a rebuild closure so a `geometryReader` node re-
         // evaluates its lowered child body against the LIVE proxy. On each layout the
         // host merges the proxy's size/frame as reserved `__geo_*` inputs into the
@@ -732,6 +761,20 @@ public struct PatchedBodyHost: View {
         var out: [String] = []
         func walk(_ n: ViewNode) {
             if case .opaque(let id, _) = n.kind { out.append(id) }
+            for child in n.childNodes { walk(child) }
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Every `.indexedForeachSlot` node id in the tree — the per-row native-action slots
+    /// the thunk must supply a factory + count for. Walks `childNodes` AND modifier
+    /// content (an indexed-row slot nested in a sheet/overlay body must still be covered).
+    nonisolated static func collectRowSlotIDs(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: ViewNode) {
+            if case .indexedForEachSlot(let id, _, _) = n.kind { out.append(id) }
             for child in n.childNodes { walk(child) }
             for m in n.modifiers { for child in m.contentNodes { walk(child) } }
         }
@@ -866,12 +909,22 @@ extension Patch {
     /// it) keep compiling and behave exactly as before (no tokens → a token-using view
     /// simply isn't routable, same as today).
     ///
+    /// `rowSlots` is a provider of PER-ROW INDEXED NATIVE-ACTION SLOTS (`PatchRowSlot`:
+    /// host-evaluated row count + per-row factory `(Int) -> AnyView`), keyed by the
+    /// content-stable id the tree carries in `.indexedForEachSlot(id:…)`. This is what
+    /// lets a `ForEach` over a body-local collection whose rows are a custom child view
+    /// with a per-row native action LOWER — the structure rides WASM (patchable) while
+    /// each row's native subtree + action comes from this compiled-in `self`-closing
+    /// factory. Like the others, invoked only when routing; defaulted so existing thunks
+    /// keep compiling (no row slots → an indexed-row-using view simply isn't routable).
+    ///
     /// Steady-state cost when NOT patched: a configuration check, an Observation
     /// read, an epoch compare and a dictionary lookup.
     @MainActor
     public func thunkBody(typeName: String, instance: Any,
                           slots: () -> [String: ([String]) -> AnyView] = { [:] },
-                          tokens: () -> [String: PatchHostToken] = { [:] }) -> PatchedBodyHost? {
+                          tokens: () -> [String: PatchHostToken] = { [:] },
+                          rowSlots: () -> [String: PatchRowSlot] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return nil
@@ -881,7 +934,8 @@ extension Patch {
                                propsJSON: extraction.json,
                                writebacks: extraction.writebacks,
                                slots: slots(),
-                               tokens: tokens())
+                               tokens: tokens(),
+                               rowSlots: rowSlots())
     }
 }
 #endif

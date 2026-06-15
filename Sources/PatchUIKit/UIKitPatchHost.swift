@@ -139,10 +139,30 @@ public struct PatchCellWiring {
     public var slots: [String: () -> UIView]
     /// Native action handlers, keyed by the action id the lowered control carries.
     public var actions: [String: () -> Void]
+    /// DESIGN-SYSTEM COLOR TOKEN resolvers, keyed by the shipped tree's `.hostToken(id)`.
+    /// Each evaluates the cell's real design-system color expression NATIVELY (over the
+    /// live instance), so a custom color (`SemanticColors.View.backgroundDefault`) the
+    /// guest can't reconstruct rides WASM as an id and resolves to the real `UIColor` at
+    /// render time — the UIKit analogue of the SwiftUI `__patchTokens()` color channel.
+    public var colorTokens: [String: () -> UIColor]
+    /// DESIGN-SYSTEM NUMERIC TOKEN resolvers, keyed by the content-stable id the engine
+    /// derived for a cross-file/computed numeric constant in a numeric position (a
+    /// constraint constant, `cornerRadius`, `spacing`, …). Each evaluates the cell's real
+    /// design-system number expression (`TPMenuUX.UX.viewCornerRadius`, `Theme.Radius.card`)
+    /// NATIVELY over the live instance → a `Double`. Unlike color tokens (which fill the
+    /// renderer's token table), a number token rides the INPUT JSON: its value is MERGED
+    /// into the model JSON under `__numtok_<id>` before the guest runs, so the lowered body
+    /// reads it as a `.double` input in the numeric position. The UIKit analogue of the
+    /// SwiftUI `.number` host token — no renderer-table application, no wire-format change.
+    public var numberTokens: [String: () -> Double]
     public init(slots: [String: () -> UIView] = [:],
-                actions: [String: () -> Void] = [:]) {
+                actions: [String: () -> Void] = [:],
+                colorTokens: [String: () -> UIColor] = [:],
+                numberTokens: [String: () -> Double] = [:]) {
         self.slots = slots
         self.actions = actions
+        self.colorTokens = colorTokens
+        self.numberTokens = numberTokens
     }
 }
 
@@ -167,8 +187,16 @@ extension Patch {
         guard let entry = PatchUIKitCellRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return false
         }
-        // Marshal the model's flat fields to the inputs JSON the guest scans.
-        let modelJSON = model.map { PatchUIKitModelMarshal.flatJSON(from: $0) } ?? "{}"
+        // Marshal the model's flat fields to the inputs JSON the guest scans. The wiring
+        // is materialized up-front so its DESIGN-SYSTEM NUMERIC TOKENS (resolved natively
+        // over the live cell) can be MERGED into the model JSON before the guest runs —
+        // the body reads each as a `.double` input under `__numtok_<id>` (rides the input
+        // JSON, like the SwiftUI numeric token; no wire change).
+        let w = wiring()
+        let baseModelJSON = model.map { PatchUIKitModelMarshal.flatJSON(from: $0) } ?? "{}"
+        let resolvedNumberTokens = w.numberTokens.mapValues { $0() }
+        let modelJSON = PatchUIKitModelMarshal.merging(modelJSON: baseModelJSON,
+                                                       numberTokens: resolvedNumberTokens)
 
         let emission: UIKitEmission
         do { emission = try uikitConfigure(modelJSON: modelJSON, export: entry.export) }
@@ -180,22 +208,31 @@ extension Patch {
         // Every customSlot in the tree must have a native renderer. If a patch
         // introduced a slot id that the installed thunk doesn't cover (it changed
         // native code not in this build), we can't render it — demote to native.
-        let w = wiring()
         let neededIDs = Self.collectSlotIDs(emission.root)
         if neededIDs.contains(where: { w.slots[$0] == nil }) {
             PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
             return false
         }
+        // Every design-system color TOKEN in the tree must have a native resolver. A patch
+        // that adds an unsupplied token id (changed native code not in this build) can't
+        // resolve to the real color — demote to native (faithful over a wrong default).
+        let neededTokenIDs = Self.collectColorTokenIDs(emission.root)
+        if neededTokenIDs.contains(where: { w.colorTokens[$0] == nil }) {
+            PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
+            return false
+        }
 
-        // Build the render context: the slot table + the action dispatcher.
+        // Build the render context: the slot table + the token table + the dispatcher.
         let slotTable = UIKitSlotTable()
         for id in neededIDs { if let make = w.slots[id] { slotTable.set(id, make()) } }
+        let tokenTable = UIKitTokenTable()
+        for id in neededTokenIDs { if let resolve = w.colorTokens[id] { tokenTable.setColor(id, resolve()) } }
         let dispatcher = UIKitDispatcher { event, _ in
             // A lowered control's action id maps to the cell's native handler.
             w.actions[event.id]?()
         }
         let context = UIKitRenderContext(slots: slotTable, dispatcher: dispatcher,
-                                         showSlotStubs: false)
+                                         showSlotStubs: false, tokens: tokenTable)
         let rendered = renderUIKit(emission.root, context: context)
 
         // Install into contentView: clear any prior PATCH-installed root, then add the
@@ -229,6 +266,28 @@ extension Patch {
         var out: [String] = []
         func walk(_ n: UIKitNode) {
             if case .customSlot(let id, _) = n.kind { out.append(id) }
+            for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Every `ColorRef.hostToken(id)` in the tree — the design-system color tokens the
+    /// thunk must resolve (Lever D). Inspects every color-bearing position: the common
+    /// view props (`backgroundColor`/`tintColor`) on EVERY node + the per-leaf color
+    /// payloads (`label.textColor`, `button.titleColor`/`tintColor`, `imageView.tintColor`).
+    nonisolated static func collectColorTokenIDs(_ node: UIKitNode) -> [String] {
+        var out: [String] = []
+        func tokenID(_ c: ColorRef?) { if case .hostToken(let id)? = c { out.append(id) } }
+        func walk(_ n: UIKitNode) {
+            tokenID(n.props.backgroundColor)
+            tokenID(n.props.tintColor)
+            switch n.kind {
+            case .label(_, _, let textColor, _, _): tokenID(textColor)
+            case .button(_, let titleColor, _, _): tokenID(titleColor)
+            case .imageView(_, let tintColor, _): tokenID(tintColor)
+            default: break
+            }
             for child in n.childNodes { walk(child) }
         }
         walk(node)

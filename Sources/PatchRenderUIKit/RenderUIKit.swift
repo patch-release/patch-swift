@@ -39,6 +39,17 @@ public final class UIKitSlotTable {
     public func view(for id: String) -> UIView? { views[id] }
 }
 
+/// Maps a `ColorRef.hostToken(id)` to a host-resolved `UIColor` — the design-system
+/// COLOR TOKEN table (Lever D), the UIKit analogue of the SwiftUI `HostTokenTable`.
+/// Filled by `installPatchedCell` from the thunk's native token resolvers; a missing id
+/// means a patch added an unsupplied token → the host demotes (renders native).
+public final class UIKitTokenTable {
+    private var colors: [String: UIColor] = [:]
+    public init() {}
+    public func setColor(_ id: String, _ color: UIColor) { colors[id] = color }
+    public func color(for id: String) -> UIColor? { colors[id] }
+}
+
 /// The sink a control fires when the user changes it: it carries the `EventID`
 /// (which UPDATE branch in the guest runs) and the new `IRValue`. The host
 /// forwards this to the guest's `dispatch`, the guest mutates state in WASM and
@@ -101,12 +112,17 @@ public struct UIKitRenderContext {
     /// When true, an unregistered slot renders a visible labeled stub (instead of
     /// an empty `UIView`), which is what the tests assert against.
     public var showSlotStubs: Bool
+    /// Design-system COLOR TOKEN table (Lever D): a `ColorRef.hostToken(id)` resolves
+    /// from here to the thunk-supplied native `UIColor`. Empty for a token-free tree.
+    public var tokens: UIKitTokenTable
     public init(slots: UIKitSlotTable = UIKitSlotTable(),
                 dispatcher: UIKitDispatcher? = nil,
-                showSlotStubs: Bool = true) {
+                showSlotStubs: Bool = true,
+                tokens: UIKitTokenTable = UIKitTokenTable()) {
         self.slots = slots
         self.dispatcher = dispatcher
         self.showSlotStubs = showSlotStubs
+        self.tokens = tokens
     }
 }
 
@@ -380,12 +396,13 @@ struct UIKitRenderer {
                            blue: CGFloat(col.b), alpha: CGFloat(col.a))
         case .named(let name):
             return UIKitRenderer.namedColor(name)
-        case .hostToken:
-            // A design-system color TOKEN (SwiftUI lowering feature). The UIKit path
-            // has no token table wired yet, so fall back to the adaptive default —
-            // visible and safe. (The shared IR carries the case; UIKit token resolution
-            // can be added without changing this enum.)
-            return .label
+        case .hostToken(let id):
+            // A design-system color TOKEN (Lever D): resolve from the context's token
+            // table (filled by the thunk's native color resolvers). A missing id should
+            // never reach here — `installPatchedCell` demotes the cell when a token id has
+            // no resolver — but if it does, fall back to the adaptive default (visible,
+            // safe) rather than crash.
+            return context.tokens.color(for: id) ?? .label
         }
     }
 

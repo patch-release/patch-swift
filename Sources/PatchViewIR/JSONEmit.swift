@@ -351,6 +351,14 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "forEach") { o in
                 o.object { ob in ob.field("children") { v in v.array { ar in for c in ch { ar.element { emitNode(c, into: &$0) } } } } }
             }
+        case .indexedForEachSlot(let id, let countKey, let label):
+            singleAssoc(&out, "indexedForEachSlot") { o in
+                o.object { ob in
+                    ob.field("id") { $0.string(id) }
+                    ob.field("countKey") { $0.string(countKey) }
+                    ob.field("label") { $0.string(label) }
+                }
+            }
         case .scrollView(let axis, let ch):
             singleAssoc(&out, "scrollView") { o in
                 o.object { ob in
@@ -1340,6 +1348,63 @@ public enum EmbeddedJSON {
             singleAssoc(&out, "moveDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
         case .deleteDisabled(let b):
             singleAssoc(&out, "deleteDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+
+        // MARK: Accessibility / help / a11y-config (modifier-coverage sweep v7)
+        case .help(let s):
+            singleAssoc(&out, "help") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilityIdentifier(let s):
+            singleAssoc(&out, "accessibilityIdentifier") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .accessibilitySortPriority(let p):
+            singleAssoc(&out, "accessibilitySortPriority") { $0.object { $0.field("_0") { $0.number(p) } } }
+        case .accessibilityRespondsToUserInteraction(let b):
+            singleAssoc(&out, "accessibilityRespondsToUserInteraction") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .accessibilityIgnoresInvertColors(let b):
+            singleAssoc(&out, "accessibilityIgnoresInvertColors") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .privacySensitive(let b):
+            singleAssoc(&out, "privacySensitive") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .speechAlwaysIncludesPunctuation(let b):
+            singleAssoc(&out, "speechAlwaysIncludesPunctuation") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .speechSpellsOutCharacters(let b):
+            singleAssoc(&out, "speechSpellsOutCharacters") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .speechAnnouncementsQueued(let b):
+            singleAssoc(&out, "speechAnnouncementsQueued") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .speechAdjustedPitch(let p):
+            singleAssoc(&out, "speechAdjustedPitch") { $0.object { $0.field("_0") { $0.number(p) } } }
+
+        // MARK: Text / symbol / input config (sweep v7)
+        case .scrollDismissesKeyboard(let s):
+            singleAssoc(&out, "scrollDismissesKeyboard") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .fontWidth(let s):
+            singleAssoc(&out, "fontWidth") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .textScale(let s):
+            singleAssoc(&out, "textScale") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .symbolEffectsRemoved(let b):
+            singleAssoc(&out, "symbolEffectsRemoved") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .findDisabled(let b):
+            singleAssoc(&out, "findDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .replaceDisabled(let b):
+            singleAssoc(&out, "replaceDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .statusBarHidden(let b):
+            singleAssoc(&out, "statusBarHidden") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .contentShape(let s, let eoFill):
+            singleAssoc(&out, "contentShape") { o in
+                o.object { ob in
+                    ob.field("_0") { emitShape(s, into: &$0) }
+                    ob.field("eoFill") { $0.bool(eoFill) }
+                }
+            }
+        case .coordinateSpaceNamed(let s):
+            singleAssoc(&out, "coordinateSpaceNamed") { $0.object { $0.field("_0") { $0.string(s) } } }
+
+        // MARK: Presentation config (sweep v7)
+        case .interactiveDismissDisabled(let b):
+            singleAssoc(&out, "interactiveDismissDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .presentationCornerRadius(let r):
+            singleAssoc(&out, "presentationCornerRadius") { $0.object { $0.field("_0") { $0.number(r) } } }
+        case .presentationContentInteraction(let s):
+            singleAssoc(&out, "presentationContentInteraction") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .presentationCompactAdaptation(let s):
+            singleAssoc(&out, "presentationCompactAdaptation") { $0.object { $0.field("_0") { $0.string(s) } } }
 
         case .opaque(let s):
             singleAssoc(&out, "opaque") { $0.object { $0.field("_0") { $0.string(s) } } }

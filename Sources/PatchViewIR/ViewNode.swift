@@ -933,6 +933,70 @@ public enum Modifier: Equatable, Sendable {
     /// `.deleteDisabled(_:)` — a bool literal.
     case deleteDisabled(Bool)
 
+    // MARK: Accessibility / help / a11y-config (modifier-coverage sweep v7)
+    //
+    // Each is pure string/bool/scalar config — no native closure or symbol — so it
+    // is faithfully reconstructable from the IR. The renderer reapplies the real
+    // SwiftUI modifier (OS-floor-guarded where needed). A form the emitter can't
+    // reduce to this data slots instead (demote-safe).
+
+    /// `.help(_:)` — a tooltip / accessibility-help string literal.
+    case help(String)
+    /// `.accessibilityIdentifier(_:)` — a UI-test identifier string literal.
+    case accessibilityIdentifier(String)
+    /// `.accessibilitySortPriority(_:)` — a Double ordering priority.
+    case accessibilitySortPriority(Double)
+    /// `.accessibilityRespondsToUserInteraction(_:)` — a bool literal.
+    case accessibilityRespondsToUserInteraction(Bool)
+    /// `.accessibilityIgnoresInvertColors(_:)` — a bool literal.
+    case accessibilityIgnoresInvertColors(Bool)
+    /// `.privacySensitive(_:)` — a bool literal (folds into a privacy redaction).
+    case privacySensitive(Bool)
+    /// `.speechAlwaysIncludesPunctuation(_:)` — a bool literal.
+    case speechAlwaysIncludesPunctuation(Bool)
+    /// `.speechSpellsOutCharacters(_:)` — a bool literal.
+    case speechSpellsOutCharacters(Bool)
+    /// `.speechAnnouncementsQueued(_:)` — a bool literal.
+    case speechAnnouncementsQueued(Bool)
+    /// `.speechAdjustedPitch(_:)` — a Double pitch adjustment.
+    case speechAdjustedPitch(Double)
+
+    // MARK: Text / symbol / input config (sweep v7)
+
+    /// `.scrollDismissesKeyboard(_:)` (iOS 16+) — "automatic"|"immediately"|
+    /// "interactively"|"never".
+    case scrollDismissesKeyboard(String)
+    /// `.fontWidth(_:)` (iOS 16+) — "compressed"|"condensed"|"expanded"|"standard".
+    case fontWidth(String)
+    /// `.textScale(_:)` (iOS 17+) — "default"|"secondary".
+    case textScale(String)
+    /// `.symbolEffectsRemoved(_:)` (iOS 17+) — a bool literal (defaults to true).
+    case symbolEffectsRemoved(Bool)
+    /// `.findDisabled(_:)` (iOS 16+) — a bool literal (TextEditor find-nav disable).
+    case findDisabled(Bool)
+    /// `.replaceDisabled(_:)` (iOS 16+) — a bool literal.
+    case replaceDisabled(Bool)
+    /// `.statusBarHidden(_:)` — a bool literal.
+    case statusBarHidden(Bool)
+    /// `.contentShape(_:eoFill:)` — the hit-testing/clip shape (a standard `ShapeKind`).
+    /// The `kind:` overload (`.interaction`/`.contextMenuPreview`) slots.
+    case contentShape(ShapeKind, eoFill: Bool)
+    /// `.coordinateSpace(.named(<name>))` — a NAMED coordinate space (string). The
+    /// `.local`/`.global` forms are SwiftUI defaults (no modifier needed) → slot.
+    case coordinateSpaceNamed(String)
+
+    // MARK: Presentation config (sweep v7)
+
+    /// `.interactiveDismissDisabled(_:)` — a bool literal (sheet swipe-dismiss guard).
+    case interactiveDismissDisabled(Bool)
+    /// `.presentationCornerRadius(_:)` (iOS 16.4+) — a Double radius for a sheet.
+    case presentationCornerRadius(Double)
+    /// `.presentationContentInteraction(_:)` (iOS 16.4+) — "automatic"|"resizes"|"scrolls".
+    case presentationContentInteraction(String)
+    /// `.presentationCompactAdaptation(_:)` (iOS 16.4+) — a single adaptation name
+    /// ("automatic"|"none"|"popover"|"sheet"|"fullScreenCover").
+    case presentationCompactAdaptation(String)
+
     /// A modifier we recognized syntactically but cannot lower (e.g.
     /// a continuous custom `.gesture(...)`, an arbitrary `.modifier(...)`).
     /// Carries a label for diagnostics; the host ignores it (the un-lowered
@@ -1042,6 +1106,24 @@ public indirect enum NodeKind: Equatable, Sendable {
     /// `ForEach` over a literal/marshalled array: the children are the already
     /// unrolled, per-element subtrees (the guest evaluates the loop in WASM).
     case forEach(children: [ViewNode])
+
+    /// A `ForEach` over a BODY-LOCAL collection the guest CANNOT reconstruct
+    /// (`schedule.availableOwners` off an `@Environment` service, a computed
+    /// property), whose rows are a custom child view carrying a PER-ROW NATIVE
+    /// action closure (`AccountChip(...) { schedule.selectedOwnerId = owner.id }`).
+    /// The `self`-keyed `.opaque` slot can't express "a different native subtree
+    /// per row", so this node carries a per-ROW INDEXED slot: the build-time thunk
+    /// natively evaluates the body-local collection and supplies a factory
+    /// `(Int /*row index*/) -> AnyView` keyed by `id` (closing over `self`, so each
+    /// row's real per-row native action works). The host reads the row COUNT from a
+    /// reserved `__rowcount_<id>` input the thunk merges into the guest JSON (the
+    /// `__numtok_*` mechanism — rides the input JSON, NOT the tree), then builds
+    /// `count` rows, filling row `i` from the factory. `label` is for diagnostics.
+    /// Like an `.opaque` leaf, an UNCOVERED id (no factory, or no supplied count)
+    /// demotes the WHOLE view to native — never renders a hole. Only this provable
+    /// shape lowers here; a ForEach whose rows themselves lower keeps lowering as a
+    /// `.forEach`; anything unprovable stays a native slot (demote-safe).
+    case indexedForEachSlot(id: String, countKey: String, label: String)
 
     // Containers — IR v2 (more of a real screen rides WASM, granularly patchable).
 
@@ -1338,7 +1420,9 @@ extension ViewNode {
         case .text, .styledText, .dateText, .image, .symbolImage, .bundleImage,
              .asyncImage, .spacer, .divider, .color, .shape, .progressView,
              .opaque, .slider, .textField, .secureField, .textEditor, .path,
-             .editButton:
+             .editButton, .indexedForEachSlot:
+            // `indexedForEachSlot` has NO tree children — its rows are filled
+            // natively from the thunk's per-row factory, not from the IR tree.
             return []
         }
     }

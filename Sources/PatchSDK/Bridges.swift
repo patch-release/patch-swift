@@ -810,6 +810,65 @@ public struct FoundationBridge: Bridge {
         return Int32(re.numberOfMatches(in: str, range: NSRange(location: 0, length: ns.length)))
     }
 
+    // MARK: - LEVER: Regex host bridge (the signed app's real ICU NSRegularExpression)
+    //
+    // `NSRegularExpression` / `Regex` / `String.range(of:options:.regularExpression)`
+    // ship at T2 today (the patch statically links ICU, ~11.7 MB). Regex
+    // validation/parsing/extraction is a common bug-fix shape. These flat `patch_host`
+    // bridges let a guest offload the match/capture/replace to the NATIVE shell's REAL
+    // ICU `NSRegularExpression` so the function drops to T0 (no in-module ICU) AND
+    // gains the device's exact, version-stable regex engine.
+    //
+    // FIDELITY DISCIPLINE: every bridge maps ONE deterministic developer call form to a
+    // host computation with `NSRegularExpression`'s exact semantics (the SAME engine the
+    // native app already uses). An invalid pattern returns the type-appropriate "no
+    // value" (nil / -1 / the input unchanged) — the SAME safe failure a `try?` init
+    // produces — never wrong results. `NSRegularExpression` is old-iOS-safe (iOS 4+);
+    // no `#available` guard is needed (unlike iOS-16+ `Regex`). Each is a `static func`
+    // exposed for direct unit testing, with the registered host fn delegating to it.
+
+    /// `regex_test` — does `pattern` match ANYWHERE in `str` (a Bool, 1/0). This is the
+    /// `str.range(of: pat, options: .regularExpression) != nil` / `firstMatch != nil`
+    /// shape — the dominant validation form (email/phone/format check). Invalid pattern
+    /// → false (matching a `try?` init that returns nil → no match).
+    public static func regexTest(_ str: String, pattern: String) -> Bool {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return false }
+        let ns = str as NSString
+        return re.firstMatch(in: str, range: NSRange(location: 0, length: ns.length)) != nil
+    }
+
+    /// `regex_capture` — the substring of capture GROUP `group` in the FIRST match (group
+    /// 0 = the whole match, subsuming `regexFind`). nil when there is no match, the
+    /// pattern is invalid, the group index is out of range, or the group did not
+    /// participate (`NSNotFound` range — e.g. an unmatched optional `(…)?`). This is the
+    /// `firstMatch(...).range(at: n)` extraction shape (capture-group parse).
+    public static func regexCapture(_ str: String, pattern: String, group: Int32) -> String? {
+        guard group >= 0, let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = str as NSString
+        guard let m = re.firstMatch(in: str, range: NSRange(location: 0, length: ns.length)) else {
+            return nil
+        }
+        guard Int(group) < m.numberOfRanges else { return nil }
+        let r = m.range(at: Int(group))
+        // A non-participating optional group has an NSNotFound location → treat as nil
+        // (matches `Range(_:in:)` returning nil for such a group).
+        guard r.location != NSNotFound else { return nil }
+        return ns.substring(with: r)
+    }
+
+    /// `regex_replace` — replace ALL matches of `pattern` in `str` with `template`
+    /// (ICU template semantics: `$1`/`$0` back-references, `\$` to escape). Serves both
+    /// `NSRegularExpression.stringByReplacingMatches(...withTemplate:)` and
+    /// `str.replacingOccurrences(of: pat, with: template, options: .regularExpression)`.
+    /// An invalid pattern returns the input UNCHANGED (matching
+    /// `replacingOccurrences`'s no-op on a pattern that can't compile — never lossy).
+    public static func regexReplace(_ str: String, pattern: String, template: String) -> String {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return str }
+        let ns = str as NSString
+        return re.stringByReplacingMatches(
+            in: str, range: NSRange(location: 0, length: ns.length), withTemplate: template)
+    }
+
     /// `date_format` — format a Unix-millis instant with a `DateFormatter` pattern.
     /// tz defaults to UTC; locale fixed to en_US_POSIX so the pattern is stable.
     public static func dateFormat(unixMillis: Int64, format: String, timeZone: String) -> String {
@@ -1058,6 +1117,28 @@ public struct FoundationBridge: Bridge {
             let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
             let pat = try ctx.readString(ptr: args[2].i32, len: args[3].i32)
             return [.i32(UInt32(bitPattern: Self.regexCount(s, pattern: pat)))]
+        }
+        // regex_test(str ptr,len, pat ptr,len) -> i32 (1 matches anywhere / 0 not).
+        imports.host(module, "regex_test", [.i32, .i32, .i32, .i32], [.i32], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            let pat = try ctx.readString(ptr: args[2].i32, len: args[3].i32)
+            return [.i32(Self.regexTest(s, pattern: pat) ? 1 : 0)]
+        }
+        // regex_capture(str ptr,len, pat ptr,len, group) -> packed group substring (0 = none).
+        imports.host(module, "regex_capture", [.i32, .i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            let pat = try ctx.readString(ptr: args[2].i32, len: args[3].i32)
+            return [try ctx.packedResult(Self.regexCapture(s, pattern: pat, group: Int32(bitPattern: args[4].i32)))]
+        }
+        // regex_replace(str ptr,len, pat ptr,len, tmpl ptr,len) -> packed replaced string.
+        imports.host(module, "regex_replace", [.i32, .i32, .i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
+            let pat = try ctx.readString(ptr: args[2].i32, len: args[3].i32)
+            let tmpl = try ctx.readString(ptr: args[4].i32, len: args[5].i32)
+            return [try ctx.packedResult(Self.regexReplace(s, pattern: pat, template: tmpl))]
         }
         // date_format(unixMillis, fmt ptr,len, tz ptr,len) -> packed string.
         imports.host(module, "date_format", [.i64, .i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in

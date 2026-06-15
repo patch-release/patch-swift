@@ -69,6 +69,42 @@ public enum PatchHostToken: Sendable {
     case string(String)
 }
 
+/// Maps an `indexedForEachSlot` id to its PER-ROW native factory `(Int) -> AnyView`
+/// (the build-time thunk's, closing over the view's `self`, so each row's real per-row
+/// native action works) AND the host-evaluated row COUNT. Filled by `PatchedBodyHost`
+/// from the thunk's `__patchRowSlots()`/`__patchRowCounts()` before rendering, then read
+/// by the renderer when it hits an `.indexedForEachSlot(id:countKey:label:)` node: it
+/// reconstitutes `count` rows, filling row `i` from `factory(i)`. A missing factory OR a
+/// missing/zero count is demote-handled upstream (`PatchedBodyHost` refuses to render a
+/// tree whose indexed-slot id the thunk didn't cover), so the renderer's empty fallback
+/// here is belt-and-suspenders rather than the primary safety net.
+///
+/// A PER-ROW INDEXED NATIVE-ACTION SLOT the build-time thunk supplies for an
+/// `.indexedForEachSlot` node: the host-evaluated row `count` (`collection.count`,
+/// evaluated natively over the view's `self`) and a per-row `factory` `(Int) -> AnyView`
+/// (closing over `self`, so row `i`'s real per-row native action works). The thunk's
+/// `__patchRowSlots()` returns these keyed by the content-stable slot id; `PatchedBodyHost`
+/// fills the `RowSlotTable` + merges the count into the guest input JSON before rendering.
+@MainActor
+public struct PatchRowSlot {
+    public let count: Int
+    public let factory: (Int) -> AnyView
+    public init(count: Int, factory: @escaping (Int) -> AnyView) {
+        self.count = count; self.factory = factory
+    }
+}
+
+public final class RowSlotTable {
+    private var factories: [String: (Int) -> AnyView] = [:]
+    private var counts: [String: Int] = [:]
+    public init() {}
+    public func set(_ id: String, count: Int, factory: @escaping (Int) -> AnyView) {
+        factories[id] = factory; counts[id] = count
+    }
+    public func factory(for id: String) -> ((Int) -> AnyView)? { factories[id] }
+    public func count(for id: String) -> Int? { counts[id] }
+}
+
 /// Maps a token id to its host-supplied `Color`/`Font`. Filled by `PatchedBodyHost`
 /// from the thunk's `__patchTokens()` before rendering, then read by the renderer
 /// when it hits a `.hostToken(id)` color or a `.fontToken(id)` modifier. A missing
@@ -127,6 +163,10 @@ public struct RenderContext {
     /// Host-supplied DESIGN-SYSTEM TOKEN values (`.hostToken(id)` colors,
     /// `.fontToken(id)` fonts) the thunk resolved from the app's compiled-in tokens.
     public var tokens: HostTokenTable
+    /// Host-supplied PER-ROW INDEXED NATIVE-ACTION SLOTS (`.indexedForEachSlot`): per
+    /// slot id, the row factory `(Int) -> AnyView` (the thunk's, closing over `self`)
+    /// and the host-evaluated row count. Empty for a view with no indexed-row slots.
+    public var rowSlots: RowSlotTable
     /// Where interactive controls send their events (the host forwards to the
     /// guest `dispatch`). When nil, controls render but are inert (read-only).
     public var dispatcher: Dispatcher?
@@ -139,12 +179,14 @@ public struct RenderContext {
     public init(actions: ActionTable = ActionTable(),
                 opaques: OpaqueTable = OpaqueTable(),
                 tokens: HostTokenTable = HostTokenTable(),
+                rowSlots: RowSlotTable = RowSlotTable(),
                 dispatcher: Dispatcher? = nil,
                 showOpaqueStubs: Bool = true,
                 geometryRebuild: GeometryRebuild? = nil) {
         self.actions = actions
         self.opaques = opaques
         self.tokens = tokens
+        self.rowSlots = rowSlots
         self.dispatcher = dispatcher
         self.showOpaqueStubs = showOpaqueStubs
         self.geometryRebuild = geometryRebuild
@@ -864,6 +906,32 @@ struct Renderer {
             if context.showOpaqueStubs {
                 return AnyView(
                     Text("native:\(label)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                )
+            }
+            return AnyView(EmptyView())
+
+        case .indexedForEachSlot(let id, _, let label):
+            // PER-ROW INDEXED NATIVE-ACTION SLOT: reconstitute `count` rows, filling row
+            // `i` from the thunk's per-row factory (which closes over the view's `self`,
+            // so each row's real per-row native action works). The count is host-evaluated
+            // (the thunk supplied `collection.count`); the factory is the thunk's
+            // `(Int) -> AnyView`. A missing factory/count demotes upstream — here we render
+            // an empty list (belt-and-suspenders) or a labeled stub when stubs are on.
+            if let factory = context.rowSlots.factory(for: id),
+               let count = context.rowSlots.count(for: id) {
+                // Use enumerated identity (`id: \.self` over the index range) so SwiftUI
+                // diffs rows by position — correct for an index-keyed native row set.
+                return AnyView(
+                    ForEach(0..<max(0, count), id: \.self) { i in
+                        factory(i)
+                    }
+                )
+            }
+            if context.showOpaqueStubs {
+                return AnyView(
+                    Text("native-rows:\(label)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 )
@@ -1682,6 +1750,134 @@ struct Renderer {
             return AnyView(v.moveDisabled(b))
         case .deleteDisabled(let b):
             return AnyView(v.deleteDisabled(b))
+
+        // MARK: Accessibility / help / a11y-config (modifier-coverage sweep v7)
+        case .help(let s):
+            return AnyView(v.help(LocalizedStringKey(s)))
+        case .accessibilityIdentifier(let s):
+            return AnyView(v.accessibilityIdentifier(s))
+        case .accessibilitySortPriority(let p):
+            return AnyView(v.accessibilitySortPriority(p))
+        case .accessibilityRespondsToUserInteraction(let b):
+            return AnyView(v.accessibilityRespondsToUserInteraction(b))
+        case .accessibilityIgnoresInvertColors(let b):
+            return AnyView(v.accessibilityIgnoresInvertColors(b))
+        case .privacySensitive(let b):
+            return AnyView(v.privacySensitive(b))
+        case .speechAlwaysIncludesPunctuation(let b):
+            return AnyView(v.speechAlwaysIncludesPunctuation(b))
+        case .speechSpellsOutCharacters(let b):
+            return AnyView(v.speechSpellsOutCharacters(b))
+        case .speechAnnouncementsQueued(let b):
+            return AnyView(v.speechAnnouncementsQueued(b))
+        case .speechAdjustedPitch(let p):
+            return AnyView(v.speechAdjustedPitch(p))
+
+        // MARK: Text / symbol / input config (sweep v7)
+        case .scrollDismissesKeyboard(let s):
+            #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            if #available(iOS 16, tvOS 16, watchOS 9, visionOS 1, *) {
+                let mode: ScrollDismissesKeyboardMode
+                switch s {
+                case "immediately": mode = .immediately
+                case "interactively": mode = .interactively
+                case "never": mode = .never
+                default: mode = .automatic
+                }
+                return AnyView(v.scrollDismissesKeyboard(mode))
+            }
+            return v
+            #else
+            _ = s; return v
+            #endif
+        case .fontWidth(let s):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                let w: Font.Width
+                switch s {
+                case "compressed": w = .compressed
+                case "condensed": w = .condensed
+                case "expanded": w = .expanded
+                default: w = .standard
+                }
+                return AnyView(v.fontWidth(w))
+            }
+            return v
+        case .textScale(let s):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.textScale(s == "secondary" ? .secondary : .default))
+            }
+            return v
+        case .symbolEffectsRemoved(let b):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.symbolEffectsRemoved(b))
+            }
+            return v
+        case .findDisabled(let b):
+            #if os(iOS) || os(visionOS)
+            if #available(iOS 16, visionOS 1, *) {
+                return AnyView(v.findDisabled(b))
+            }
+            return v
+            #else
+            _ = b; return v
+            #endif
+        case .replaceDisabled(let b):
+            #if os(iOS) || os(visionOS)
+            if #available(iOS 16, visionOS 1, *) {
+                return AnyView(v.replaceDisabled(b))
+            }
+            return v
+            #else
+            _ = b; return v
+            #endif
+        case .statusBarHidden(let b):
+            #if os(iOS) || os(visionOS)
+            return AnyView(v.statusBarHidden(b))
+            #else
+            _ = b; return v
+            #endif
+        case .contentShape(let k, let eoFill):
+            return AnyView(v.contentShape(shapeValue(k), eoFill: eoFill))
+        case .coordinateSpaceNamed(let s):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.coordinateSpace(.named(s)))
+            }
+            // Pre-iOS-17: the value-typed `.named(_:)` `CoordinateSpace` isn't available;
+            // the deprecated string-name form is the faithful equivalent.
+            return AnyView(v.coordinateSpace(name: s))
+
+        // MARK: Presentation config (sweep v7)
+        case .interactiveDismissDisabled(let b):
+            return AnyView(v.interactiveDismissDisabled(b))
+        case .presentationCornerRadius(let r):
+            if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, visionOS 1, *) {
+                return AnyView(v.presentationCornerRadius(CGFloat(r)))
+            }
+            return v
+        case .presentationContentInteraction(let s):
+            if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, visionOS 1, *) {
+                let mode: PresentationContentInteraction
+                switch s {
+                case "resizes": mode = .resizes
+                case "scrolls": mode = .scrolls
+                default: mode = .automatic
+                }
+                return AnyView(v.presentationContentInteraction(mode))
+            }
+            return v
+        case .presentationCompactAdaptation(let s):
+            if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, visionOS 1, *) {
+                let a: PresentationAdaptation
+                switch s {
+                case "none": a = .none
+                case "popover": a = .popover
+                case "sheet": a = .sheet
+                case "fullScreenCover": a = .fullScreenCover
+                default: a = .automatic
+                }
+                return AnyView(v.presentationCompactAdaptation(a))
+            }
+            return v
 
         case .opaque:
             // A modifier we couldn't lower — leave the view unchanged. The

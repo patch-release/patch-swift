@@ -97,6 +97,13 @@ public enum N {
     public static func forEach(_ children: [ViewNode]) -> ViewNode {
         ViewNode(.forEach(children: children))
     }
+    /// A PER-ROW INDEXED NATIVE-ACTION SLOT (see `NodeKind.indexedForEachSlot`): a
+    /// `ForEach` over a body-local collection whose rows are a custom child view with a
+    /// per-row native action. The build-time thunk supplies a `(Int) -> AnyView` factory
+    /// keyed by `id` + the row count under `countKey`; the host reconstitutes the rows.
+    public static func indexedForEachSlot(id: String, countKey: String, label: String) -> ViewNode {
+        ViewNode(.indexedForEachSlot(id: id, countKey: countKey, label: label))
+    }
 
     // Containers — IR v2 (more of a real screen rides WASM).
     public static func scrollView(axis: IRScrollAxis = .vertical,
@@ -664,4 +671,43 @@ extension ViewNode {
     public func selectionDisabled(_ b: Bool) -> ViewNode { with(.selectionDisabled(b)) }
     public func moveDisabled(_ b: Bool) -> ViewNode { with(.moveDisabled(b)) }
     public func deleteDisabled(_ b: Bool) -> ViewNode { with(.deleteDisabled(b)) }
+
+    // MARK: Accessibility / help / a11y-config (modifier-coverage sweep v7)
+    public func help(_ s: String) -> ViewNode { with(.help(s)) }
+    public func accessibilityIdentifier(_ s: String) -> ViewNode { with(.accessibilityIdentifier(s)) }
+    public func accessibilitySortPriority(_ p: Double) -> ViewNode { with(.accessibilitySortPriority(p)) }
+    public func accessibilityRespondsToUserInteraction(_ b: Bool) -> ViewNode {
+        with(.accessibilityRespondsToUserInteraction(b))
+    }
+    public func accessibilityIgnoresInvertColors(_ b: Bool) -> ViewNode {
+        with(.accessibilityIgnoresInvertColors(b))
+    }
+    public func privacySensitive(_ b: Bool) -> ViewNode { with(.privacySensitive(b)) }
+    public func speechAlwaysIncludesPunctuation(_ b: Bool) -> ViewNode {
+        with(.speechAlwaysIncludesPunctuation(b))
+    }
+    public func speechSpellsOutCharacters(_ b: Bool) -> ViewNode { with(.speechSpellsOutCharacters(b)) }
+    public func speechAnnouncementsQueued(_ b: Bool) -> ViewNode { with(.speechAnnouncementsQueued(b)) }
+    public func speechAdjustedPitch(_ p: Double) -> ViewNode { with(.speechAdjustedPitch(p)) }
+    // Text / symbol / input config (sweep v7)
+    public func scrollDismissesKeyboard(_ s: String) -> ViewNode { with(.scrollDismissesKeyboard(s)) }
+    public func fontWidth(_ s: String) -> ViewNode { with(.fontWidth(s)) }
+    public func textScale(_ s: String) -> ViewNode { with(.textScale(s)) }
+    public func symbolEffectsRemoved(_ b: Bool) -> ViewNode { with(.symbolEffectsRemoved(b)) }
+    public func findDisabled(_ b: Bool) -> ViewNode { with(.findDisabled(b)) }
+    public func replaceDisabled(_ b: Bool) -> ViewNode { with(.replaceDisabled(b)) }
+    public func statusBarHidden(_ b: Bool) -> ViewNode { with(.statusBarHidden(b)) }
+    public func contentShape(_ s: ShapeKind, eoFill: Bool = false) -> ViewNode {
+        with(.contentShape(s, eoFill: eoFill))
+    }
+    public func coordinateSpaceNamed(_ s: String) -> ViewNode { with(.coordinateSpaceNamed(s)) }
+    // Presentation config (sweep v7)
+    public func interactiveDismissDisabled(_ b: Bool) -> ViewNode { with(.interactiveDismissDisabled(b)) }
+    public func presentationCornerRadius(_ r: Double) -> ViewNode { with(.presentationCornerRadius(r)) }
+    public func presentationContentInteraction(_ s: String) -> ViewNode {
+        with(.presentationContentInteraction(s))
+    }
+    public func presentationCompactAdaptation(_ s: String) -> ViewNode {
+        with(.presentationCompactAdaptation(s))
+    }
 }
