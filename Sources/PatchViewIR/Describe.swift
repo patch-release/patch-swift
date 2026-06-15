@@ -323,6 +323,38 @@ extension Modifier {
         case .disclosureGroupStyle(let s): return ".disclosureGroupStyle(\(s))"
         case .tableStyle(let s): return ".tableStyle(\(s))"
 
+        // Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+        case .hidden: return ".hidden"
+        case .labelsHidden: return ".labelsHidden"
+        case .labelsVisibility(let s): return ".labelsVisibility(\(s))"
+        case .menuIndicator(let s): return ".menuIndicator(\(s))"
+        case .menuOrder(let s): return ".menuOrder(\(s))"
+        case .persistentSystemOverlays(let s): return ".persistentSystemOverlays(\(s))"
+        case .headerProminence(let s): return ".headerProminence(\(s))"
+        case .badgeProminence(let s): return ".badgeProminence(\(s))"
+        case .listItemTint(let c): return ".listItemTint(\(c.map { "\($0)" } ?? "nil"))"
+        case .listRowSeparatorTint(let c, let edges):
+            return ".listRowSeparatorTint(\(c.map { "\($0)" } ?? "nil"),edges:\(edges))"
+        case .listSectionSeparatorTint(let c, let edges):
+            return ".listSectionSeparatorTint(\(c.map { "\($0)" } ?? "nil"),edges:\(edges))"
+        case .containerShape(let s): return ".containerShape(\(s))"
+        case .compositingGroup: return ".compositingGroup"
+        case .geometryGroup: return ".geometryGroup"
+        case .drawingGroup(let opaque): return ".drawingGroup(opaque:\(opaque))"
+        case .colorMultiply(let c): return ".colorMultiply(\(c))"
+        case .luminanceToAlpha: return ".luminanceToAlpha"
+        case .contentTransition(let s): return ".contentTransition(\(s))"
+        case .textSelection(let b): return ".textSelection(\(b))"
+        case .allowsTightening(let b): return ".allowsTightening(\(b))"
+        case .flipsForRightToLeftLayoutDirection(let b): return ".flipsForRightToLeftLayoutDirection(\(b))"
+        case .invalidatableContent(let b): return ".invalidatableContent(\(b))"
+        case .lineLimitReservesSpace(let limit, let reserves):
+            return ".lineLimitReservesSpace(limit:\(limit),reservesSpace:\(reserves))"
+        case .defaultScrollAnchor(let p): return ".defaultScrollAnchor(\(p.map { "\($0)" } ?? "nil"))"
+        case .selectionDisabled(let b): return ".selectionDisabled(\(b))"
+        case .moveDisabled(let b): return ".moveDisabled(\(b))"
+        case .deleteDisabled(let b): return ".deleteDisabled(\(b))"
+
         case .opaque(let s): return ".opaque(\(s))"
         }
     }

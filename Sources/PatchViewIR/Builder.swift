@@ -627,4 +627,41 @@ extension ViewNode {
     public func controlGroupStyle(_ s: String) -> ViewNode { with(.controlGroupStyle(s)) }
     public func disclosureGroupStyle(_ s: String) -> ViewNode { with(.disclosureGroupStyle(s)) }
     public func tableStyle(_ s: String) -> ViewNode { with(.tableStyle(s)) }
+
+    // MARK: Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+    public func hidden() -> ViewNode { with(.hidden) }
+    public func labelsHidden() -> ViewNode { with(.labelsHidden) }
+    public func labelsVisibility(_ s: String) -> ViewNode { with(.labelsVisibility(s)) }
+    public func menuIndicator(_ s: String) -> ViewNode { with(.menuIndicator(s)) }
+    public func menuOrder(_ s: String) -> ViewNode { with(.menuOrder(s)) }
+    public func persistentSystemOverlays(_ s: String) -> ViewNode { with(.persistentSystemOverlays(s)) }
+    public func headerProminence(_ s: String) -> ViewNode { with(.headerProminence(s)) }
+    public func badgeProminence(_ s: String) -> ViewNode { with(.badgeProminence(s)) }
+    public func listItemTint(_ c: ColorRef?) -> ViewNode { with(.listItemTint(c)) }
+    public func listRowSeparatorTint(_ c: ColorRef?, edges: String = "all") -> ViewNode {
+        with(.listRowSeparatorTint(c, edges: edges))
+    }
+    public func listSectionSeparatorTint(_ c: ColorRef?, edges: String = "all") -> ViewNode {
+        with(.listSectionSeparatorTint(c, edges: edges))
+    }
+    public func containerShape(_ s: ShapeKind) -> ViewNode { with(.containerShape(s)) }
+    public func compositingGroup() -> ViewNode { with(.compositingGroup) }
+    public func geometryGroup() -> ViewNode { with(.geometryGroup) }
+    public func drawingGroup(opaque: Bool = false) -> ViewNode { with(.drawingGroup(opaque: opaque)) }
+    public func colorMultiply(_ c: ColorRef) -> ViewNode { with(.colorMultiply(c)) }
+    public func luminanceToAlpha() -> ViewNode { with(.luminanceToAlpha) }
+    public func contentTransition(_ s: String) -> ViewNode { with(.contentTransition(s)) }
+    public func textSelection(_ enabled: Bool) -> ViewNode { with(.textSelection(enabled)) }
+    public func allowsTightening(_ b: Bool) -> ViewNode { with(.allowsTightening(b)) }
+    public func flipsForRightToLeftLayoutDirection(_ b: Bool) -> ViewNode {
+        with(.flipsForRightToLeftLayoutDirection(b))
+    }
+    public func invalidatableContent(_ b: Bool = true) -> ViewNode { with(.invalidatableContent(b)) }
+    public func lineLimitReservesSpace(limit: Int, reservesSpace: Bool) -> ViewNode {
+        with(.lineLimitReservesSpace(limit: limit, reservesSpace: reservesSpace))
+    }
+    public func defaultScrollAnchor(_ p: IRUnitPoint?) -> ViewNode { with(.defaultScrollAnchor(p)) }
+    public func selectionDisabled(_ b: Bool) -> ViewNode { with(.selectionDisabled(b)) }
+    public func moveDisabled(_ b: Bool) -> ViewNode { with(.moveDisabled(b)) }
+    public func deleteDisabled(_ b: Bool) -> ViewNode { with(.deleteDisabled(b)) }
 }

@@ -1240,6 +1240,81 @@ public enum EmbeddedJSON {
         case .tableStyle(let s):
             singleAssoc(&out, "tableStyle") { $0.object { $0.field("_0") { $0.string(s) } } }
 
+        // MARK: Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+        case .hidden:
+            stringCase(&out, "hidden")
+        case .labelsHidden:
+            stringCase(&out, "labelsHidden")
+        case .labelsVisibility(let s):
+            singleAssoc(&out, "labelsVisibility") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .menuIndicator(let s):
+            singleAssoc(&out, "menuIndicator") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .menuOrder(let s):
+            singleAssoc(&out, "menuOrder") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .persistentSystemOverlays(let s):
+            singleAssoc(&out, "persistentSystemOverlays") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .headerProminence(let s):
+            singleAssoc(&out, "headerProminence") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .badgeProminence(let s):
+            singleAssoc(&out, "badgeProminence") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .listItemTint(let c):
+            singleAssoc(&out, "listItemTint") { o in
+                o.object { ob in ob.field("_0") { v in if let c { emitColor(c, into: &v) } else { v.null() } } }
+            }
+        case .listRowSeparatorTint(let c, let edges):
+            singleAssoc(&out, "listRowSeparatorTint") { o in
+                o.object { ob in
+                    ob.field("_0") { v in if let c { emitColor(c, into: &v) } else { v.null() } }
+                    ob.field("edges") { $0.string(edges) }
+                }
+            }
+        case .listSectionSeparatorTint(let c, let edges):
+            singleAssoc(&out, "listSectionSeparatorTint") { o in
+                o.object { ob in
+                    ob.field("_0") { v in if let c { emitColor(c, into: &v) } else { v.null() } }
+                    ob.field("edges") { $0.string(edges) }
+                }
+            }
+        case .containerShape(let s):
+            singleAssoc(&out, "containerShape") { $0.object { $0.field("_0") { emitShape(s, into: &$0) } } }
+        case .compositingGroup:
+            stringCase(&out, "compositingGroup")
+        case .geometryGroup:
+            stringCase(&out, "geometryGroup")
+        case .drawingGroup(let opaque):
+            singleAssoc(&out, "drawingGroup") { $0.object { $0.field("opaque") { $0.bool(opaque) } } }
+        case .colorMultiply(let c):
+            singleAssoc(&out, "colorMultiply") { $0.object { $0.field("_0") { emitColor(c, into: &$0) } } }
+        case .luminanceToAlpha:
+            stringCase(&out, "luminanceToAlpha")
+        case .contentTransition(let s):
+            singleAssoc(&out, "contentTransition") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .textSelection(let b):
+            singleAssoc(&out, "textSelection") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .allowsTightening(let b):
+            singleAssoc(&out, "allowsTightening") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .flipsForRightToLeftLayoutDirection(let b):
+            singleAssoc(&out, "flipsForRightToLeftLayoutDirection") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .invalidatableContent(let b):
+            singleAssoc(&out, "invalidatableContent") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .lineLimitReservesSpace(let limit, let reserves):
+            singleAssoc(&out, "lineLimitReservesSpace") { o in
+                o.object { ob in
+                    ob.field("limit") { $0.number(limit) }
+                    ob.field("reservesSpace") { $0.bool(reserves) }
+                }
+            }
+        case .defaultScrollAnchor(let p):
+            singleAssoc(&out, "defaultScrollAnchor") { o in
+                o.object { ob in ob.field("_0") { v in if let p { emitUnitPoint(p, into: &v) } else { v.null() } } }
+            }
+        case .selectionDisabled(let b):
+            singleAssoc(&out, "selectionDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .moveDisabled(let b):
+            singleAssoc(&out, "moveDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+        case .deleteDisabled(let b):
+            singleAssoc(&out, "deleteDisabled") { $0.object { $0.field("_0") { $0.bool(b) } } }
+
         case .opaque(let s):
             singleAssoc(&out, "opaque") { $0.object { $0.field("_0") { $0.string(s) } } }
         }

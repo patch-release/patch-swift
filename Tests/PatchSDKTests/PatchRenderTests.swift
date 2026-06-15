@@ -440,6 +440,21 @@ final class PatchRenderTests: XCTestCase {
             N.text("an").animation(IRAnimation(curve: "easeInOut", duration: 0.3), valueKey: "count")
                 .transition(.asymmetric(insertion: .scale(scale: 0.5, anchor: .center),
                                         removal: .combined([.opacity, .move(edge: "bottom")]))),
+            // Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+            N.text("v6").hidden().labelsHidden().labelsVisibility("visible")
+                .menuIndicator("hidden").menuOrder("fixed").persistentSystemOverlays("hidden")
+                .headerProminence("increased").badgeProminence("increased")
+                .listItemTint(.named("blue")).listItemTint(nil)
+                .listRowSeparatorTint(.named("green"), edges: "top")
+                .listSectionSeparatorTint(nil, edges: "all")
+                .containerShape(.capsule).compositingGroup().geometryGroup()
+                .drawingGroup(opaque: true).colorMultiply(.named("red")).luminanceToAlpha()
+                .contentTransition("numericText").textSelection(true)
+                .allowsTightening(true).flipsForRightToLeftLayoutDirection(false)
+                .invalidatableContent(true)
+                .lineLimitReservesSpace(limit: 2, reservesSpace: true)
+                .defaultScrollAnchor(.bottom).defaultScrollAnchor(nil)
+                .selectionDisabled(true).moveDisabled(false).deleteDisabled(true),
         ])
 
         let emission = BodyEmission(root: tree, computeCoverage: false,
@@ -535,6 +550,20 @@ final class PatchRenderTests: XCTestCase {
                 .onSubmit(event: "sub")
                 .transition(.combined([.opacity, .scale(scale: 0.5, anchor: .center)]))
                 .animation(IRAnimation(curve: "spring", response: 0.4, dampingFraction: 0.8), valueKey: "x"),
+            // Visibility / chrome / declarative effects (sweep v6) — render-apply must
+            // not crash for any case (each is OS-floor-guarded with a fallback).
+            N.text("v6").hidden().labelsHidden().labelsVisibility("hidden")
+                .menuIndicator("automatic").menuOrder("priority").persistentSystemOverlays("visible")
+                .headerProminence("standard").badgeProminence("decreased")
+                .listItemTint(.named("teal")).listRowSeparatorTint(.named("orange"), edges: "bottom")
+                .listSectionSeparatorTint(nil, edges: "all")
+                .containerShape(.roundedRectangle(cornerRadius: 12)).compositingGroup()
+                .geometryGroup().drawingGroup(opaque: false).colorMultiply(.named("pink"))
+                .luminanceToAlpha().contentTransition("interpolate").textSelection(false)
+                .allowsTightening(false).flipsForRightToLeftLayoutDirection(true)
+                .invalidatableContent(false).lineLimitReservesSpace(limit: 3, reservesSpace: false)
+                .defaultScrollAnchor(.top).selectionDisabled(false)
+                .moveDisabled(true).deleteDisabled(false),
         ])
         XCTAssertNotNil(render(tree))
     }

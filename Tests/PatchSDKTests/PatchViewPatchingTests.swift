@@ -170,6 +170,28 @@ final class PatchViewPatchingTests: XCTestCase {
         XCTAssertEqual(PatchValueEncoder.encode(d), #"{"a":1,"b":2}"#)
     }
 
+    func testEncodeDeeplyNestedStructFieldsLockGuestContract() {
+        // The exact wire shape the engine's RICH-INPUT guest scanners decode: a struct
+        // with a nested struct, a scalar-array field, a `[String:Int]` dict field, and a
+        // nested struct-array. Locks the byte contract so the CLI guest stays in sync.
+        struct Address: Codable { var city: String; var zip: String }
+        struct LineItem: Codable { var label: String; var qty: Int }
+        struct Profile: Codable {
+            var name: String
+            var address: Address
+            var tags: [String]
+            var scores: [String: Int]
+            var items: [LineItem]
+        }
+        let p = Profile(name: "Ada", address: Address(city: "London", zip: "NW1"),
+                        tags: ["a", "b"], scores: ["x": 1], items: [LineItem(label: "Pen", qty: 2)])
+        // Keys are emitted in sorted order; the guest scans by key NAME so order is
+        // irrelevant to decoding, but locking it keeps the contract test deterministic.
+        XCTAssertEqual(
+            PatchValueEncoder.encode(p),
+            #"{"address":{"city":"London","zip":"NW1"},"items":[{"label":"Pen","qty":2}],"name":"Ada","scores":{"x":1},"tags":["a","b"]}"#)
+    }
+
     func testEncodeDate() {
         let date = Date(timeIntervalSince1970: 1000)
         XCTAssertEqual(PatchValueEncoder.encode(date), "1000")

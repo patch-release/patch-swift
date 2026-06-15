@@ -73,8 +73,22 @@ public enum PatchViewIRSchema {
     /// gates a newer guest (one that uses a scroll/layout modifier) against an older
     /// host that can't decode the new case (it would collapse the whole view, so the
     /// gate correctly refuses the module → native fallback).
+    /// v6 = VISIBILITY / CHROME / DECLARATIVE-EFFECT modifiers: the `hidden`/
+    /// `labelsHidden`/`labelsVisibility`/`menuIndicator`/`menuOrder`/
+    /// `persistentSystemOverlays`/`headerProminence`/`badgeProminence`/`listItemTint`/
+    /// `listRowSeparatorTint`/`listSectionSeparatorTint`/`containerShape`/
+    /// `compositingGroup`/`geometryGroup`/`drawingGroup`/`colorMultiply`/
+    /// `luminanceToAlpha`/`contentTransition`/`textSelection`/`allowsTightening`/
+    /// `flipsForRightToLeftLayoutDirection`/`invalidatableContent`/
+    /// `lineLimitReservesSpace`/`defaultScrollAnchor`/`selectionDisabled`/
+    /// `moveDisabled`/`deleteDisabled` `Modifier` cases (declarative enum/bool/scalar/
+    /// ColorRef/ShapeKind config that previously slotted; the renderer reapplies the
+    /// real SwiftUI modifier, OS-floor-guarded). Purely additive: a v6 host decodes
+    /// v1–v5 guests (older trees never carry the new cases); the bump gates a newer
+    /// guest (one using a v6 modifier) against an older host that can't decode the new
+    /// case (it would collapse the whole view, so the gate correctly refuses → native).
 
-    public static let version = 5
+    public static let version = 6
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

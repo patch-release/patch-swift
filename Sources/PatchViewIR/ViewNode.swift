@@ -865,6 +865,74 @@ public enum Modifier: Equatable, Sendable {
     /// `.tableStyle(_:)` — "automatic"|"inset"|"bordered".
     case tableStyle(String)
 
+    // MARK: Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+    //
+    // Each is pure enum/bool/scalar/ColorRef/ShapeKind config — no native closure
+    // or symbol — so it is faithfully reconstructable from the IR. The renderer
+    // reapplies the real SwiftUI modifier (OS-floor-guarded where needed). A form
+    // the emitter can't reduce to this data slots instead (demote-safe).
+
+    /// `.hidden()` — hide the view while preserving its layout footprint.
+    case hidden
+    /// `.labelsHidden()` — hide the labels of contained controls.
+    case labelsHidden
+    /// `.labelsVisibility(_:)` (iOS 18+) — "automatic"|"visible"|"hidden".
+    case labelsVisibility(String)
+    /// `.menuIndicator(_:)` (iOS 16+) — Visibility "automatic"|"visible"|"hidden".
+    case menuIndicator(String)
+    /// `.menuOrder(_:)` (iOS 16+) — "automatic"|"fixed"|"priority".
+    case menuOrder(String)
+    /// `.persistentSystemOverlays(_:)` (iOS 16+) — Visibility.
+    case persistentSystemOverlays(String)
+    /// `.headerProminence(_:)` — "standard"|"increased".
+    case headerProminence(String)
+    /// `.badgeProminence(_:)` (iOS 17+) — "standard"|"increased"|"decreased".
+    case badgeProminence(String)
+    /// `.listItemTint(_:)` — a fixed tint color (nil resets). The `.monochrome`/
+    /// `.preferred` ListItemTint forms slot (no plain ColorRef).
+    case listItemTint(ColorRef?)
+    /// `.listRowSeparatorTint(_:edges:)` — a separator tint color + Edge.Set
+    /// ("all"|"top"|"bottom"|...). A nil color resets to the default.
+    case listRowSeparatorTint(ColorRef?, edges: String)
+    /// `.listSectionSeparatorTint(_:edges:)` — same shape as the row form.
+    case listSectionSeparatorTint(ColorRef?, edges: String)
+    /// `.containerShape(_:)` — the clipping shape used by `.contentShape` /
+    /// `.background(in:)` descendants (a standard `ShapeKind`).
+    case containerShape(ShapeKind)
+    /// `.compositingGroup()` — flatten into a single rendering layer.
+    case compositingGroup
+    /// `.geometryGroup()` (iOS 17+) — isolate geometry for animation.
+    case geometryGroup
+    /// `.drawingGroup(opaque:)` — composite into an offscreen (SwiftUI-owned Metal;
+    /// the dev never imports Metal, so this is patchable). Carries `opaque`.
+    case drawingGroup(opaque: Bool)
+    /// `.colorMultiply(_:)` — multiply the rendered content by a color.
+    case colorMultiply(ColorRef)
+    /// `.luminanceToAlpha()` — map luminance to an alpha mask.
+    case luminanceToAlpha
+    /// `.contentTransition(_:)` (iOS 16+) — "identity"|"opacity"|"interpolate"|
+    /// "numericText". The `.numericText(value:)`/`.symbolEffect` payload forms slot.
+    case contentTransition(String)
+    /// `.textSelection(_:)` — true = `.enabled`, false = `.disabled`.
+    case textSelection(Bool)
+    /// `.allowsTightening(_:)` — a bool literal.
+    case allowsTightening(Bool)
+    /// `.flipsForRightToLeftLayoutDirection(_:)` — a bool literal.
+    case flipsForRightToLeftLayoutDirection(Bool)
+    /// `.invalidatableContent(_:)` (iOS 17+) — a bool literal.
+    case invalidatableContent(Bool)
+    /// `.lineLimit(_:reservesSpace:)` (iOS 16+) — a fixed line count + reserve flag.
+    case lineLimitReservesSpace(limit: Int, reservesSpace: Bool)
+    /// `.defaultScrollAnchor(_:)` (iOS 17+) — a named `UnitPoint` (`.top`, `.center`,
+    /// `.bottom`, ...). A custom `UnitPoint(x:y:)` slots (anchor stays nil).
+    case defaultScrollAnchor(IRUnitPoint?)
+    /// `.selectionDisabled(_:)` (iOS 17+) — a bool literal.
+    case selectionDisabled(Bool)
+    /// `.moveDisabled(_:)` — a bool literal.
+    case moveDisabled(Bool)
+    /// `.deleteDisabled(_:)` — a bool literal.
+    case deleteDisabled(Bool)
+
     /// A modifier we recognized syntactically but cannot lower (e.g.
     /// a continuous custom `.gesture(...)`, an arbitrary `.modifier(...)`).
     /// Carries a label for diagnostics; the host ignores it (the un-lowered

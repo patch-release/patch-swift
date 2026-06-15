@@ -1534,6 +1534,155 @@ struct Renderer {
             // than risk an unavailable static — the named-style data still rides.
             return v
 
+        // MARK: Visibility / chrome / declarative effects (modifier-coverage sweep v6)
+        case .hidden:
+            return AnyView(v.hidden())
+        case .labelsHidden:
+            return AnyView(v.labelsHidden())
+        case .labelsVisibility(let s):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            if #available(iOS 18, macOS 15, tvOS 18, watchOS 11, visionOS 2, *) {
+                return AnyView(v.labelsVisibility(titleVisibility(s)))
+            }
+            return v
+            #else
+            _ = s; return v
+            #endif
+        case .menuIndicator(let s):
+            if #available(iOS 16, macOS 13, tvOS 17, watchOS 9, visionOS 1, *) {
+                return AnyView(v.menuIndicator(titleVisibility(s)))
+            }
+            return v
+        case .menuOrder(let s):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                let order: MenuOrder
+                switch s {
+                case "fixed": order = .fixed
+                #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+                case "priority": order = .priority
+                #endif
+                default: order = .automatic
+                }
+                return AnyView(v.menuOrder(order))
+            }
+            return v
+            #else
+            _ = s; return v
+            #endif
+        case .persistentSystemOverlays(let s):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                return AnyView(v.persistentSystemOverlays(titleVisibility(s)))
+            }
+            return v
+        case .headerProminence(let s):
+            return AnyView(v.headerProminence(s == "increased" ? .increased : .standard))
+        case .badgeProminence(let s):
+            #if os(iOS) || os(macOS) || os(visionOS)
+            if #available(iOS 17, macOS 14, visionOS 1, *) {
+                let p: BadgeProminence
+                switch s {
+                case "increased": p = .increased
+                case "decreased": p = .decreased
+                default: p = .standard
+                }
+                return AnyView(v.badgeProminence(p))
+            }
+            return v
+            #else
+            _ = s; return v
+            #endif
+        case .listItemTint(let c):
+            if let c {
+                return AnyView(v.listItemTint(color(c)))
+            }
+            return v
+        case .listRowSeparatorTint(let c, let edges):
+            return AnyView(v.listRowSeparatorTint(c.map { color($0) }, edges: verticalEdgeSet(edges)))
+        case .listSectionSeparatorTint(let c, let edges):
+            return AnyView(v.listSectionSeparatorTint(c.map { color($0) }, edges: verticalEdgeSet(edges)))
+        case .containerShape(let k):
+            // `.containerShape(_:)` requires an `InsettableShape` (AnyShape is not one),
+            // so apply the concrete insettable shape per kind. UnevenRoundedRectangle /
+            // ContainerRelativeShape degrade to the nearest insettable form.
+            switch k {
+            case .rectangle:
+                return AnyView(v.containerShape(Rectangle()))
+            case .roundedRectangle(let r):
+                return AnyView(v.containerShape(RoundedRectangle(cornerRadius: CGFloat(r))))
+            case .circle:
+                return AnyView(v.containerShape(Circle()))
+            case .ellipse:
+                return AnyView(v.containerShape(Ellipse()))
+            case .capsule:
+                return AnyView(v.containerShape(Capsule()))
+            case .containerRelative:
+                return AnyView(v.containerShape(ContainerRelativeShape()))
+            case .unevenRoundedRectangle(let tl, let tr, let bl, let br, _):
+                let maxR = Swift.max(tl, tr, bl, br)
+                return AnyView(v.containerShape(RoundedRectangle(cornerRadius: CGFloat(maxR))))
+            }
+        case .compositingGroup:
+            return AnyView(v.compositingGroup())
+        case .geometryGroup:
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.geometryGroup())
+            }
+            return v
+        case .drawingGroup(let opaque):
+            return AnyView(v.drawingGroup(opaque: opaque))
+        case .colorMultiply(let c):
+            return AnyView(v.colorMultiply(color(c)))
+        case .luminanceToAlpha:
+            return AnyView(v.luminanceToAlpha())
+        case .contentTransition(let s):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                let t: ContentTransition
+                switch s {
+                case "opacity": t = .opacity
+                case "interpolate": t = .interpolate
+                case "numericText": t = .numericText()
+                default: t = .identity
+                }
+                return AnyView(v.contentTransition(t))
+            }
+            return v
+        case .textSelection(let enabled):
+            // `.enabled`/`.disabled` are DISTINCT types, so a ternary won't type-check.
+            return enabled ? AnyView(v.textSelection(.enabled)) : AnyView(v.textSelection(.disabled))
+        case .allowsTightening(let b):
+            return AnyView(v.allowsTightening(b))
+        case .flipsForRightToLeftLayoutDirection(let b):
+            return AnyView(v.flipsForRightToLeftLayoutDirection(b))
+        case .invalidatableContent(let b):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return b ? AnyView(v.invalidatableContent()) : v
+            }
+            return v
+        case .lineLimitReservesSpace(let limit, let reserves):
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
+                return AnyView(v.lineLimit(limit, reservesSpace: reserves))
+            }
+            return AnyView(v.lineLimit(limit))
+        case .defaultScrollAnchor(let p):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.defaultScrollAnchor(unitPoint(p) ?? .center))
+            }
+            return v
+            #else
+            _ = p; return v
+            #endif
+        case .selectionDisabled(let b):
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                return AnyView(v.selectionDisabled(b))
+            }
+            return v
+        case .moveDisabled(let b):
+            return AnyView(v.moveDisabled(b))
+        case .deleteDisabled(let b):
+            return AnyView(v.deleteDisabled(b))
+
         case .opaque:
             // A modifier we couldn't lower — leave the view unchanged. The
             // native-fallback owns whatever behavior it implied.

@@ -290,6 +290,12 @@ final class HostBridgeFamilyTests: XCTestCase {
         // (fixed-format ISO8601 string<->date). All served by FoundationBridge under
         // the patch_host namespace.
         "now_unix_millis", "iso8601_format", "iso8601_parse",
+        // LEVER #2: Date/Calendar/Formatter (locale/ICU on the shell). The builder-form
+        // rewrites target relative_date_format + number_format (pre-existing) +
+        // calendar_date_op. All served by FoundationBridge. (date_format_styled and
+        // calendar_component are also SERVED — superset is fine for emitted ⊆ served —
+        // but not yet targeted by a v1 rewrite.)
+        "relative_date_format", "number_format", "calendar_date_op",
         // Breakthrough #6 networking (async) — same patch_host namespace. v1 emits
         // ONLY http_get (data(for:)/http_request deferred — URLRequest absent in the
         // WASM-SDK guest Foundation). The SDK still SERVES http_request (superset is

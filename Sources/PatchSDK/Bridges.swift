@@ -859,6 +859,117 @@ public struct FoundationBridge: Bridge {
         return Int64((d.timeIntervalSince1970 * 1000.0).rounded())
     }
 
+    // MARK: - LEVER #2: Date/Calendar/Formatter host bridges (locale/ICU on the shell)
+    //
+    // The most common bug-fix shapes — relative-date phrasing, localized number /
+    // currency formatting, styled date formatting, and Calendar date math — all need
+    // ICU + locale data the Embedded WASM guest does NOT carry (~11.7 MB if linked).
+    // These flat `patch_host` host fns let the guest offload each to the native
+    // shell's REAL Foundation. Every one maps a SINGLE, deterministic developer call
+    // form to a host computation; the developer's EXPLICIT inputs (style/locale)
+    // pass through so nothing is silently mis-localized. Each is a `static func`
+    // exposed for direct unit testing (mirroring numberFormat/dateFormat above), with
+    // the registered host fn delegating to it.
+
+    /// `relative_date_format` — `RelativeDateTimeFormatter().localizedString(for:relativeTo:)`.
+    /// `unitsStyle`: 0=full 1=spellOut 2=short 3=abbreviated (the enum's raw order).
+    /// `dateContext`/`relativeContext` are Unix MILLIS. Locale-aware via the shell's
+    /// real ICU (empty locale → current). This is the `SettingsScreen.relativeString`
+    /// bug-fix shape — "2 hr ago", "yesterday", "in 3 days".
+    public static func relativeDateFormat(forMillis: Int64, relativeToMillis: Int64,
+                                          unitsStyle: Int32, locale: String) -> String {
+        let f = RelativeDateTimeFormatter()
+        switch unitsStyle {
+        case 1: f.unitsStyle = .spellOut
+        case 2: f.unitsStyle = .short
+        case 3: f.unitsStyle = .abbreviated
+        default: f.unitsStyle = .full
+        }
+        if !locale.isEmpty { f.locale = Locale(identifier: locale) }
+        let d = Date(timeIntervalSince1970: Double(forMillis) / 1000.0)
+        let ref = Date(timeIntervalSince1970: Double(relativeToMillis) / 1000.0)
+        return f.localizedString(for: d, relativeTo: ref)
+    }
+
+    /// `date_format_styled` — `DateFormatter` with `dateStyle`/`timeStyle` (the
+    /// localized-style builder, distinct from the pattern-based `date_format`).
+    /// style: 0=none 1=short 2=medium 3=long 4=full (matches `DateFormatter.Style`).
+    /// Locale-aware (empty → current); tz empty → current. This is the dominant
+    /// "show a date the way the user's region expects" shape.
+    public static func dateFormatStyled(unixMillis: Int64, dateStyle: Int32, timeStyle: Int32,
+                                        locale: String, timeZone: String) -> String {
+        let f = DateFormatter()
+        func style(_ raw: Int32) -> DateFormatter.Style {
+            switch raw { case 1: return .short; case 2: return .medium
+            case 3: return .long; case 4: return .full; default: return .none }
+        }
+        f.dateStyle = style(dateStyle)
+        f.timeStyle = style(timeStyle)
+        if !locale.isEmpty { f.locale = Locale(identifier: locale) }
+        if !timeZone.isEmpty { f.timeZone = TimeZone(identifier: timeZone) }
+        return f.string(from: Date(timeIntervalSince1970: Double(unixMillis) / 1000.0))
+    }
+
+    /// `calendar_date_op` — common `Calendar.current` date math, all returning a Unix
+    /// MILLIS instant (or `INT64_MIN` for the failure/nil shapes). `op`:
+    ///   0 = `startOfDay(for:)`            — `a` only.
+    ///   1 = `date(byAdding: <component>, value:, to:)` — `a` = base millis, `b` =
+    ///       signed amount, `component` selects the unit.
+    ///   2 = `isDate(a, inSameDayAs: b)`   — returns 1 (same day) / 0 (different), NOT
+    ///       a millis value (the guest reads it as a Bool i64).
+    /// `component`: 0=second 1=minute 2=hour 3=day 4=weekOfYear 5=month 6=year.
+    /// Locale/timezone come from `Calendar.current` (the shell's real region) so the
+    /// "off-by-one across midnight / DST" class of bug is computed with real rules.
+    public static let calendarOpNil: Int64 = .min
+    public static func calendarDateOp(op: Int32, a: Int64, b: Int64, component: Int32,
+                                      timeZone: String) -> Int64 {
+        var cal = Calendar.current
+        if !timeZone.isEmpty, let tz = TimeZone(identifier: timeZone) { cal.timeZone = tz }
+        let base = Date(timeIntervalSince1970: Double(a) / 1000.0)
+        func comp(_ raw: Int32) -> Calendar.Component {
+            switch raw { case 0: return .second; case 1: return .minute; case 2: return .hour
+            case 4: return .weekOfYear; case 5: return .month; case 6: return .year
+            default: return .day }
+        }
+        switch op {
+        case 0:
+            return Int64((cal.startOfDay(for: base).timeIntervalSince1970 * 1000.0).rounded())
+        case 1:
+            guard let out = cal.date(byAdding: comp(component), value: Int(b), to: base) else {
+                return Self.calendarOpNil
+            }
+            return Int64((out.timeIntervalSince1970 * 1000.0).rounded())
+        case 2:
+            let other = Date(timeIntervalSince1970: Double(b) / 1000.0)
+            return cal.isDate(base, inSameDayAs: other) ? 1 : 0
+        default:
+            return Self.calendarOpNil
+        }
+    }
+
+    /// `calendar_component` — read a single `Calendar.current.component(_:from:)`
+    /// integer (year/month/day/hour/minute/second/weekday/etc.). `component` matches
+    /// `calendarDateOp` plus 7=weekday 8=dayOfYear. tz empty → current. The
+    /// "extract the day/month from a Date with the user's real calendar" shape.
+    public static func calendarComponent(unixMillis: Int64, component: Int32, timeZone: String) -> Int64 {
+        var cal = Calendar.current
+        if !timeZone.isEmpty, let tz = TimeZone(identifier: timeZone) { cal.timeZone = tz }
+        let d = Date(timeIntervalSince1970: Double(unixMillis) / 1000.0)
+        let c: Calendar.Component
+        switch component {
+        case 0: c = .second; case 1: c = .minute; case 2: c = .hour
+        case 4: c = .weekOfYear; case 5: c = .month; case 6: c = .year
+        case 7: c = .weekday
+        case 8:
+            // dayOfYear: `Calendar.Component.dayOfYear` is macOS 15+/iOS 18+, but the
+            // SDK targets lower. `ordinality(of:.day, in:.year, for:)` yields the same
+            // 1-based day-within-year and is available since iOS 8 / macOS 10.4.
+            return Int64(cal.ordinality(of: .day, in: .year, for: d) ?? 1)
+        default: c = .day
+        }
+        return Int64(cal.component(c, from: d))
+    }
+
     public func register(into imports: inout Imports, store: Store) {
         // decimal_op(op, a, b, scale) -> i64 — exact base-10 Decimal in the host.
         imports.host(module, "decimal_op", [.i32, .i64, .i64, .i32], [.i64], store: store) { _, args in
@@ -966,6 +1077,49 @@ public struct FoundationBridge: Bridge {
             let ctx = BridgeContext(caller: caller)
             let s = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
             return [.i64(UInt64(bitPattern: Self.iso8601Parse(s)))]
+        }
+
+        // ---- LEVER #2: Date/Calendar/Formatter host bridges --------------------
+        // relative_date_format(forMillis, relativeToMillis, unitsStyle, loc ptr,len) -> packed string.
+        imports.host(module, "relative_date_format", [.i64, .i64, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let loc = try ctx.readString(ptr: args[3].i32, len: args[4].i32)
+            let s = Self.relativeDateFormat(forMillis: Int64(bitPattern: args[0].i64),
+                                            relativeToMillis: Int64(bitPattern: args[1].i64),
+                                            unitsStyle: Int32(bitPattern: args[2].i32),
+                                            locale: loc)
+            return [try ctx.packedResult(s)]
+        }
+        // date_format_styled(unixMillis, dateStyle, timeStyle, loc ptr,len, tz ptr,len) -> packed string.
+        imports.host(module, "date_format_styled", [.i64, .i32, .i32, .i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let loc = try ctx.readString(ptr: args[3].i32, len: args[4].i32)
+            let tz = try ctx.readString(ptr: args[5].i32, len: args[6].i32)
+            let s = Self.dateFormatStyled(unixMillis: Int64(bitPattern: args[0].i64),
+                                          dateStyle: Int32(bitPattern: args[1].i32),
+                                          timeStyle: Int32(bitPattern: args[2].i32),
+                                          locale: loc, timeZone: tz)
+            return [try ctx.packedResult(s)]
+        }
+        // calendar_date_op(op, a, b, component, tz ptr,len) -> i64 Unix MILLIS (or 1/0 for op 2, INT64_MIN nil).
+        imports.host(module, "calendar_date_op", [.i32, .i64, .i64, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let tz = try ctx.readString(ptr: args[4].i32, len: args[5].i32)
+            let v = Self.calendarDateOp(op: Int32(bitPattern: args[0].i32),
+                                        a: Int64(bitPattern: args[1].i64),
+                                        b: Int64(bitPattern: args[2].i64),
+                                        component: Int32(bitPattern: args[3].i32),
+                                        timeZone: tz)
+            return [.i64(UInt64(bitPattern: v))]
+        }
+        // calendar_component(unixMillis, component, tz ptr,len) -> i64 component value.
+        imports.host(module, "calendar_component", [.i64, .i32, .i32, .i32], [.i64], store: store) { caller, args in
+            let ctx = BridgeContext(caller: caller)
+            let tz = try ctx.readString(ptr: args[2].i32, len: args[3].i32)
+            let v = Self.calendarComponent(unixMillis: Int64(bitPattern: args[0].i64),
+                                           component: Int32(bitPattern: args[1].i32),
+                                           timeZone: tz)
+            return [.i64(UInt64(bitPattern: v))]
         }
     }
 }
