@@ -1513,6 +1513,13 @@ struct Renderer {
                 }
                 return AnyView(v.safeAreaPadding(edgeSet(edges)))
             }
+            // Pre-iOS-17 (etc.) fallback: `safeAreaPadding` is unavailable, carry the
+            // intent as a no-op. WITHOUT this return the case falls through with no
+            // value on the unavailable branch — a "missing return" that the macOS
+            // build hides (deployment is macOS 14 → the `#available` is always-true)
+            // but the iOS-simulator build (deployment < iOS 17) flags. Mirrors the
+            // `.contentMargins` case above.
+            return v
         // MARK: Control config — additional built-in styles (styles-views wave)
         case .textFieldStyle(let s):
             return applyTextFieldStyle(s, to: v)
