@@ -19,11 +19,24 @@ public struct BodyEmission: Equatable, Sendable {
     /// that vendors this IR should stamp `PatchViewIRSchema.version` here so the
     /// host can reject a tree it cannot decode (`PatchViewIRSchema.check`).
     public var schemaVersion: Int?
+    /// PARAMETERIZED NATIVE SLOTS — for each `.opaque` slot id whose native call
+    /// had simple string-literal arguments LIFTED out (so editing a string in a
+    /// slotted custom view is OTA-patchable), the lifted values in source order.
+    /// Rides WASM in the emission JSON (NOT a `ViewNode` change): the renderer
+    /// fills the opaque leaf via the thunk's parameterized factory
+    /// `{ a in AnyView(DisplayText(text: a[0], size: 28)) }` applied to these
+    /// values. The slot id is STRUCTURAL (the template with literals normalized
+    /// to placeholders), so editing a literal keeps the id — and the
+    /// native-shell fingerprint — stable. Optional/`nil` for a guest that lifts
+    /// no string; Codable decodes a missing key as `nil` (fully back-compatible).
+    public var slotArgs: [String: [String]]?
     public init(root: ViewNode, coverage: Coverage? = nil,
-                schemaVersion: Int? = nil) {
+                schemaVersion: Int? = nil,
+                slotArgs: [String: [String]]? = nil) {
         self.root = root
         self.coverage = coverage
         self.schemaVersion = schemaVersion
+        self.slotArgs = slotArgs
     }
 
     public struct Coverage: Equatable, Sendable {
@@ -40,9 +53,11 @@ public struct BodyEmission: Equatable, Sendable {
         }
     }
 
-    public init(root: ViewNode, computeCoverage: Bool, schemaVersion: Int? = nil) {
+    public init(root: ViewNode, computeCoverage: Bool, schemaVersion: Int? = nil,
+                slotArgs: [String: [String]]? = nil) {
         self.root = root
         self.schemaVersion = schemaVersion
+        self.slotArgs = slotArgs
         if computeCoverage {
             self.coverage = Coverage(
                 totalNodes: root.nodeCount,

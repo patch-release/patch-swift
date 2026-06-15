@@ -128,6 +128,17 @@ struct ObjectWriter {
     mutating func field(_ k: StaticString, _ build: (inout JSONOut) -> Void) {
         key(k); build(&out)
     }
+    /// A RUNTIME-string key (a slot id), properly JSON-escaped — for an object
+    /// whose keys aren't compile-time constants (the `slotArgs` map).
+    mutating func key(dynamic k: String) {
+        if !first { out.byte(0x2C) } // ,
+        first = false
+        out.string(k)
+        out.byte(0x3A) // :
+    }
+    mutating func field(dynamicKey k: String, _ build: (inout JSONOut) -> Void) {
+        key(dynamic: k); build(&out)
+    }
 }
 
 struct ArrayWriter {
@@ -190,6 +201,21 @@ public enum EmbeddedJSON {
                 }
             }
             if let v = e.schemaVersion { o.field("schemaVersion") { $0.number(v) } }
+            // PARAMETERIZED NATIVE SLOTS — `[String:[String]]?`, a JSON OBJECT
+            // keyed by slot id, in sorted key order (deterministic bytes).
+            if let sa = e.slotArgs {
+                o.field("slotArgs") { co in
+                    co.object { c in
+                        for id in sa.keys.sorted() {
+                            c.field(dynamicKey: id) { v in
+                                v.array { ar in
+                                    for s in sa[id] ?? [] { ar.element { $0.string(s) } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -55,11 +55,21 @@ extension Patch {
     /// Call the guest's `view_body(state)` and return the decoded ViewNode tree.
     /// `state` is the guest's opaque state JSON (empty ⇒ guest defaults).
     public func viewBody(state: String = "", export: String = "view_body") throws -> ViewNode {
+        try viewBodyEmission(state: state, export: export).root
+    }
+
+    /// Call the guest's `view_body(state)` and return the FULL decoded emission —
+    /// the ViewNode tree PLUS the parameterized-slot `slotArgs` (slot id → the
+    /// lifted string-literal values that ride WASM). `PatchedBodyHost` uses this so
+    /// it can render a parameterized native slot via the thunk's factory applied to
+    /// the CURRENT (possibly OTA-edited) literal values. `state` is the guest's
+    /// opaque state JSON (empty ⇒ guest defaults).
+    public func viewBodyEmission(state: String = "", export: String = "view_body") throws -> BodyEmission {
         let inBytes: [UInt8] = state.isEmpty ? [] : [UInt8](state.utf8)
         let outBytes: [UInt8]
         do { outBytes = try callPacked(export, inBytes) }
         catch let e as PatchError { throw PatchViewError.runtime(e) }
-        return try decodeEmission(outBytes).root
+        return try decodeEmission(outBytes)
     }
 
     /// Call the guest's `dispatch(state, event)` and return the new opaque state +

@@ -529,8 +529,11 @@ public struct PatchedBodyHost: View {
     let propsJSON: String
     let writebacks: [PatchScalarWriteback]
     /// Native renderers for this view's non-lowerable leaves (mixed views), keyed
-    /// by the shipped tree's opaque-slot id. Empty for a fully-lowered view.
-    let slots: [String: () -> AnyView]
+    /// by the shipped tree's opaque-slot id. Each is a FACTORY `([String]) -> AnyView`:
+    /// a PARAMETERIZED leaf (a slotted custom view whose string-literal args were
+    /// lifted) substitutes the runtime values from the emission's `slotArgs` into its
+    /// template; a plain leaf ignores its args. Empty for a fully-lowered view.
+    let slots: [String: ([String]) -> AnyView]
     /// Resolved DESIGN-SYSTEM TOKEN values (`Color`/`Font`) for this view's
     /// `.hostToken(id)`/`.fontToken(id)` modifier values, keyed by the shipped tree's
     /// token id. Empty for a view that uses no design-system tokens.
@@ -539,7 +542,7 @@ public struct PatchedBodyHost: View {
     @State private var guestState: String = ""
 
     init(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
-         writebacks: [PatchScalarWriteback], slots: [String: () -> AnyView] = [:],
+         writebacks: [PatchScalarWriteback], slots: [String: ([String]) -> AnyView] = [:],
          tokens: [String: PatchHostToken] = [:]) {
         self.typeName = typeName
         self.entry = entry
@@ -563,8 +566,15 @@ public struct PatchedBodyHost: View {
             merged = PatchFlatJSON.merge(base: merged, override: inputTokenJSON)
         }
         let tree: ViewNode
+        // PARAMETERIZED NATIVE SLOTS: the guest's emission carries `slotArgs` (slot id
+        // → lifted string-literal values that ride WASM). A parameterized native slot
+        // is rendered via the thunk's factory applied to THESE values, so an OTA patch
+        // that only edited a string in a slotted custom view shows the new string.
+        let slotArgs: [String: [String]]
         do {
-            tree = try Patch.shared.viewBody(state: merged, export: entry.export)
+            let emission = try Patch.shared.viewBodyEmission(state: merged, export: entry.export)
+            tree = emission.root
+            slotArgs = emission.slotArgs ?? [:]
         } catch {
             // Demote OUTSIDE this view-update pass; this pass renders nothing and
             // the next evaluation takes the thunk's native branch.
@@ -605,8 +615,16 @@ public struct PatchedBodyHost: View {
         }
 
         var context = RenderContext(showOpaqueStubs: false)
-        // Fill the renderer's opaque table with the native leaf renderers.
-        for id in neededIDs { if let make = slots[id] { context.opaques.set(id, make()) } }
+        // Fill the renderer's opaque table with the native leaf renderers. A
+        // PARAMETERIZED slot's factory is applied to the emission's `slotArgs[id]`
+        // (the CURRENT, possibly OTA-edited, string-literal values); a plain slot's
+        // factory ignores its (empty) args. Missing args default to `[]` → a
+        // parameterized factory's arg-count guard returns EmptyView (demote-safe,
+        // never a crash); but a parameterized slot always ships its args in the
+        // same emission, so this only bites a genuinely malformed tree.
+        for id in neededIDs {
+            if let make = slots[id] { context.opaques.set(id, make(slotArgs[id] ?? [])) }
+        }
         // Fill the renderer's token table with the resolved design-system token values.
         for id in neededTokenIDs { if let tok = tokens[id] { context.tokens.set(id, tok) } }
         // GeometryReader (C): wire a rebuild closure so a `geometryReader` node re-
@@ -834,8 +852,12 @@ extension Patch {
     ///
     /// `slots` is a provider of native renderers for the view's non-lowerable LEAVES
     /// (mixed views) — invoked ONLY when routing, so an unpatched view pays nothing
-    /// for it. Each closure renders one leaf (a custom child view, an unsupported
-    /// construct) keyed by the content-stable id the shipped tree carries.
+    /// for it. Each closure is a FACTORY `([String]) -> AnyView` keyed by the
+    /// content-stable id the shipped tree carries: a PARAMETERIZED leaf (a slotted
+    /// custom view whose simple string-literal args were lifted so editing them is
+    /// OTA-patchable) substitutes the runtime values from `BodyEmission.slotArgs`
+    /// into its template; a plain leaf ignores its args. This is the ABI that lets
+    /// an OTA patch which only edited a string in a slotted custom view ship.
     ///
     /// `tokens` is a provider of resolved DESIGN-SYSTEM TOKEN values (`Color`/`Font`
     /// for `Theme.Colors.ink` / `Theme.Font.body(…)`), keyed by the content-stable id
@@ -848,7 +870,7 @@ extension Patch {
     /// read, an epoch compare and a dictionary lookup.
     @MainActor
     public func thunkBody(typeName: String, instance: Any,
-                          slots: () -> [String: () -> AnyView] = { [:] },
+                          slots: () -> [String: ([String]) -> AnyView] = { [:] },
                           tokens: () -> [String: PatchHostToken] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
