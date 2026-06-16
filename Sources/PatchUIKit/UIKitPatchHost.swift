@@ -171,18 +171,29 @@ public struct PatchCellWiring {
     /// (selector resolved natively). The host runs each ONCE at install, after rendering.
     /// Not view-attached — a side effect of the construction method.
     public var observerEffects: [() -> Void]
+    /// QUARANTINED NATIVE EFFECTS (Goal 1 — GRANULAR PER-STATEMENT PARTITIONING): the
+    /// isolatable imperative statements the engine couldn't lower but the thunk replays
+    /// VERBATIM against `self` in SOURCE ORDER after building the tree, so a single weird
+    /// line no longer demotes the whole method. Already ordered by the engine. Each closure
+    /// captures the live cell/VC instance; the dominant real case is a delegate/dataSource/
+    /// config set on a stored `UITableView`/`UIScrollView`/`MKMapView` that renders as a
+    /// slotted custom leaf (`self.<name>`) — so configuring `self.<name>` configures exactly
+    /// the shown view. The generalization of the gesture/observer levers.
+    public var nativeEffects: [() -> Void]
     public init(slots: [String: () -> UIView] = [:],
                 actions: [String: () -> Void] = [:],
                 colorTokens: [String: () -> UIColor] = [:],
                 numberTokens: [String: () -> Double] = [:],
                 gestureWirings: [String: [(UIView) -> Void]] = [:],
-                observerEffects: [() -> Void] = []) {
+                observerEffects: [() -> Void] = [],
+                nativeEffects: [() -> Void] = []) {
         self.slots = slots
         self.actions = actions
         self.colorTokens = colorTokens
         self.numberTokens = numberTokens
         self.gestureWirings = gestureWirings
         self.observerEffects = observerEffects
+        self.nativeEffects = nativeEffects
     }
 }
 
@@ -268,6 +279,14 @@ extension Patch {
         // verbatim `NotificationCenter.default.addObserver(self, selector: #selector(...))`
         // against `self` (selector resolved natively in the thunk).
         for effect in w.observerEffects { effect() }
+
+        // Goal 1: replay the QUARANTINED NATIVE EFFECTS in SOURCE ORDER (the engine already
+        // sorted by ordinal). Each runs once against `self` (the closure captures the live
+        // instance) — a delegate/dataSource/config set or a live-object call the engine
+        // couldn't lower but vetted as a faithful native side effect. The surrounding
+        // declarative construction still rode WASM (the whole win over the old whole-method
+        // demote); these effects ride the compiled-in thunk, exactly like the observers.
+        for effect in w.nativeEffects { effect() }
 
         // Install into contentView: clear any prior PATCH-installed root, then add the
         // new one pinned to the content view's edges. The prior root is tagged so a

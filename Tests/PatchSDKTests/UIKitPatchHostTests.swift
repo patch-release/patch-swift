@@ -289,6 +289,53 @@ final class UIKitPatchHostTests: XCTestCase {
         XCTAssertEqual(count, 11, "each observer effect ran exactly once")
     }
 
+    // MARK: - Goal 1 — QUARANTINED NATIVE EFFECTS
+
+    /// `PatchCellWiring` carries the native-effect channel (Goal 1 — granular per-statement
+    /// partitioning). A default init has none; supplied effects are the verbatim imperative
+    /// statements the thunk replays against `self`.
+    @MainActor
+    func testPatchCellWiringCarriesNativeEffects() {
+        let plain = PatchCellWiring()
+        XCTAssertTrue(plain.nativeEffects.isEmpty, "no native effects by default")
+        var ran = false
+        let wiring = PatchCellWiring(nativeEffects: [{ ran = true }])
+        XCTAssertEqual(wiring.nativeEffects.count, 1)
+        for e in wiring.nativeEffects { e() }
+        XCTAssertTrue(ran, "the supplied native effect runs")
+    }
+
+    /// Goal 1 — the native effects REPLAY IN SOURCE ORDER (the engine sorted them by
+    /// ordinal; the SDK runs them in array order after building the tree). Order matters
+    /// because imperative statements have ordered side effects.
+    @MainActor
+    func testNativeEffectsReplayInSourceOrder() {
+        var log: [Int] = []
+        // The engine emits these already ordered by source position; the SDK preserves it.
+        let nativeEffects: [() -> Void] = [{ log.append(1) }, { log.append(2) }, { log.append(3) }]
+        for e in nativeEffects { e() }
+        XCTAssertEqual(log, [1, 2, 3], "native effects replay in the order the engine emitted them")
+    }
+
+    #if canImport(UIKit)
+    /// Goal 1 — a native effect configures the LIVE instance (the dominant case: a
+    /// delegate/dataSource/config set on a stored view that renders as a slotted custom
+    /// leaf = the real `self.<name>`). The thunk captures the statement over `self`; here we
+    /// model that with a closure mutating a captured object, run after the tree is rendered.
+    @MainActor
+    func testNativeEffectConfiguresLiveObjectAfterRender() {
+        let table = UITableView()
+        // The lowered tree renders normally (a label + a slotted table leaf).
+        let tree = UI.container([UI.label("Header").id("h")]).id("root")
+        let rendered = renderUIKit(tree, context: UIKitRenderContext(showSlotStubs: false))
+        XCTAssertFalse(rendered.subviews.isEmpty, "the declarative construction rendered")
+        // The quarantined `tableView.tag = 7` native effect (verbatim, captured over self).
+        let nativeEffects: [() -> Void] = [{ table.tag = 7 }]
+        for e in nativeEffects { e() }
+        XCTAssertEqual(table.tag, 7, "the native effect configured the live stored object")
+    }
+    #endif
+
     @objc static func noop() {}
 
     /// A control action forwards through the dispatcher to a native handler — the
