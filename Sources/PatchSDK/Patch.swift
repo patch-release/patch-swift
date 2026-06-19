@@ -453,8 +453,13 @@ public final class Patch: @unchecked Sendable {
     /// FIRST — it returns the decoded overlay table (nil when absent / malformed) and
     /// instantiates the modules from the INNER bytes, so the WASM path is unchanged. A
     /// raw `.wasm`/`PMOD` blob (no `POVR` magic) is handled exactly as before.
+    /// Test-only hook fired at the top of module instantiation (review #17 — lets a test
+    /// assert instantiation runs on the expected thread). Host-bridge-free; lock-guarded.
+    var _onInstantiateForTesting: (@Sendable () -> Void)?
+
     private func instantiateModuleSet(bytes: [UInt8]) throws
         -> (primary: WASMRuntime, additional: [WASMRuntime], overlay: PatchResourceOverlay.Table?) {
+        lock.read { _onInstantiateForTesting }?()
         let cfg = lock.read { configuration }
         let wasi = cfg?.wasiConfig ?? .default
         let hostImports = bridges.hostImports()
@@ -1322,7 +1327,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.2"
+    public static let sdkVersion = "1.5.3"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

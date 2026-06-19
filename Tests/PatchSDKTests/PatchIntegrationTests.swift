@@ -81,6 +81,50 @@ final class PatchIntegrationTests: XCTestCase {
         XCTAssertTrue(types.contains("activation"), "expected an activation event, got \(types)")
     }
 
+    /// Regression guard for adversarial review #17: `start()` must instantiate the
+    /// cached module OFF the calling (main) thread. A real-app module is tens of MB
+    /// (a full-Foundation general-logic module statically links ICU → ~46 MB) and
+    /// takes SECONDS to decode + instantiate in WasmKit; if `start()` ran that inline
+    /// it would freeze the main thread at launch. `start()` hops Phase-1 activation to
+    /// the SDK's serial `callQueue`, so the heavy work never touches the main thread.
+    @MainActor
+    func testStartActivatesOffMainThread() async throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let bytes = try marshalBytes()
+
+        let storage = try ModuleStorage(appKey: "offmain", baseDirectory: dir)
+        storage.registerBundled(version: "bundled-1.0", bytes: bytes)
+
+        let patch = Patch()
+        patch.bridges.registerDefaults()
+        // No checker → no remote Phase 2; this isolates the Phase-1 activation thread.
+        patch.injectForTesting(
+            configuration: PatchConfiguration(appKey: "offmain", fingerprint: "fp", deviceID: "d"),
+            storage: storage, checker: nil)
+
+        // Record whether the heavy instantiate ran on the main thread.
+        let ranOnMain = ThreadFlag()
+        patch._onInstantiateForTesting = { ranOnMain.set(Thread.isMainThread) }
+
+        // Awaited from a @MainActor context — exactly the SwiftUI `.task {}` shape.
+        XCTAssertTrue(Thread.isMainThread, "precondition: test body is on the main thread")
+        let outcome = await patch.start()
+
+        if case .activated = outcome {} else { XCTFail("expected local activation, got \(outcome)") }
+        XCTAssertTrue(patch.hasActiveModule)
+        XCTAssertEqual(ranOnMain.get(), false,
+                       "start()'s module instantiation must NOT run on the main thread (review #17)")
+    }
+
+    /// Thread-safe boolean cell for the off-main assertion (the probe fires on a
+    /// background queue; the test reads it after the await).
+    private final class ThreadFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool?
+        func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+        func get() -> Bool? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     func testCheckForUpdateRecoversWhenNewModuleCorrupt() async throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let good = try marshalBytes()

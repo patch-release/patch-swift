@@ -13,6 +13,98 @@ import PatchRender
 /// collection. These lock the flat-JSON input format the ENGINE's lowered guest
 /// body must scan — keep in sync with cli SwiftUIGuestEmitter `_patchScan*`.
 #if canImport(SwiftUI)
+// MARK: - Reactive-collection marshalling fixtures (Stage 1)
+
+/// A flat-struct element a reactive collection holds.
+private struct _RCItem { let id: Int; let label: String }
+
+/// An iOS-17 `@Observable` view-model with a collection. The macro injects
+/// `_$observationRegistrar` + surfaces `items`/`loading` as `_items`/`_loading`
+/// backing — the encoder must skip the `_$…` plumbing and surface the real fields.
+@available(iOS 17, macOS 14, *)
+@Observable private final class _RCObservableVM {
+    var items: [_RCItem]
+    var loading: Bool
+    init(items: [_RCItem], loading: Bool) { self.items = items; self.loading = loading }
+}
+
+/// A classic ObservableObject holding a PLAIN stored collection (isolates the
+/// reactive-wrapper UNWRAP from the `@Published` encoding question).
+private final class _RCPlainVM: ObservableObject {
+    var items: [_RCItem] = []
+}
+
+/// A classic ObservableObject with a `@Published` collection (reveals whether a
+/// `Published<[…]>` field marshals through the encoder).
+private final class _RCPublishedVM: ObservableObject {
+    @Published var items: [_RCItem] = []
+}
+
+private struct _RCObservedView: View {
+    @ObservedObject var vm: _RCPlainVM
+    var body: some View { Text("x") }
+}
+
+private struct _RCPublishedObservedView: View {
+    @ObservedObject var vm: _RCPublishedVM
+    var body: some View { Text("x") }
+}
+
+/// BUG #8 fixture: a view holding ONLY an `@EnvironmentObject`. With NO environment
+/// object installed, native `wrappedValue` would TRAP — so `extract` must NOT eagerly
+/// unwrap it. Reading `extract(from:)` on this view (no `.environmentObject(...)`
+/// supplied) must NOT crash and must omit the env member.
+private final class _RCEnvVM: ObservableObject {
+    var items: [_RCItem] = []
+}
+private struct _RCEnvObjectView: View {
+    @EnvironmentObject var vm: _RCEnvVM
+    var body: some View { Text("x") }
+}
+
+/// BUG #8 fixture (iOS-17 Observation form): `@Environment(T.self)` with NO object in
+/// the environment. `wrappedValue` traps if absent → `extract` must skip it.
+@available(iOS 17, macOS 14, *)
+@Observable private final class _RCEnvObservable {
+    var items: [_RCItem] = []
+}
+@available(iOS 17, macOS 14, *)
+private struct _RCEnvObservableView: View {
+    @Environment(_RCEnvObservable.self) private var vm
+    var body: some View { Text("x") }
+}
+
+/// BUG #6 fixture: a reactive VM holding a NON-marshallable SIBLING field (a closure)
+/// ALONGSIDE the data collection. The whole object must NOT zero out to `{}` — the
+/// collection field must survive so a `ForEach(vm.items)` renders the real rows.
+private final class _RCSiblingVM: ObservableObject {
+    var items: [_RCItem] = [_RCItem(id: 9, label: "S")]
+    var onTap: () -> Void = {}                       // a stored closure — not encodable (skipped)
+    var cancellables: Set<_RCFakeCancellable> = []   // a Set<AnyCancellable>-style sibling
+}
+/// A stand-in for `AnyCancellable` — an empty-shaped reference type a reactive VM stores
+/// in a `Set`. Hashable so it can live in a Set (matching the real `Set<AnyCancellable>`).
+private final class _RCFakeCancellable: Hashable {
+    static func == (l: _RCFakeCancellable, r: _RCFakeCancellable) -> Bool { l === r }
+    func hash(into h: inout Hasher) { h.combine(ObjectIdentifier(self)) }
+}
+private struct _RCSiblingView: View {
+    @ObservedObject var vm: _RCSiblingVM
+    var body: some View { Text("x") }
+}
+
+/// BUG #9 fixture: an `ObservableObject` whose `@Published` storage has transitioned to
+/// `.publisher` (a Combine subscriber attached) rather than a settled `.value`. The
+/// sibling-skip must omit it without zeroing the whole object — the plain `items` survive.
+private final class _RCPublisherStateVM: ObservableObject {
+    var items: [_RCItem] = [_RCItem(id: 4, label: "Q")]
+    @Published var counter: Int = 0
+}
+private struct _RCPublisherStateView: View {
+    @ObservedObject var vm: _RCPublisherStateVM
+    var body: some View { Text("x") }
+}
+
 @MainActor
 final class PatchViewPatchingTests: XCTestCase {
 
@@ -143,6 +235,113 @@ final class PatchViewPatchingTests: XCTestCase {
         struct Row { let item: Product }
         let e = PatchInstanceInputs.extract(from: Row(item: Product(name: "Widget", price: 9, inStock: true)))
         XCTAssertEqual(e.json, #"{"item":{"inStock":true,"name":"Widget","price":9}}"#)
+    }
+
+    // MARK: - Reactive-collection marshalling (Stage 1)
+
+    func testObservableMacroObjectMarshalsItsFieldsSkippingPlumbing() throws {
+        // The @Observable macro injects `_$observationRegistrar`; encodeObject must SKIP it
+        // (not fail the WHOLE object) and surface the `_items`/`_loading` backing under the
+        // real field names. Without the `_$…` skip this returns nil → the VM never marshals.
+        guard #available(iOS 17, macOS 14, *) else { throw XCTSkip("needs Observation (macOS 14+)") }
+        let vm = _RCObservableVM(items: [_RCItem(id: 1, label: "A"), _RCItem(id: 2, label: "B")],
+                                 loading: false)
+        XCTAssertEqual(PatchValueEncoder.encode(vm),
+                       #"{"items":[{"id":1,"label":"A"},{"id":2,"label":"B"}],"loading":false}"#)
+    }
+
+    func testExtractUnwrapsObservedObjectCollectionAsNestedObject() {
+        // An @ObservedObject reactive member marshals as a NESTED object under its member
+        // name, so the guest can read `vm.items` (a ForEach over a reactive collection).
+        let vm = _RCPlainVM()
+        vm.items = [_RCItem(id: 7, label: "Z")]
+        let e = PatchInstanceInputs.extract(from: _RCObservedView(vm: vm))
+        XCTAssertEqual(e.json, #"{"vm":{"items":[{"id":7,"label":"Z"}]}}"#,
+                       "reactive object marshalled as nested object: \(e.json)")
+        // Read-only: no write-back for a reactive-collection member.
+        XCTAssertTrue(e.writebacks.isEmpty, "reactive marshalling is read-only")
+    }
+
+    func testExtractObservedObjectPublishedCollectionUnwrapsCleanly() {
+        // A classic `@Published var items` surfaces as `_items: Published<[…]>`; the encoder
+        // unwraps the `Published.storage.value` payload so it marshals as a clean array (not
+        // `{"storage":{"case":"value",...}}`) — classic MVVM works alongside @Observable.
+        let vm = _RCPublishedVM()
+        vm.items = [_RCItem(id: 3, label: "P")]
+        let e = PatchInstanceInputs.extract(from: _RCPublishedObservedView(vm: vm))
+        XCTAssertEqual(e.json, #"{"vm":{"items":[{"id":3,"label":"P"}]}}"#,
+                       "@Published collection unwraps to a clean array: \(e.json)")
+    }
+
+    // MARK: - Bug #8: an absent @EnvironmentObject / @Environment must NOT trap
+
+    func testExtractDoesNotTrapOnAbsentEnvironmentObject() {
+        // Before the fix, `extract` eagerly called `_patchReactiveObject()` → `wrappedValue`
+        // on EVERY reactive wrapper, and `@EnvironmentObject.wrappedValue` TRAPS (uncatchable)
+        // when no object is installed. The fix removes the EnvironmentObject conformance, so
+        // `extract` skips it. Reaching this assertion at all proves it didn't trap.
+        let e = PatchInstanceInputs.extract(from: _RCEnvObjectView())
+        XCTAssertFalse(e.json.contains("\"vm\""),
+                       "an @EnvironmentObject must be omitted, never eagerly unwrapped: \(e.json)")
+        XCTAssertEqual(e.json, "{}", "no marshallable members → empty object: \(e.json)")
+    }
+
+    func testExtractDoesNotTrapOnAbsentEnvironmentObservable() throws {
+        // Same guarantee for the iOS-17 `@Environment(T.self)` Observation form.
+        guard #available(iOS 17, macOS 14, *) else { throw XCTSkip("needs Observation (macOS 14+)") }
+        let e = PatchInstanceInputs.extract(from: _RCEnvObservableView())
+        XCTAssertFalse(e.json.contains("\"vm\""),
+                       "an @Environment(T.self) must be omitted, never eagerly unwrapped: \(e.json)")
+        XCTAssertEqual(e.json, "{}", "no marshallable members → empty object: \(e.json)")
+    }
+
+    func testReactiveWrapperConformanceIsHeldWrappersOnly() {
+        // Lock the safe surface: only the HELD wrappers conform to `_PatchReactiveWrapper`.
+        // `@EnvironmentObject`/`@Environment` MUST NOT (their wrappedValue can trap).
+        XCTAssertNotNil(ObservedObject(wrappedValue: _RCPlainVM()) as? _PatchReactiveWrapper,
+                        "@ObservedObject is a safe held wrapper → conforms")
+        XCTAssertNil(EnvironmentObject<_RCEnvVM>() as Any as? _PatchReactiveWrapper,
+                     "@EnvironmentObject must NOT conform (its wrappedValue can trap)")
+    }
+
+    // MARK: - Bug #6: a non-marshallable SIBLING must not zero the whole object
+
+    func testReactiveObjectWithUnencodableSiblingKeepsCollection() {
+        // A reactive VM holding a stored closure `var onTap: () -> Void` and a
+        // `Set<_RCFakeCancellable>` ALONGSIDE `var items: [_RCItem]`. Before the fix, the
+        // first unencodable sibling (the closure) made `encodeObject` return nil → the whole
+        // VM marshalled to `{}` → a `ForEach(vm.items)` read an EMPTY array (a populated list
+        // rendered empty). The fix SKIPS the unencodable siblings and KEEPS the encodable
+        // `items` — the load-bearing guarantee: the collection the body reads survives.
+        let vm = _RCSiblingVM()
+        let e = PatchInstanceInputs.extract(from: _RCSiblingView(vm: vm))
+        XCTAssertNotEqual(e.json, "{}", "the object must not zero out")
+        XCTAssertNotEqual(e.json, #"{"vm":{}}"#, "the VM must not zero out to {}")
+        XCTAssertTrue(e.json.contains(#""items":[{"id":9,"label":"S"}]"#),
+                      "the collection must survive an unencodable sibling: \(e.json)")
+        XCTAssertFalse(e.json.contains("onTap"),
+                       "the unencodable closure sibling is omitted, not emitted: \(e.json)")
+        // Direct encoder check: a non-nil object carrying the data field (closure skipped).
+        let obj = PatchValueEncoder.encode(vm)
+        XCTAssertNotNil(obj, "encodeObject must not fail the whole object on an unencodable sibling")
+        XCTAssertTrue(obj?.contains(#""items":[{"id":9,"label":"S"}]"#) ?? false,
+                      "encodeObject skips unencodable siblings, keeps the data field: \(obj ?? "nil")")
+    }
+
+    // MARK: - Bug #9: a @Published in .publisher storage must not corrupt the object
+
+    func testPublishedInPublisherStorageDoesNotCorruptObject() {
+        // Force the `@Published var counter` storage into `.publisher` by attaching a Combine
+        // subscriber to its projected publisher. BUG #3: `unwrapPublished` now reads the
+        // `.publisher` subject's live `currentValue` (here the initial `0`), so the field
+        // MARSHALS its real value instead of being skipped. The object never corrupts; the
+        // plain `items` collection still marshals. (Keys sorted: counter before items.)
+        let vm = _RCPublisherStateVM()
+        let token = vm.$counter.sink { _ in }   // subscriber attach → storage becomes .publisher
+        defer { token.cancel() }
+        let e = PatchInstanceInputs.extract(from: _RCPublisherStateView(vm: vm))
+        XCTAssertEqual(e.json, #"{"vm":{"counter":0,"items":[{"id":4,"label":"Q"}]}}"#,
+                       "a .publisher-state @Published marshals its live currentValue (bug #3): \(e.json)")
     }
 
     func testExtractMarshalsEnumInputAsCaseObject() {
@@ -290,6 +489,32 @@ final class PatchViewPatchingTests: XCTestCase {
                                         newStateJSON: #"{"count":9,"on":false}"#)
         XCTAssertEqual(countBox.v, 9, "count not written back")
         XCTAssertEqual(onBox.v, false, "on not written back")
+    }
+
+    private struct DoubleBinding: View {
+        @Binding var opacity: Double
+        var body: some View { EmptyView() }
+    }
+
+    /// REGRESSION (the Slider/Double write-back data-loss bug): the guest serializes an
+    /// integral `Double` (`1.0`/`0.0`) without a fractional part, so the JSON number is
+    /// integral and `unbox` collapses it to `Int`. Before the `_patchCoerceScalar` fix,
+    /// `Int as? Double` was nil → the native `@State<Double>`/`Binding<Double>` (a Slider at
+    /// an integral stop) silently did NOT update. Now it coerces Int→Double and writes.
+    func testApplyWritebacksWritesIntegralDoubleThroughBinding() {
+        let box = Box(0.5)
+        let sample = DoubleBinding(opacity: Binding(get: { box.v }, set: { box.v = $0 }))
+        let e = PatchInstanceInputs.extract(from: sample)
+        // Drag the Slider to 1.0 (an INTEGRAL stop — the previously-broken case).
+        PatchedBodyHost.applyWritebacks(e.writebacks, newStateJSON: #"{"opacity":1}"#)
+        XCTAssertEqual(box.v, 1.0, accuracy: 1e-9,
+                       "an integral Double (1.0) must write back through Binding<Double>")
+        // Drag to 0.0 (the other integral extreme).
+        PatchedBodyHost.applyWritebacks(e.writebacks, newStateJSON: #"{"opacity":0}"#)
+        XCTAssertEqual(box.v, 0.0, accuracy: 1e-9, "0.0 must write back too")
+        // A fractional value still works (the control case).
+        PatchedBodyHost.applyWritebacks(e.writebacks, newStateJSON: #"{"opacity":0.42}"#)
+        XCTAssertEqual(box.v, 0.42, accuracy: 1e-9, "a fractional Double writes back")
     }
 
     func testApplyWritebacksSuppressesNoOp() {
@@ -488,6 +713,68 @@ final class PatchViewPatchingTests: XCTestCase {
     func testInputTokenJSONNilWhenNoInputTokens() {
         XCTAssertNil(PatchedBodyHost.inputTokenJSON(from: [:]))
         XCTAssertNil(PatchedBodyHost.inputTokenJSON(from: ["ct_x": .color(.blue)]))
+    }
+}
+
+// MARK: - R2 SDK bug-batch regression tests
+
+@MainActor
+final class R2SDKBugBatchTests: XCTestCase {
+
+    // R2-#98/#99: scalarEqual must compare large integral values EXACTLY (not via a
+    // lossy Double), so a real write-back to a value > 2^53 isn't suppressed as a no-op.
+    func testScalarEqualLargeIntDistinguishesAdjacentValues() {
+        let a = 9_007_199_254_740_992       // 2^53
+        let b = 9_007_199_254_740_993       // 2^53 + 1 (NOT representable as a distinct Double)
+        // Both arrive as Int here AND as JSON-parsed NSNumbers in the real path.
+        XCTAssertFalse(PatchFlatJSON.scalarEqual(a, b),
+                       "adjacent large ints must NOT compare equal (Double would collapse them)")
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(a, a))
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(b, b))
+    }
+
+    func testScalarEqualLargeIntViaJSONNSNumber() {
+        // Mirror the live path: the guest emits the value, JSONSerialization parses it
+        // as an integer NSNumber, and scalarEqual gates the write-back.
+        let parsed = { (s: String) -> Any in
+            let obj = try! JSONSerialization.jsonObject(
+                with: ("[" + s + "]").data(using: .utf8)!, options: [.fragmentsAllowed])
+            return (obj as! [Any])[0]
+        }
+        let current: Any = 9_007_199_254_740_992
+        let incoming = parsed("9007199254740993")
+        XCTAssertFalse(PatchFlatJSON.scalarEqual(current, incoming),
+                       "a real large-int write must not be suppressed")
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(current, parsed("9007199254740992")))
+    }
+
+    func testScalarEqualStillEqualForOrdinaryAndFloatValues() {
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(3, 3.0))      // int vs integral double
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(1.5, 1.5))
+        XCTAssertFalse(PatchFlatJSON.scalarEqual(1.5, 1.6))
+        XCTAssertTrue(PatchFlatJSON.scalarEqual("x", "x"))
+        XCTAssertFalse(PatchFlatJSON.scalarEqual("x", "y"))
+        XCTAssertTrue(PatchFlatJSON.scalarEqual(true, true))
+        XCTAssertFalse(PatchFlatJSON.scalarEqual(true, false))
+        // A Bool must never be treated as a number.
+        XCTAssertFalse(PatchFlatJSON.scalarEqual(true, 1))
+    }
+
+    // R2-#137: jsonFragmentsEqual canonicalizes (sorted keys) so equal objects with
+    // different key order compare equal — used to suppress no-op non-scalar write-backs.
+    func testJSONFragmentsEqualIgnoresKeyOrder() {
+        XCTAssertTrue(PatchedBodyHost.jsonFragmentsEqual(
+            #"{"a":1,"b":2}"#, #"{"b":2,"a":1}"#))
+        XCTAssertTrue(PatchedBodyHost.jsonFragmentsEqual("[1,2,3]", "[1,2,3]"))
+        XCTAssertTrue(PatchedBodyHost.jsonFragmentsEqual("null", "null"))
+    }
+
+    func testJSONFragmentsEqualDetectsRealDifference() {
+        XCTAssertFalse(PatchedBodyHost.jsonFragmentsEqual(
+            #"{"a":1,"b":2}"#, #"{"a":1,"b":3}"#))
+        XCTAssertFalse(PatchedBodyHost.jsonFragmentsEqual("[1,2]", "[1,2,3]"))
+        // Unparseable fragment → NOT equal (so the caller performs the write — demote-safe).
+        XCTAssertFalse(PatchedBodyHost.jsonFragmentsEqual("not json", "not json either"))
     }
 }
 #endif

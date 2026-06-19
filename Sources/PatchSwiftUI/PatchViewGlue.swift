@@ -22,11 +22,17 @@ public enum PatchViewError: Error, CustomStringConvertible {
     case schema(PatchViewIRSchema.Mismatch)
     case decode(Error)
     case runtime(PatchError)
+    /// The manifest marks the requested view-body export NON-thunkSafe (it has an
+    /// undispatchable effect, e.g. an `.onDelete`/`.onMove` the guest can't apply).
+    /// `patchView` refuses to render it rather than reach the destructive array-revert
+    /// path (bug #71).
+    case notThunkSafe(String)
     public var description: String {
         switch self {
         case .schema(let m): return m.description
         case .decode(let e): return "ViewNode decode failed: \(e)"
         case .runtime(let e): return "module call failed: \(e)"
+        case .notThunkSafe(let export): return "view export \(export) is not thunk-safe (refused)"
         }
     }
 }
@@ -113,6 +119,20 @@ extension Patch {
         // sub-module; checking only the primary here would wrongly mark a PMOD
         // module whose `dispatch` lives in a sub-module as read-only.
         let hasDispatch = hasFunction(dispatchExport)
+        // THUNK-SAFE GATE (bug #71): the auto-route path refuses a NON-thunkSafe view
+        // (e.g. a `List` ForEach with `.onDelete`, which the emitter flags because the
+        // renderer's destructive `editableForEach` dispatches an array op a scalar-only
+        // guest can't apply → a row that animates out then REAPPEARS, a data-integrity
+        // loss). A hand-wired `Patch.patchView(viewBodyExport:)` bypassed that gate and
+        // reached the destructive path. Mirror the gate here: if the manifest says this
+        // export's view is NOT thunkSafe, refuse to render it (show the errorView) rather
+        // than reach the array-revert. `nil` (no manifest / unknown export) renders as
+        // before — we only refuse what the manifest explicitly marks non-thunkSafe.
+        if PatchViewPatchRegistry.shared.isExportThunkSafe(export: viewBodyExport) == false {
+            let stub = errorView(PatchViewError.notThunkSafe(viewBodyExport))
+            return PatchView(initialState: initialState, context: context,
+                             treeProvider: { _ in stub }, reduce: nil)
+        }
         return PatchView(
             initialState: initialState,
             context: context,

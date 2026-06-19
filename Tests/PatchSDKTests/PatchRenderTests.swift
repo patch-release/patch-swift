@@ -1036,4 +1036,18 @@ final class PatchRenderTests: XCTestCase {
         XCTAssertEqual(r.color(.hostToken("ct_fill")), Color.green)
     }
     #endif
+
+    /// R2-#43: `.listRowBackground` content MUST be surfaced via `Modifier.contentNodes`
+    /// so an opaque slot / design-system token inside its backing subtree is reachable by
+    /// the demote-safety nets (collectOpaqueIDs/collectTokenIDs/etc). Without it, an
+    /// opaque/token leaf inside the backing bypassed every gate and rendered wrong.
+    func testListRowBackgroundContentIsSurfaced() {
+        let backing = N.shape(.roundedRectangle(cornerRadius: 8))
+            .foregroundColor(.hostToken("ct_card"))
+        let node = N.text("row").listRowBackground([backing])
+        // The `.listRowBackground` modifier must report its backing subtree as content.
+        let surfaced = node.modifiers.flatMap { $0.contentNodes }
+        XCTAssertFalse(surfaced.isEmpty,
+                       ".listRowBackground content must be reachable via contentNodes")
+    }
 }

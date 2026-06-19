@@ -16,7 +16,8 @@
 import XCTest
 import Foundation
 import PatchViewIR
-import PatchUIKit
+import PatchSDK
+@testable import PatchUIKit
 #if canImport(UIKit)
 import UIKit
 import PatchRenderUIKit
@@ -335,6 +336,74 @@ final class UIKitPatchHostTests: XCTestCase {
         XCTAssertEqual(table.tag, 7, "the native effect configured the live stored object")
     }
     #endif
+
+    // MARK: - BUG #17/#18 — control actions wired through PatchCellWiring
+
+    /// `PatchCellWiring` carries the `actions` channel (BUG #17/#18 fix): each lowered
+    /// control's action id maps to a native handler closure. A default init has none; a
+    /// supplied handler is invoked by the renderer dispatcher when the control fires.
+    @MainActor
+    func testPatchCellWiringCarriesActions() {
+        let plain = PatchCellWiring()
+        XCTAssertTrue(plain.actions.isEmpty, "no actions by default")
+        var toggled = false
+        let wiring = PatchCellWiring(actions: ["act_toggle": { toggled = true }])
+        XCTAssertEqual(wiring.actions.count, 1)
+        wiring.actions["act_toggle"]?()
+        XCTAssertTrue(toggled, "the supplied action handler runs")
+    }
+
+    // MARK: - BUG #53 — stale patched root cleared on every decline path
+
+    /// `clearPatchedRoot` removes ONLY the tagged patch-installed root, leaving the cell's
+    /// own native chrome untouched. This is the mechanism every decline path now invokes.
+    @MainActor
+    func testClearPatchedRootRemovesOnlyTaggedRoot() {
+        let contentView = UIView()
+        let patchedRoot = UIView(); patchedRoot.tag = Patch.patchedRootTag
+        let nativeChrome = UIView(); nativeChrome.tag = 12345
+        contentView.addSubview(patchedRoot)
+        contentView.addSubview(nativeChrome)
+        Patch.clearPatchedRoot(in: contentView)
+        XCTAssertFalse(contentView.subviews.contains { $0.tag == Patch.patchedRootTag },
+                       "the tagged patched root is removed")
+        XCTAssertTrue(contentView.subviews.contains { $0.tag == 12345 },
+                      "the cell's own native chrome is left intact")
+    }
+
+    /// BUG #53 — a DECLINE leaves no stale patched root behind. A reused cell whose
+    /// contentView still holds a prior successful install's tagged root R1 is dequeued
+    /// again; `installPatchedCell` declines (here: the type has no manifest entry) and must
+    /// CLEAR R1 before returning false, so the thunk's native fallback renders cleanly into
+    /// an empty contentView (no double/overlapping render).
+    @MainActor
+    func testDeclineClearsStalePatchedRoot() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uikit-bug53-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let patch = Patch()
+        let storage = try ModuleStorage(appKey: "pak_test_bug53", baseDirectory: dir)
+        patch.injectForTesting(
+            configuration: PatchConfiguration(
+                appKey: "pak_test_bug53", appID: nil,
+                apiBaseURL: URL(string: "https://api.test/api/v1")!, deviceID: "dev-bug53"),
+            storage: storage, checker: nil)
+
+        // Simulate the prior successful install: a tagged patched root R1 in the contentView.
+        let contentView = UIView()
+        let staleRoot = UIView(); staleRoot.tag = Patch.patchedRootTag
+        contentView.addSubview(staleRoot)
+        XCTAssertEqual(contentView.subviews.count, 1, "precondition: R1 present")
+
+        // A later dequeue declines (no manifest entry for this type) — must clear R1.
+        let installed = patch.installPatchedCell(
+            typeName: "NoSuchPatchableCellType", contentView: contentView, model: nil)
+        XCTAssertFalse(installed, "an unpatchable type declines")
+        XCTAssertFalse(contentView.subviews.contains { $0.tag == Patch.patchedRootTag },
+                       "BUG #53: the decline cleared the stale patched root R1")
+    }
 
     @objc static func noop() {}
 

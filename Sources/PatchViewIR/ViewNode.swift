@@ -1436,7 +1436,14 @@ extension Modifier {
     public var contentNodes: [ViewNode] {
         switch self {
         case .backgroundContent(_, let c), .overlayContent(_, let c),
-             .mask(_, let c), .safeAreaInset(_, _, _, let c):
+             .mask(_, let c), .safeAreaInset(_, _, _, let c),
+             .listRowBackground(let c):
+            // BUG R2-#43: `.listRowBackground` carries a lowered content subtree (a
+            // shape with a design-system color token, or a non-lowerable custom view
+            // lowered to an `.opaque` leaf). Surfacing it here routes that subtree
+            // through collectOpaqueIDs/collectTokenIDs/collectButtonActionIDs/
+            // collectRowSlotIDs — restoring the demote-or-cover guarantee. Without
+            // this case an opaque slot / token inside it bypassed every safety net.
             return c
         // Host-state presentation/navigation content subtrees (so coverage + the
         // drift-safe stats see the sheet/alert/destination bodies).

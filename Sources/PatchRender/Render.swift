@@ -295,29 +295,33 @@ struct Renderer {
     /// `onDelete` dispatches `.array([.int])` of the deleted offsets; `onMove`
     /// dispatches `.array([.int])` = `[source₀, source₁, …, destination]`.
     private func editableForEach(_ nodes: [ViewNode], onDelete: EventID?, onMove: EventID?) -> AnyView {
-        var fe = ForEach(Array(nodes.enumerated()), id: \.offset) { _, child in
+        // BUG R2-#134: attach EACH affordance only when its event is present. The old
+        // code always chained `.onDelete` (even in the move-only case), surfacing a DEAD
+        // swipe-to-delete that the no-op closure silently swallowed. Build the base
+        // ForEach once and attach exactly the affordances that exist, so a move-only list
+        // shows ONLY the reorder handle and a delete-only list ONLY swipe-to-delete.
+        let base = { ForEach(Array(nodes.enumerated()), id: \.offset) { _, child in
             self.render(child)
-        }
-        .onDelete { [d = context.dispatcher] indexSet in
+        } }
+        let d = context.dispatcher
+        let deleteAction: (IndexSet) -> Void = { indexSet in
             if let onDelete { d?.send(onDelete, .array(indexSet.sorted().map { .int($0) })) }
         }
-        // `.onMove` returns an opaque `DynamicViewContent`; chain it conditionally.
-        _ = fe
-        if let onMove {
-            let moved = ForEach(Array(nodes.enumerated()), id: \.offset) { _, child in
-                self.render(child)
-            }
-            .onDelete { [d = context.dispatcher] indexSet in
-                if let onDelete { d?.send(onDelete, .array(indexSet.sorted().map { .int($0) })) }
-            }
-            .onMove { [d = context.dispatcher] source, destination in
-                var payload = source.sorted().map { IRValue.int($0) }
-                payload.append(.int(destination))
-                d?.send(onMove, .array(payload))
-            }
-            return AnyView(moved)
+        let moveAction: (IndexSet, Int) -> Void = { source, destination in
+            var payload = source.sorted().map { IRValue.int($0) }
+            payload.append(.int(destination))
+            if let onMove { d?.send(onMove, .array(payload)) }
         }
-        return AnyView(fe)
+        switch (onDelete, onMove) {
+        case (.some, .some):
+            return AnyView(base().onDelete(perform: deleteAction).onMove(perform: moveAction))
+        case (.some, .none):
+            return AnyView(base().onDelete(perform: deleteAction))
+        case (.none, .some):
+            return AnyView(base().onMove(perform: moveAction))
+        case (.none, .none):
+            return AnyView(base())
+        }
     }
 
     private func renderChildren(_ nodes: [ViewNode]) -> AnyView {
@@ -2028,7 +2032,15 @@ struct Renderer {
     /// `.strings` via `LocalizedStringKey`; `verbatim` skips localization.
     func styledText(_ s: String, verbatim: Bool, markdown: Bool, localized: Bool) -> Text {
         if markdown {
-            if let attr = try? AttributedString(markdown: s) {
+            // BUG R2-#97/#130: SwiftUI's own `Text("…")` markdown is an INLINE-only,
+            // whitespace-preserving interpretation (a `LocalizedStringKey` parse). The
+            // default `AttributedString(markdown:)` uses `.full` syntax — it parses
+            // BLOCK-level constructs (`#` headings, `-`/`*` lists) and COLLAPSES runs of
+            // whitespace, so the rendered text diverges from native SwiftUI. Match
+            // SwiftUI by requesting `.inlineOnlyPreservingWhitespace`.
+            let opts = AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            if let attr = try? AttributedString(markdown: s, options: opts) {
                 return Text(attr)
             }
             return Text(verbatim: s)
@@ -2509,7 +2521,14 @@ struct Renderer {
                                                spacing: spacing.map { CGFloat($0) }) { renderChildren(content) })
             }
             #endif
-            return v
+            // BUG R2-#131: the HORIZONTAL-edge `safeAreaInset` overload is iOS 17+. On
+            // iOS 15-16 the old code fell through to `return v`, SILENTLY DROPPING the
+            // inset content (it vanished). The inset content must never disappear: render
+            // it as a leading/trailing-aligned OVERLAY (iOS 15+) so it stays visible — a
+            // faithful approximation (it isn't true safe-area insetting on the old OS, but
+            // the content is present and edge-anchored) rather than a silent hole.
+            let overlayAlignment: Alignment = (edge == "leading") ? .leading : .trailing
+            return AnyView(v.overlay(alignment: overlayAlignment) { renderChildren(content) })
         }
         return v
         #endif
@@ -3107,7 +3126,18 @@ struct Renderer {
                                  // The token's typeTag is matched against the
                                  // registered destinations (the pushed value itself is
                                  // a guest input already lowered into the body).
-                                 if let dest = destinations.first(where: { token.hasPrefix($0.typeTag) }) {
+                                 //
+                                 // BUG R2-#132: a bare `hasPrefix($0.typeTag)` match
+                                 // resolves a prefix-RELATED typeTag to the WRONG body
+                                 // (a token "UserDetail:42" wrongly matches a "User"
+                                 // destination listed first). Require a DELIMITED boundary
+                                 // (the token is exactly the typeTag, or `typeTag` + ":"
+                                 // then the value) and prefer the LONGEST matching typeTag
+                                 // so prefix-related tags disambiguate deterministically.
+                                 let matches = destinations.filter {
+                                     token == $0.typeTag || token.hasPrefix($0.typeTag + ":")
+                                 }
+                                 if let dest = matches.max(by: { $0.typeTag.count < $1.typeTag.count }) {
                                      return self.renderChildren(dest.body)
                                  }
                                  return AnyView(EmptyView())
@@ -3382,7 +3412,29 @@ struct FocusBinder: View {
             }
             .onChange(of: focused) { nowFocused in
                 // Host → guest: a tap/Tab focus change dispatches the new token.
-                dispatcher?.send(event, .string(nowFocused ? fieldToken : ""))
+                //
+                // BUG #44: tapping field B while A is focused fires TWO `onChange`s —
+                // A loses focus (would dispatch "") and B gains it (dispatches B's
+                // token). The order is not guaranteed; if A's stale "" runs AFTER B's
+                // gain, it clobbers the guest's focus to "" → desync. So only dispatch
+                // the LOST-focus clear when the guest STILL believes THIS field is
+                // focused (`isFocused == true`). If another field already took focus,
+                // the guest's token moved on and this clear is stale → drop it. A GAIN
+                // A GAIN dispatches only when it's a TRUE user-initiated gain.
+                //
+                // BUG R2-#133: `.onAppear` syncs `focused = isFocused`. When the guest
+                // already believes THIS field is focused (`isFocused == true`), that sync
+                // drives `onChange(of: focused)` with `nowFocused == true` — a SPURIOUS
+                // gain event on every (re)appear (e.g. returning from a pushed screen).
+                // Guard the gain on `!isFocused`: a genuine user gain has the guest NOT
+                // yet pointing here (`isFocused == false`) at that instant; the host→guest
+                // onAppear sync (`isFocused == true` already) must not re-fire as a gain.
+                if nowFocused && !isFocused {
+                    dispatcher?.send(event, .string(fieldToken))
+                } else if !nowFocused && isFocused {
+                    // This field lost focus and the guest still pointed at it → clear.
+                    dispatcher?.send(event, .string(""))
+                }
             }
             .onAppear { if focused != isFocused { focused = isFocused } }
     }

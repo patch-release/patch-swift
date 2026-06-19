@@ -42,6 +42,7 @@
 
 #if canImport(SwiftUI)
 import Foundation
+import os
 import SwiftUI
 import PatchSDK
 import PatchViewIR
@@ -71,11 +72,19 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
         /// visible stubs where native content belongs, so it stays native until
         /// the engine can lower all of it.
         public let thunkSafe: Bool
-        public init(type: String, export: String, dispatch: String?, thunkSafe: Bool) {
+        /// The MINIMUM PatchViewIR schema version a host must support to render THIS view
+        /// (per-view version gate). Optional for backward-decode of an older manifest that
+        /// predates the field — `nil` falls back to the module `schemaVersion` (the prior
+        /// whole-module behavior). A newer module stamps it per view (9 for a reactive-collection
+        /// marshalling view, 8 otherwise) so an older host demotes only the views it can't render.
+        public let minVersion: Int?
+        public init(type: String, export: String, dispatch: String?, thunkSafe: Bool,
+                    minVersion: Int? = nil) {
             self.type = type
             self.export = export
             self.dispatch = dispatch
             self.thunkSafe = thunkSafe
+            self.minVersion = minVersion
         }
     }
     /// PatchViewIR schema version the module's emissions target.
@@ -88,6 +97,22 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
 
     /// The guest export name (packed `(ptr,len) -> i64` ABI; input ignored).
     public static let exportName = "patch_view_manifest"
+}
+
+/// Minimal ONE-TIME runtime warning sink (R2-#100): logs each unique message at most once via
+/// os.Logger so a version-skew diagnostic surfaces (a dev on a too-old pinned PatchSDK sees their
+/// patch is partially inert) without spamming on every module-epoch reload.
+enum PatchRuntimeLog {
+    // Lock-guarded global de-dup state; `nonisolated(unsafe)` on `seen` is sound because every
+    // access is serialized through `lock` below (Swift-6 strict-concurrency can't see that invariant).
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var seen = Set<String>()
+    private static let logger = Logger(subsystem: "com.patch.sdk", category: "patch-version")
+    static func warnOnce(_ message: String) {
+        lock.lock(); let isNew = seen.insert(message).inserted; lock.unlock()
+        guard isNew else { return }
+        logger.warning("\(message, privacy: .public)")
+    }
 }
 
 // MARK: - Invalidation signal (iOS 17+/macOS 14+)
@@ -152,10 +177,44 @@ public final class PatchViewPatchRegistry {
         return entry
     }
 
+    /// Whether the active module's manifest marks the view shipping `export` as
+    /// `thunkSafe` (fully lowered, no undispatchable effect). Used to gate the explicit
+    /// `Patch.patchView(viewBodyExport:)` path so a hand-wired export cannot bypass the
+    /// thunkSafe gate the auto-route path enforces (bug #71 — a non-thunkSafe `.onDelete`
+    /// ForEach reaching the destructive `editableForEach` array-revert). Returns:
+    ///   * `true`  — a manifest entry for this export exists AND is thunkSafe.
+    ///   * `false` — a manifest entry exists but is NOT thunkSafe (refuse).
+    ///   * `nil`   — no manifest, or no entry for this export (a legacy/manifest-less
+    ///               module, or a non-view-body export): the caller renders as before
+    ///               (we can't gate what the manifest doesn't describe).
+    public func isExportThunkSafe(export: String) -> Bool? {
+        syncWithModuleEpoch()
+        guard !entries.isEmpty else { return nil }
+        guard let entry = entries.values.first(where: { $0.export == export }) else { return nil }
+        return entry.thunkSafe
+    }
+
     /// Demote `typeName` for the current module epoch (a render/decode failure).
     /// The bump re-evaluates on-screen views so the demoted view's NEXT body
     /// evaluation takes the native branch.
     public func markFailed(typeName: String) {
+        markFailed(typeName: typeName, forEpoch: nil)
+    }
+
+    /// Demote `typeName`, but ONLY if it still belongs to `forEpoch` (the module epoch
+    /// observed when the failure occurred). A failure is reported via a deferred
+    /// `Task { @MainActor … }`; between scheduling and running, a module hot-swap can
+    /// advance the epoch and clear `failedTypes` for the NEW module — running the stale
+    /// `markFailed` would then false-demote a freshly-loaded view that never failed
+    /// (bug #72). Re-syncing first + checking the epoch makes the demote no-op across a
+    /// swap. `forEpoch == nil` keeps the legacy unconditional behavior.
+    public func markFailed(typeName: String, forEpoch: UInt64?) {
+        // Re-sync so `loadedEpoch`/`failedTypes` reflect any swap that landed meanwhile.
+        syncWithModuleEpoch()
+        if let forEpoch, forEpoch != loadedEpoch {
+            // The failure belonged to a now-superseded module; ignore it for the new one.
+            return
+        }
         guard !failedTypes.contains(typeName) else { return }
         failedTypes.insert(typeName)
         bumpSignal()
@@ -229,12 +288,29 @@ public final class PatchViewPatchRegistry {
                                                        from: Data(jsonBytes)) else {
             return [:]
         }
-        // A manifest stamped with a NEWER schema than this SDK renders is not
-        // auto-routable — the per-call emission check would reject every tree
-        // anyway; refusing here keeps views native instead of demote-thrashing.
-        guard manifest.schemaVersion <= PatchViewIRSchema.version else { return [:] }
+        // PER-VIEW version gate (R2-#40/#41/#26/#88, replaces the prior whole-module refusal):
+        // keep each view whose required schema version this host supports, DEMOTE only the rest.
+        // A view's requirement is its `minVersion` (a newer manifest stamps it per view) else the
+        // module `schemaVersion` (backward-compat with an older manifest that lacks the field). So
+        // one v9 reactive-marshalling view never poisons its v8 siblings, an older host renders
+        // everything it can instead of refusing the whole module, and a reactive view on a pre-v9
+        // SDK demotes to native (the dev's real ForEach) instead of empty-rendering (R2-#24/#48).
         var out: [String: PatchViewManifest.Entry] = [:]
-        for entry in manifest.views { out[entry.type] = entry }
+        var refused = 0
+        for entry in manifest.views {
+            if (entry.minVersion ?? manifest.schemaVersion) <= PatchViewIRSchema.version {
+                out[entry.type] = entry
+            } else {
+                refused += 1
+            }
+        }
+        if refused > 0 {
+            // R2-#100 diagnostic: surface the version skew so a dev on a too-old pinned PatchSDK
+            // learns their patch is partially inert (the console otherwise just shows "rolled out").
+            PatchRuntimeLog.warnOnce(
+                "PatchSDK v\(PatchViewIRSchema.version): \(refused) patched view(s) need a newer "
+                + "PatchViewIR schema — rendered natively. Update PatchSDK to render them OTA.")
+        }
         return out
     }
 }
@@ -265,9 +341,83 @@ extension _PatchScalarWrapper {
     public func _patchWriteJSON(_ jsonFragment: String) -> Bool { false }
 }
 
+/// Coerce a writeback candidate to the wrapper's concrete `Value` BEFORE the
+/// `as? Value` cast, fixing the numeric-type mismatch that silently dropped writes:
+/// the guest serializes an integral `Double` (`1.0`, `0.0`) without a fractional part,
+/// `unbox` then collapses any integral JSON number to `Int`, and `Int as? Double` is nil
+/// → `@State<Double>`/`@AppStorage<Double>`/`Binding<Double>` (a `Slider` at an integral
+/// stop, a persisted opacity/volume) NEVER updated → on reopen it snapped back / never
+/// persisted (a value-dependent data-loss bug). We bridge Int↔Double↔CGFloat both ways so
+/// the cast lands. A non-numeric `Value` falls through unchanged (the plain `as?`).
+@MainActor
+func _patchCoerceScalar<Value>(_ newValue: Any, to _: Value.Type) -> Value? {
+    if let v = newValue as? Value { return v }
+    // Pull a lossless integer out of whatever integral arrived FIRST (so a large
+    // `Int64`/`UInt` snowflake/epoch-ms id never funnels through a lossy Double —
+    // bug #51/#74). `unbox` collapses an integral JSON number to `Int`, but the
+    // wrapper's concrete `Value` may be any width — bridge to every fixed-width
+    // integer target so the `as? Value` cast lands instead of silently dropping
+    // the write (which reverted the @State on the next native re-render).
+    let intVal: Int?
+    switch newValue {
+    case let i as Int: intVal = i
+    case let i as Int64: intVal = Int(exactly: i)
+    case let i as Int32: intVal = Int(i)
+    case let i as Int16: intVal = Int(i)
+    case let i as Int8: intVal = Int(i)
+    case let u as UInt: intVal = Int(exactly: u)
+    case let u as UInt64: intVal = Int(exactly: u)
+    case let u as UInt32: intVal = Int(u)
+    case let u as UInt16: intVal = Int(u)
+    case let u as UInt8: intVal = Int(u)
+    default: intVal = nil
+    }
+    if let intVal {
+        if Value.self == Int.self { return intVal as? Value }
+        if Value.self == Int64.self { return Int64(intVal) as? Value }
+        if Value.self == Int32.self { return Int32(exactly: intVal) as? Value }
+        if Value.self == Int16.self { return Int16(exactly: intVal) as? Value }
+        if Value.self == Int8.self { return Int8(exactly: intVal) as? Value }
+        if Value.self == UInt.self { return UInt(exactly: intVal) as? Value }
+        if Value.self == UInt64.self { return UInt64(exactly: intVal) as? Value }
+        if Value.self == UInt32.self { return UInt32(exactly: intVal) as? Value }
+        if Value.self == UInt16.self { return UInt16(exactly: intVal) as? Value }
+        if Value.self == UInt8.self { return UInt8(exactly: intVal) as? Value }
+        // A floating target from an integral source.
+        if Value.self == Double.self { return Double(intVal) as? Value }
+        if Value.self == CGFloat.self { return CGFloat(intVal) as? Value }
+        if Value.self == Float.self { return Float(intVal) as? Value }
+        return nil
+    }
+    // Numeric widening/narrowing: pull a Double out of whatever floating arrived.
+    let d: Double?
+    switch newValue {
+    case let x as Double: d = x
+    case let f as CGFloat: d = Double(f)
+    case let f as Float: d = Double(f)
+    default: d = nil
+    }
+    guard let d else { return nil }
+    if Value.self == Double.self { return d as? Value }
+    if Value.self == CGFloat.self { return CGFloat(d) as? Value }
+    if Value.self == Float.self { return Float(d) as? Value }
+    // An integral target written from an integral-valued Double (`Int` from `Int(d)`).
+    if d == d.rounded() {
+        if Value.self == Int.self { return Int(d) as? Value }
+        if Value.self == Int64.self { return Int64(d) as? Value }
+        if Value.self == Int32.self { return Int32(exactly: d) as? Value }
+        if Value.self == UInt.self, d >= 0 { return UInt(d) as? Value }
+        if Value.self == UInt64.self, d >= 0 { return UInt64(d) as? Value }
+        if Value.self == UInt32.self, d >= 0 { return UInt32(exactly: d) as? Value }
+    }
+    return nil
+}
+
 extension State: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
-    public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    public func _patchWrite(_ newValue: Any) {
+        if let v = _patchCoerceScalar(newValue, to: Value.self) { wrappedValue = v }
+    }
     public func _patchWriteJSON(_ jsonFragment: String) -> Bool {
         guard let v = _patchDecodeJSON(Value.self, from: jsonFragment) else { return false }
         wrappedValue = v; return true
@@ -276,7 +426,9 @@ extension State: _PatchScalarWrapper {
 
 extension Binding: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
-    public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    public func _patchWrite(_ newValue: Any) {
+        if let v = _patchCoerceScalar(newValue, to: Value.self) { wrappedValue = v }
+    }
     public func _patchWriteJSON(_ jsonFragment: String) -> Bool {
         guard let v = _patchDecodeJSON(Value.self, from: jsonFragment) else { return false }
         wrappedValue = v; return true
@@ -285,20 +437,75 @@ extension Binding: _PatchScalarWrapper {
 
 extension AppStorage: _PatchScalarWrapper {
     public func _patchRead() -> Any? { wrappedValue }
-    public func _patchWrite(_ newValue: Any) { if let v = newValue as? Value { wrappedValue = v } }
+    public func _patchWrite(_ newValue: Any) {
+        if let v = _patchCoerceScalar(newValue, to: Value.self) { wrappedValue = v }
+    }
     // @AppStorage only stores property-list scalars (String/Int/Double/Bool/Data/
     // URL/RawRepresentable), never a free struct/array, so the default no-op JSON
     // write-back (from the protocol extension) is exactly right here.
 }
 
+/// Unwraps a SwiftUI REACTIVE property wrapper to the OBJECT it holds, so the
+/// object's fields can be marshalled into the guest inputs as a nested object
+/// (`{"vm":{"items":[…]}}`) — letting a `ForEach(vm.items)` over a reactive
+/// collection lower to a bound WASM loop instead of native-slotting the rows.
+///
+/// SAFE-SURFACE INVARIANT (bug #8): conformed ONLY by the wrappers that HOLD their
+/// object directly and whose `wrappedValue` therefore NEVER traps —
+/// `@ObservedObject` and `@StateObject`. It is DELIBERATELY *not* conformed by
+/// `@EnvironmentObject` or `@Environment(SomeType.self)`: those read their object
+/// out of the environment, and `wrappedValue` TRAPS (an uncatchable Swift fatalError)
+/// when the object isn't installed. `extract` marshals EVERY reactive wrapper it
+/// finds on the instance EAGERLY — even one the current body-render path wouldn't
+/// touch — so conforming the environment wrappers would crash the app MORE than
+/// native rendering ever would (native only traps if the body actually reads the
+/// missing object). A trap can't be caught, so there is no try/catch fix: the only
+/// safe answer is to never call `wrappedValue` on a possibly-absent wrapper. The
+/// engine MIRRORS this restriction — it refuses to register an `@EnvironmentObject`/
+/// `@Environment`-backed reactive collection as a marshalled input (the `ForEach`
+/// then native-demotes, demote-safe), so the two sides agree on the safe surface.
+///
+/// (A `@State var vm = SomeObservable()` / a plain `let vm` is NOT here — those
+/// already marshal via `_PatchScalarWrapper`/the stored-property path.)
+///
+/// Returns the wrapped value ONLY when it is a CLASS instance (a value-type held
+/// object isn't a marshallable view-model and shouldn't be treated as one).
+/// `wrappedValue` is read during the view's body evaluation (when the thunk runs),
+/// where `@ObservedObject`/`@StateObject` are always populated.
+@MainActor
+public protocol _PatchReactiveWrapper {
+    func _patchReactiveObject() -> AnyObject?
+}
+
+extension ObservedObject: _PatchReactiveWrapper {
+    public func _patchReactiveObject() -> AnyObject? { wrappedValue as AnyObject }
+}
+extension StateObject: _PatchReactiveWrapper {
+    public func _patchReactiveObject() -> AnyObject? { wrappedValue as AnyObject }
+}
+// NOTE: `EnvironmentObject` and `Environment` are INTENTIONALLY NOT conformed —
+// reading their `wrappedValue` when the object is absent traps uncatchably. See the
+// SAFE-SURFACE INVARIANT above. Do not add them back without a per-member opt-in
+// that the engine can prove the body actually reads (and even then, the env object
+// can still be legitimately absent at the time `extract` runs).
+
 /// Decode a JSON fragment into `V` IFF `V: Decodable` (a runtime check — `State`'s
 /// `Value` carries no Decodable bound). Returns nil for a non-Decodable `V` or a
 /// fragment that doesn't parse, so the write-back is skipped rather than wrong.
+///
+/// The decoder MUST mirror `PatchValueEncoder`'s conventions or the write-back
+/// corrupts the value (bug #23): the encoder marshals a `Date` as
+/// `timeIntervalSince1970` (epoch-1970 seconds), but a vanilla `JSONDecoder`
+/// defaults to `.deferredToDate` (a 2001 reference-date Double) and would read the
+/// same number ~31 years off. Pin `dateDecodingStrategy` to `.secondsSince1970` so
+/// a `Date` inside a Decodable `@State`/`@Binding` struct round-trips faithfully.
 @MainActor
 func _patchDecodeJSON<V>(_ type: V.Type, from jsonFragment: String) -> V? {
     guard let decodableType = V.self as? any Decodable.Type,
           let data = jsonFragment.data(using: .utf8) else { return nil }
-    guard let decoded = try? JSONDecoder().decode(decodableType, from: data) else { return nil }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .secondsSince1970
+    guard let decoded = try? decoder.decode(decodableType, from: data) else { return nil }
     return decoded as? V
 }
 
@@ -332,15 +539,30 @@ public enum PatchInstanceInputs {
                 // value from the wrappers we understand and marshal it — a scalar
                 // directly, a struct/array/enum/etc. via the recursive encoder, so the
                 // guest body reads the REAL value rather than its compiled-in default.
-                guard let wrapper = child.value as? _PatchScalarWrapper else { continue }
-                let key = String(rawLabel.dropFirst())
-                guard !key.isEmpty, let value = wrapper._patchRead(),
-                      let fragment = PatchValueEncoder.encode(value) else { continue }
-                fragments.append((key, fragment))
-                // Write-back is wired for any wrapper-backed field whose value
-                // round-trips through the guest (scalar today; richer types reconstruct
-                // on the way out when the wrapper's concrete type is reconstructable).
-                writebacks.append(PatchScalarWriteback(key: key, wrapper: wrapper))
+                if let wrapper = child.value as? _PatchScalarWrapper {
+                    let key = String(rawLabel.dropFirst())
+                    guard !key.isEmpty, let value = wrapper._patchRead(),
+                          let fragment = PatchValueEncoder.encode(value) else { continue }
+                    fragments.append((key, fragment))
+                    // Write-back is wired for any wrapper-backed field whose value
+                    // round-trips through the guest (scalar today; richer types reconstruct
+                    // on the way out when the wrapper's concrete type is reconstructable).
+                    writebacks.append(PatchScalarWriteback(key: key, wrapper: wrapper))
+                } else if let reactive = child.value as? _PatchReactiveWrapper,
+                          let object = reactive._patchReactiveObject() {
+                    // A REACTIVE view-model/service wrapper (@ObservedObject/@StateObject/
+                    // @EnvironmentObject/@Environment(T.self)). Marshal the OBJECT as a nested
+                    // object under the member name so the guest can read `member.collection`
+                    // — e.g. a `ForEach(vm.items)` over a reactive collection lowers to a bound
+                    // loop. READ-ONLY: no write-back (the guest renders rows; it doesn't mutate
+                    // the VM through this path). Unmarshallable object → key omitted → the view
+                    // demotes to native (build-safe = demote-safe).
+                    let key = String(rawLabel.dropFirst())
+                    guard !key.isEmpty, let fragment = PatchValueEncoder.encode(object) else { continue }
+                    fragments.append((key, fragment))
+                } else {
+                    continue
+                }
             } else {
                 // A plain stored property (`let`/`var`). Marshal scalars directly and
                 // structs/arrays/enums/Optionals/Dates via the recursive encoder;
@@ -451,6 +673,14 @@ enum PatchFlatJSON {
         if value is NSNull { return "null" }
         if let n = value as? NSNumber {
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+            // BUG #73: a large integral @State (> 2^53) merged through here must keep its
+            // exact value — emitting `scalarJSONFragment(n.doubleValue)` would round it to
+            // a 53-bit Double (and `doubleFragment`'s 1e15 cap then prints a `.0` the guest's
+            // `_patchScanInt` rejects → the @State reverts). When JSONSerialization parsed an
+            // INTEGER, emit its exact `int64Value` verbatim; only floats go through Double.
+            if !CFNumberIsFloatType(n) {
+                return String(n.int64Value)
+            }
             return PatchInstanceInputs.scalarJSONFragment(n.doubleValue)
         }
         if let s = value as? String { return PatchInstanceInputs.quotedJSONString(s) }
@@ -483,9 +713,40 @@ enum PatchFlatJSON {
         case let (x as String, y as String): return x == y
         case let (x as Bool, y as Bool): return x == y
         default:
+            // BUG R2-#98/#99: a large integral value (> 2^53, e.g. a snowflake id /
+            // epoch-ms) must NOT compare through `numeric()`'s `Double` cast — that
+            // collapses 9007199254740993 to …992.0, so a real write-back to such a
+            // value is wrongly suppressed as a no-op (the @State never updates / snaps
+            // back). When BOTH sides are genuine fixed-width integers, compare them
+            // exactly first; only fall back to the Double compare when at least one
+            // side is genuinely floating. Mirrors the int-first ordering in `unbox`.
+            if let xi = integerValue(a), let yi = integerValue(b) { return xi == yi }
             // Numeric cross-family compare (Int vs NSNumber-double etc.).
             if let xa = numeric(a), let xb = numeric(b) { return xa == xb }
             return false
+        }
+    }
+
+    /// The exact integer value of `v` IF it bridges to a fixed-width integer (Int /
+    /// Int32 / Int64 / UInt / a non-float `NSNumber`), else nil (a genuine float,
+    /// String, etc.). Used by `scalarEqual` to compare large integral values without
+    /// the lossy `Double` round-trip (bug R2-#98/#99). `UInt64` above `Int64.max`
+    /// returns nil (rare; falls back to the Double compare).
+    private static func integerValue(_ v: Any) -> Int64? {
+        switch v {
+        case is Bool: return nil
+        case let i as Int: return Int64(i)
+        case let i as Int32: return Int64(i)
+        case let i as Int64: return i
+        case let u as UInt: return u <= UInt(Int64.max) ? Int64(u) : nil
+        case let u as UInt64: return u <= UInt64(Int64.max) ? Int64(u) : nil
+        case let n as NSNumber:
+            // Boolean NSNumbers are not integers here; a FLOAT NSNumber must go through
+            // the Double path (it may carry a fractional value).
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+            if CFNumberIsFloatType(n) { return nil }
+            return n.int64Value
+        default: return nil
         }
     }
 
@@ -506,6 +767,16 @@ enum PatchFlatJSON {
 }
 
 // MARK: - The patched-body host view
+
+/// A mutable holder for the last successfully-rendered tree (bug #50). A class (not
+/// `@State`) so `PatchedBodyHost.body` can record into it without mutating observed
+/// SwiftUI state mid-evaluation. MainActor-confined: only touched from `body`.
+@MainActor
+final class LastGoodTreeBox {
+    var tree: ViewNode?
+    var context: RenderContext?
+    init() {}
+}
 
 /// The view a generated thunk returns when its type is patched: renders the
 /// guest's lowered body and runs the full interactive loop against the LIVE
@@ -545,6 +816,25 @@ public struct PatchedBodyHost: View {
     let rowSlots: [String: PatchRowSlot]
 
     @State private var guestState: String = ""
+    /// The freshly-marshalled native props snapshot captured at the moment the guest
+    /// last emitted `guestState`. Used to RECONCILE a dual-owned field (bug #49/#52):
+    /// a `@Binding`/`@AppStorage`/`@State` the guest control mutates AND native code
+    /// (a parent "Reset", a `Timer`, `.onReceive`) also changes. If the current
+    /// `propsJSON` value for a guest-owned key has moved AWAY from this baseline, native
+    /// changed it after the guest's last write → the guest override for that key is
+    /// STALE and must yield to the live native value (else the view shows the old guest
+    /// value forever). Empty until the first dispatch.
+    @State private var guestBaseline: String = ""
+    /// The LAST tree this host rendered successfully (decoded + all safety nets passed),
+    /// retained so a later FAILURE pass shows the last-known-good patched content instead
+    /// of a blank `EmptyView` (bug #50). On iOS 17+ a demote also bumps the Observation
+    /// signal, re-evaluating the thunk → the native branch; but on iOS 16 (no Observation)
+    /// nothing forces that re-evaluation, so without this the screen would go BLANK until
+    /// an unrelated state change re-rendered the parent. Showing the last good tree keeps
+    /// the view populated on every OS while the demote propagates — never wrong NEW content
+    /// (it's exactly what last rendered correctly). A reference box (not `@State`) so
+    /// recording it inside `body` doesn't mutate observed state mid-evaluation.
+    private let lastGood = LastGoodTreeBox()
 
     init(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
          writebacks: [PatchScalarWriteback], slots: [String: ([String]) -> AnyView] = [:],
@@ -560,7 +850,17 @@ public struct PatchedBodyHost: View {
     }
 
     public var body: some View {
-        var merged = PatchFlatJSON.merge(base: propsJSON, override: guestState)
+        // The module epoch THIS render runs under — tag every deferred `markFailed` with
+        // it so a demote scheduled here can't false-demote a view freshly loaded by a
+        // later hot-swap (bug #72).
+        let renderEpoch = Patch.shared.moduleEpoch
+        // RECONCILE dual-owned state (bug #49/#52): drop any guest-owned key whose live
+        // native value has moved away from the baseline captured at the guest's last
+        // write — native code (a parent "Reset", a Timer, `.onReceive`) changed it and
+        // must win, rather than the stale guest value masking it forever.
+        let effectiveGuestState = Self.reconcileGuestOverride(
+            guestState: guestState, baseline: guestBaseline, currentProps: propsJSON)
+        var merged = PatchFlatJSON.merge(base: propsJSON, override: effectiveGuestState)
         // INPUT-RIDING HOST TOKENS: a `Theme.Radius.lg`-style NUMERIC constant the guest
         // consumes inside a `.cornerRadius(…)`/`.padding(…)`/`frame` position, and a
         // host STRING (an enum's computed-String `Text(…)` content like `confidence.label`)
@@ -583,13 +883,15 @@ public struct PatchedBodyHost: View {
             tree = emission.root
             slotArgs = emission.slotArgs ?? [:]
         } catch {
-            // Demote OUTSIDE this view-update pass; this pass renders nothing and
-            // the next evaluation takes the thunk's native branch.
+            // Demote OUTSIDE this view-update pass; the next thunk evaluation takes the
+            // native branch (iOS 17+ via the Observation bump). This pass shows the last
+            // good tree if any (so the view doesn't go BLANK on iOS 16 — bug #50).
             let name = typeName
+            let ep = renderEpoch
             Task { @MainActor in
-                PatchViewPatchRegistry.shared.markFailed(typeName: name)
+                PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep)
             }
-            return AnyView(EmptyView())
+            return demoteFallback()
         }
 
         // MIXED-VIEW SAFETY NET: every opaque leaf in the tree must have a native
@@ -602,8 +904,9 @@ public struct PatchedBodyHost: View {
         let uncovered = neededIDs.filter { slots[$0] == nil }
         if !uncovered.isEmpty {
             let name = typeName
-            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name) }
-            return AnyView(EmptyView())
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
         }
 
         // DESIGN-SYSTEM TOKEN SAFETY NET: every `.hostToken(id)` color / `.fontToken(id)`
@@ -617,8 +920,9 @@ public struct PatchedBodyHost: View {
         let uncoveredTokens = neededTokenIDs.filter { tokens[$0] == nil }
         if !uncoveredTokens.isEmpty {
             let name = typeName
-            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name) }
-            return AnyView(EmptyView())
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
         }
 
         // PER-ROW INDEXED SLOT SAFETY NET: every `.indexedForEachSlot(id:…)` node in the
@@ -631,8 +935,9 @@ public struct PatchedBodyHost: View {
         let uncoveredRows = neededRowIDs.filter { rowSlots[$0] == nil }
         if !uncoveredRows.isEmpty {
             let name = typeName
-            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name) }
-            return AnyView(EmptyView())
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
         }
 
         var context = RenderContext(showOpaqueStubs: false)
@@ -664,34 +969,78 @@ public struct PatchedBodyHost: View {
         // the renderer falls back to the statically-lowered children (demote-safe).
         let geoExport = entry.export
         let geoState = merged
+        // The coverage the host's tables actually provide — the GeometryReader rebuild
+        // must NOT return re-emitted children carrying an id outside these sets (bug #22).
+        let coveredSlotIDs = Set(slots.keys)
+        let coveredTokenIDs = Set(tokens.keys)
+        let coveredRowIDs = Set(rowSlots.keys)
+        let geoName = typeName
+        let geoEpoch = renderEpoch
         context.geometryRebuild = GeometryRebuild { gid, w, h, minX, minY in
             let geoJSON = "{\"__geo_width\":\(Self.numJSON(w)),\"__geo_height\":\(Self.numJSON(h)),"
                 + "\"__geo_minX\":\(Self.numJSON(minX)),\"__geo_minY\":\(Self.numJSON(minY))}"
             let withGeo = PatchFlatJSON.merge(base: geoState, override: geoJSON)
             guard let reTree = try? Patch.shared.viewBody(state: withGeo, export: geoExport),
                   let children = Self.geometryChildren(in: reTree, id: gid) else { return nil }
+            // BUG #22: the geometry-dependent re-emit can surface an opaque/token/row-slot
+            // leaf the STATIC tree never had (e.g. `if proxy.size.width > 300 { CustomNativeView() }`),
+            // for which the host's tables were never filled. Rendering those children here would
+            // hit `context.opaques.view(for:)` → nil → EmptyView (a SILENT native hole) instead of
+            // demoting. Re-run the safety nets on the re-emitted children: if any id is uncovered,
+            // DEMOTE the whole view and fall back to the static children (which we DID cover).
+            for child in children {
+                let opaqueOK = Self.collectOpaqueIDs(child).allSatisfy { coveredSlotIDs.contains($0) }
+                let tokenOK = Self.collectTokenIDs(child).allSatisfy { coveredTokenIDs.contains($0) }
+                let rowOK = Self.collectRowSlotIDs(child).allSatisfy { coveredRowIDs.contains($0) }
+                if !(opaqueOK && tokenOK && rowOK) {
+                    Task { @MainActor in
+                        PatchViewPatchRegistry.shared.markFailed(typeName: geoName, forEpoch: geoEpoch)
+                    }
+                    return nil
+                }
+            }
             return children
         }
         if let dispatchExport = entry.dispatch {
             let stateBinding = $guestState
+            let baselineBinding = $guestBaseline
             let props = propsJSON
+            let effectiveOverride = effectiveGuestState
             let wbs = writebacks
             let name = typeName
+            let dispEpoch = renderEpoch
             // The dispatch rebuilds the tree IN WASM, so its `_patchBuildTree` needs the
             // input-riding token inputs too (a `Double(__numtok_<id>)` numeric token, a
             // `__strtok_<id>` string token) in the rebuilt body.
             let tokJSON = inputTokenJSON
             let dispatcher = Dispatcher { event, value in
-                var current = PatchFlatJSON.merge(base: props, override: stateBinding.wrappedValue)
+                // BUG R2-#39: an alert/confirmationDialog Button action and the auto-
+                // dismiss `isPresented = false` both fire SYNCHRONOUSLY through this same
+                // closure. If both merge over the render-time `effectiveOverride` snapshot,
+                // the second dispatch composes on a STALE base and CLOBBERS the first's
+                // write (e.g. `confirmed = true` is reverted by the auto-dismiss). Use the
+                // LIVE guest state (`stateBinding.wrappedValue`, just written by the prior
+                // synchronous dispatch) as the override base when present, so sequential
+                // dispatches accumulate; fall back to the reconciled snapshot on the first
+                // dispatch (when no guest write has happened yet).
+                let liveOverride = stateBinding.wrappedValue
+                let overrideBase = liveOverride.isEmpty ? effectiveOverride : liveOverride
+                // Dispatch over the RECONCILED override (so a native-changed dual-owned
+                // field feeds the guest its live value, not the stale one — bug #49/#52).
+                var current = PatchFlatJSON.merge(base: props, override: overrideBase)
                 if let tokJSON { current = PatchFlatJSON.merge(base: current, override: tokJSON) }
                 do {
                     let result = try Patch.shared.dispatch(
                         state: current, event: event, value: value, export: dispatchExport)
                     stateBinding.wrappedValue = result.state
+                    // Snapshot the native props AS OF this write, so a later native change
+                    // to a dual-owned field is detected on the next body eval and the guest
+                    // override yields to it (bug #49/#52).
+                    baselineBinding.wrappedValue = props
                     Self.applyWritebacks(wbs, newStateJSON: result.state)
                 } catch {
                     Task { @MainActor in
-                        PatchViewPatchRegistry.shared.markFailed(typeName: name)
+                        PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: dispEpoch)
                     }
                 }
             }
@@ -704,7 +1053,120 @@ public struct PatchedBodyHost: View {
                 }
             }
         }
+        // Record this fully-validated tree+context as the last-known-good render, so a
+        // later failure pass shows it instead of a blank EmptyView (bug #50).
+        lastGood.tree = tree
+        lastGood.context = context
         return render(tree, context: context)
+    }
+
+    /// The view to show on a FAILURE pass (decode error / uncovered slot, token, or row
+    /// slot). On iOS 17+ the demote also bumps the Observation signal so the thunk re-
+    /// evaluates to native; this rendered fallback covers the gap until then — and is the
+    /// ONLY thing keeping an iOS-16 device (no Observation invalidation) from showing a
+    /// blank screen (bug #50). Renders the last-known-good tree if one exists, else an
+    /// EmptyView (the first-ever eval failed, with nothing good to fall back to).
+    private func demoteFallback() -> AnyView {
+        if let tree = lastGood.tree, let context = lastGood.context {
+            return render(tree, context: context)
+        }
+        return AnyView(EmptyView())
+    }
+
+    /// Reconcile a dual-owned field (bug #49/#52). `guestState` carries the guest's
+    /// authoritative state-model after interactions and normally OVERRIDES the
+    /// freshly-marshalled native `propsJSON`. But a field that native code ALSO owns
+    /// (a `@Binding` the parent resets, a `@State` a Timer/`.onReceive` mutates) would
+    /// be masked forever by the stale guest value. So: for each guest-owned key, if the
+    /// CURRENT native value differs from the `baseline` captured at the guest's last
+    /// write, native changed it AFTER that write → drop the guest override for that key
+    /// (the live native value wins). A key whose native value still equals the baseline
+    /// keeps its guest override (only the guest touched it). With no baseline yet (no
+    /// dispatch has happened) the guest override is empty anyway, so nothing is masked.
+    static func reconcileGuestOverride(guestState: String, baseline: String,
+                                       currentProps: String) -> String {
+        guard !guestState.isEmpty else { return guestState }
+        guard let guestObj = PatchFlatJSON.parse(guestState) else { return guestState }
+        // No baseline → nothing native could have changed relative to a guest write.
+        guard !baseline.isEmpty, let baseObj = PatchFlatJSON.parse(baseline),
+              let curObj = PatchFlatJSON.parse(currentProps) else { return guestState }
+        var kept: [String: Any] = [:]
+        var dropped = false
+        for (key, gval) in guestObj {
+            let baselineVal = baseObj[key]
+            let currentVal = curObj[key]
+            // Native moved this key away from the baseline → it's stale; drop the override.
+            if !jsonValueEqual(baselineVal, currentVal) {
+                dropped = true
+                continue
+            }
+            kept[key] = gval
+        }
+        guard dropped else { return guestState }
+        // Re-serialize the surviving guest overrides via the merge path so the wire
+        // shape matches (sorted keys, scalar/object fragments).
+        return PatchFlatJSON.merge(base: "{}", override: serializeFlat(kept))
+    }
+
+    /// Serialize a parsed flat-JSON dict back to a JSON object string (deterministic
+    /// key order), reusing `PatchFlatJSON`'s fragment encoder for scalars/objects.
+    private static func serializeFlat(_ obj: [String: Any]) -> String {
+        // Round-trip through merge, which re-uses the same fragment encoder.
+        // Build via JSONSerialization for nested fidelity, then normalize.
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: data, encoding: .utf8) else { return "{}" }
+        // Normalize through parse→merge so number/string fragments match the wire form.
+        return PatchFlatJSON.merge(base: "{}", override: s)
+    }
+
+    /// Equality of two optional `JSONSerialization` values (both nil → equal; one nil →
+    /// not equal). Scalars compare by value (numeric cross-family); objects/arrays by
+    /// their normalized JSON string.
+    private static func jsonValueEqual(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (nil, _), (_, nil): return false
+        case let (x?, y?):
+            if PatchFlatJSON.scalarEqual(x, y) { return true }
+            // Fall back to normalized-string comparison for nested/object values.
+            let fa = PatchFlatJSON.fragmentForWriteback(x) ?? scalarFrag(x)
+            let fb = PatchFlatJSON.fragmentForWriteback(y) ?? scalarFrag(y)
+            return fa != nil && fa == fb
+        }
+    }
+
+    private static func scalarFrag(_ v: Any) -> String? {
+        if let n = v as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+            if !CFNumberIsFloatType(n) { return String(n.int64Value) }
+            return PatchInstanceInputs.scalarJSONFragment(n.doubleValue)
+        }
+        if let s = v as? String { return PatchInstanceInputs.quotedJSONString(s) }
+        return PatchInstanceInputs.scalarJSONFragment(v)
+    }
+
+    /// Whether two JSON fragment strings represent the same value, comparing through a
+    /// canonical (sorted-key) re-serialization so two encoders' key orderings don't
+    /// cause a false inequality. Returns false (NOT equal) if either side can't be
+    /// canonicalized — the caller then performs the write rather than wrongly
+    /// suppressing it (bug R2-#137 is demote-safe: suppress only on a proven match).
+    static func jsonFragmentsEqual(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        guard let ca = canonicalJSON(a), let cb = canonicalJSON(b) else { return false }
+        return ca == cb
+    }
+
+    /// Re-serialize a JSON fragment with sorted object keys for a stable, comparable
+    /// form. Wraps the (possibly top-level scalar) fragment in an array so
+    /// `JSONSerialization` — which rejects a bare top-level scalar — accepts it, then
+    /// unwraps. Returns nil for an unparseable fragment.
+    private static func canonicalJSON(_ s: String) -> String? {
+        let wrapped = "[" + s + "]"
+        guard let data = wrapped.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+              let str = String(data: out, encoding: .utf8) else { return nil }
+        return str
     }
 
     static func applyWritebacks(_ writebacks: [PatchScalarWriteback], newStateJSON: String) {
@@ -720,6 +1182,19 @@ public struct PatchedBodyHost: View {
                 // Non-scalar field (object/array/null): reconstruct the concrete
                 // type from its JSON fragment when the wrapper's Value is Decodable.
                 // (`_patchWriteJSON` is a no-op for a non-Decodable Value — safe.)
+                //
+                // BUG R2-#137: suppress a NO-OP non-scalar write so an unchanged
+                // struct/array doesn't re-fire `.onChange`/`didSet` on every dispatch.
+                // Encode the wrapper's CURRENT value through the SAME encoder used at
+                // marshal time and compare it (canonicalized) to the incoming fragment;
+                // skip the write when they're equal. If the current value can't be
+                // encoded or either side fails to canonicalize, fall through to the
+                // unconditional write (never suppress on uncertainty — demote-safe).
+                if let current = wb.wrapper._patchRead(),
+                   let currentFrag = PatchValueEncoder.encode(current),
+                   Self.jsonFragmentsEqual(currentFrag, fragment) {
+                    continue
+                }
                 _ = wb.wrapper._patchWriteJSON(fragment)
             }
         }
@@ -730,6 +1205,14 @@ public struct PatchedBodyHost: View {
         guard let value else { return nil }
         if let n = value as? NSNumber {
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue }
+            // BUG #74: a large integral @State (> 2^53, e.g. a snowflake id / epoch-ms)
+            // must NOT funnel through `doubleValue` — that collapses 9007199254740993 to
+            // …992, silently corrupting the write-back. When JSONSerialization parsed the
+            // value as an INTEGER (not a float), read its exact `int64Value` and unbox an
+            // `Int` directly. Only fall back to Double for a genuinely fractional number.
+            if !CFNumberIsFloatType(n) {
+                return Int(n.int64Value)
+            }
             // Integral numbers unbox as Int (covers Int-typed @State); the write
             // closure's `as? Value` cast no-ops on a type mismatch, so also try
             // Double via a second write candidate at the call site if needed.

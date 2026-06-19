@@ -214,9 +214,25 @@ extension Patch {
                                    contentView: UIView,
                                    model: Any?,
                                    wiring: () -> PatchCellWiring = { PatchCellWiring() }) -> Bool {
-        guard currentConfiguration != nil else { return false }
-        guard let entry = PatchUIKitCellRegistry.shared.entryIfPatchable(typeName: typeName) else {
+        // BUG #53 (stale-patched-root on a reused cell): EVERY decline path must first
+        // remove any PATCH-installed root left in `contentView` by a PRIOR successful
+        // install of this reused cell instance. Otherwise, when a later `configure` on the
+        // same dequeued cell declines a gate (a patch adds an unsupplied slot/color-token
+        // id, decode traps, or the type was demoted via `markFailed`), this returns `false`
+        // → the thunk falls through to the native `configure(with:)`, which builds native
+        // subviews into a `contentView` that STILL holds the stale patched root R1 → a
+        // double/overlapping render. Clearing the tagged root on decline (and on success,
+        // just before re-adding the new one) makes the native fallback render cleanly. The
+        // clear is a cheap tag-filtered pass over `contentView.subviews` — a no-op for a
+        // never-patched cell (no tagged subviews).
+        func decline() -> Bool {
+            Self.clearPatchedRoot(in: contentView)
             return false
+        }
+
+        guard currentConfiguration != nil else { return decline() }
+        guard let entry = PatchUIKitCellRegistry.shared.entryIfPatchable(typeName: typeName) else {
+            return decline()
         }
         // Marshal the model's flat fields to the inputs JSON the guest scans. The wiring
         // is materialized up-front so its DESIGN-SYSTEM NUMERIC TOKENS (resolved natively
@@ -233,7 +249,7 @@ extension Patch {
         do { emission = try uikitConfigure(modelJSON: modelJSON, export: entry.export) }
         catch {
             PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
-            return false
+            return decline()
         }
 
         // Every customSlot in the tree must have a native renderer. If a patch
@@ -242,7 +258,7 @@ extension Patch {
         let neededIDs = Self.collectSlotIDs(emission.root)
         if neededIDs.contains(where: { w.slots[$0] == nil }) {
             PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
-            return false
+            return decline()
         }
         // Every design-system color TOKEN in the tree must have a native resolver. A patch
         // that adds an unsupplied token id (changed native code not in this build) can't
@@ -250,7 +266,7 @@ extension Patch {
         let neededTokenIDs = Self.collectColorTokenIDs(emission.root)
         if neededTokenIDs.contains(where: { w.colorTokens[$0] == nil }) {
             PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
-            return false
+            return decline()
         }
 
         // Build the render context: the slot table + the token table + the dispatcher.

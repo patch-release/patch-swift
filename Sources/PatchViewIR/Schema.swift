@@ -113,7 +113,14 @@ public enum PatchViewIRSchema {
     /// (one using an indexed-row slot) against an older host that can't decode the new
     /// case (it would collapse the whole view, so the gate correctly refuses → native).
 
-    public static let version = 8
+    // v9 = REACTIVE VIEW-MODEL COLLECTION MARSHALLING capability: a view whose `ForEach(vm.items)`
+    // marshals a reactive `@ObservedObject`/`@StateObject` model's collection requires the SDK's
+    // reactive-`extract` path (PatchInstanceInputs marshals the held object as a nested `{"vm":…}`).
+    // An SDK at v8 lacks `extract` for that input, so the guest would read an empty collection and
+    // render ZERO rows. Purely additive (a v9 host decodes v1–v8 guests); the per-view manifest
+    // `minVersion` gates a reactive-marshalling view to v9 so an older host DEMOTES it to native
+    // (the dev's real `ForEach` then renders) instead of empty-rendering.
+    public static let version = 9
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.
