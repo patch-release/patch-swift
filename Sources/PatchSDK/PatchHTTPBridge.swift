@@ -69,15 +69,29 @@ public final class PatchHTTPBroker: @unchecked Sendable {
         self.fetchFn = fetch
     }
 
-    /// Convenience default init: a REAL `URLSession` fetch. Blocking is fine here —
-    /// the guest is suspended awaiting exactly this value, so there is no other guest
-    /// work to interleave; the host owns concurrency on its own session/run loop.
+    /// The status the default broker resolves a request with when the fetch times
+    /// out (rather than `0`, which collides with a genuine transport failure). The
+    /// guest sees a non-2xx status and takes its error path — it is never left hung.
+    public static let timeoutStatus: Int32 = -1
+
+    /// Convenience default init: a REAL `URLSession` fetch. The guest is suspended
+    /// awaiting exactly this value, so there is no other guest work to interleave;
+    /// the host owns concurrency on its own session/run loop.
+    ///
+    /// The fetch is BOUNDED: the timeout rides `URLRequest.timeoutInterval` so the
+    /// underlying `URLSessionTask` is torn down by the loader on a stall (no leak),
+    /// and the outer semaphore wait is itself bounded (a small grace beyond the
+    /// request timeout) so this can never block the pump's serial queue
+    /// indefinitely. On a timeout the task is cancelled and the request is resolved
+    /// with `timeoutStatus` — the guest is always resolved, never left hanging.
     /// NOTE: not used in CI (tests inject a mock); on device this is the real path.
     public convenience init(session: URLSession = .shared, timeout: TimeInterval = 30) {
         self.init(fetch: { method, urlString, body in
             guard let url = URL(string: urlString) else { return ([], 0) }
             var req = URLRequest(url: url)
             req.httpMethod = method
+            // Let the loader enforce the timeout + tear the task down itself.
+            req.timeoutInterval = timeout
             if !body.isEmpty { req.httpBody = Data(body) }
             let sem = DispatchSemaphore(value: 0)
             let box = _HTTPResultBox()
@@ -87,7 +101,18 @@ public final class PatchHTTPBroker: @unchecked Sendable {
                 sem.signal()
             }
             task.resume()
-            _ = sem.wait(timeout: .now() + timeout)
+            // Bound the in-pump wait. URLRequest.timeoutInterval drives the real
+            // teardown; the small grace below it just guards against the loader not
+            // signalling, so the serial call queue is never held open forever.
+            let waitResult = sem.wait(timeout: .now() + timeout + 5)
+            if waitResult == .timedOut {
+                // The loader did not complete in time: cancel the task (no leak) and
+                // resolve the guest with an explicit, distinguishable timeout status
+                // rather than a spurious `([], 0)` that masquerades as a real result.
+                task.cancel()
+                return ([], Self.timeoutStatus)
+            }
+            // Only an actual completion (success OR a real HTTP/transport status) here.
             return box.get()
         })
     }
@@ -113,6 +138,13 @@ public final class PatchHTTPBroker: @unchecked Sendable {
     public func drain() -> [Pending] {
         defer { pending.removeAll() }
         return pending
+    }
+
+    /// Pop the single oldest owed request (FIFO), or `nil` if none remain. Used by
+    /// `resolvePending` to resolve one request at a time, so a trap mid-round leaves
+    /// the still-owed tail recorded in `pending` for a later round (never dropped).
+    func popFirstPending() -> Pending? {
+        pending.isEmpty ? nil : pending.removeFirst()
     }
 
     // MARK: Host bridge registration
@@ -149,9 +181,12 @@ public final class PatchHTTPBroker: @unchecked Sendable {
     /// was made (so the pump knows there is more to run).
     @discardableResult
     public func resolvePending(_ runtime: WASMRuntime) throws -> Bool {
-        let owed = drain()
-        if owed.isEmpty { return false }
-        for req in owed {
+        // Drain INCREMENTALLY (pop one, resolve one). If `writeBuffer`/`invoke` traps
+        // while resolving a request, every request not yet popped is still recorded in
+        // `pending`, so a later round (or `hasPending`) still sees the owed work — a
+        // trap mid-round never silently drops the remaining continuations.
+        var resolvedAny = false
+        while let req = popFirstPending() {
             let result = fetchFn(req.method, req.url, req.body)
             // Write the body into GUEST memory (empty body → (0,0), a valid resume).
             let (ptr, len) = result.body.isEmpty ? (UInt32(0), UInt32(0))
@@ -161,8 +196,9 @@ public final class PatchHTTPBroker: @unchecked Sendable {
                 .i32(ptr), .i32(len),
                 .i32(UInt32(bitPattern: result.status)),
             ])
+            resolvedAny = true
         }
-        return true
+        return resolvedAny
     }
 
     /// A `hostResolve` callback for `WASMRuntime.pumpToCompletion`: resolves every

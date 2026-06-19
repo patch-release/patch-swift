@@ -67,6 +67,11 @@ enum PatchValueEncoder {
             // Bytes as a JSON array of integers — faithful + guest-parseable.
             return "[" + data.map(String.init).joined(separator: ",") + "]"
         }
+        if let decimal = value as? Decimal {
+            // Mirror reflects Decimal as its opaque `_mantissa` struct, which would
+            // encode to semantically-unrecoverable JSON; emit a canonical numeric form.
+            return PatchInstanceInputs.scalarJSONFragment((decimal as NSDecimalNumber).doubleValue)
+        }
 
         // 3) Structured values via Mirror.
         let mirror = Mirror(reflecting: value)
@@ -78,8 +83,15 @@ enum PatchValueEncoder {
             }
             return "null"
 
-        case .collection, .set:
+        case .collection:
             return encodeArray(mirror, depth: depth)
+
+        case .set:
+            // A Set has no inherent order and Swift's hash seed is randomized per
+            // process launch, so sort the encoded element fragments for stable,
+            // cacheable output across launches. (The Array path must NOT sort — its
+            // element order is load-bearing.)
+            return encodeArray(mirror, depth: depth, sortElements: true)
 
         case .dictionary:
             return encodeDictionary(mirror, depth: depth)
@@ -101,12 +113,13 @@ enum PatchValueEncoder {
 
     // MARK: - Aggregates
 
-    private static func encodeArray(_ mirror: Mirror, depth: Int) -> String? {
+    private static func encodeArray(_ mirror: Mirror, depth: Int, sortElements: Bool = false) -> String? {
         var parts: [String] = []
         for child in mirror.children {
             guard let frag = encode(child.value, depth: depth + 1) else { return nil }
             parts.append(frag)
         }
+        if sortElements { parts.sort() }
         return "[" + parts.joined(separator: ",") + "]"
     }
 
@@ -140,6 +153,9 @@ enum PatchValueEncoder {
                 "\(PatchInstanceInputs.quotedJSONString($0.0)):\($0.1)"
             }.joined(separator: ",") + "}"
         }
+        // Deterministic element order for stable, cacheable output (Dictionary hash
+        // order is per-launch randomized, exactly like the object-key branch above).
+        pairEntries.sort()
         return "[" + pairEntries.joined(separator: ",") + "]"
     }
 

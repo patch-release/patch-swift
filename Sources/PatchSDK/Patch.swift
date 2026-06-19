@@ -1115,7 +1115,11 @@ public final class Patch: @unchecked Sendable {
                 storage: storage,
                 activate: { [weak self] bytes in try self?.activate(bytes: bytes) },
                 deactivate: { [weak self] in self?.deactivate() })
-            let state = fb.recoverFromBadCurrent()
+            // R4 #1263: the staged module threw inside activate BEFORE installCurrent ran,
+            // so the on-disk `current` slot still holds the GOOD prior module → re-activate
+            // it in place (activateBest) rather than recoverFromBadCurrent(), which would
+            // delete the good current's bytes and needlessly downgrade the device a version.
+            let state = fb.activateBest()
             await checker.reportEvent(Self.event(cfg, device: device,
                 type: .fallback, moduleVersion: storage.currentVersion))
             return .fallback(state)
@@ -1327,7 +1331,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.3"
+    public static let sdkVersion = "1.5.4"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

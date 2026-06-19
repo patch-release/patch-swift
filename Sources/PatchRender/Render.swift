@@ -412,7 +412,11 @@ struct Renderer {
             return AnyView(ProgressView(value: data.value - data.min,
                                         total: max(0.0001, data.max - data.min)))
             #else
-            if #available(iOS 16, macOS 13, watchOS 9, *) {
+            // Guard the ClosedRange: IRGaugeData carries min/max as independent Doubles
+            // with no invariant, so corrupt/stale marshalling (min>=max) would trap
+            // `data.min...data.max`. Degrade to the same determinate ProgressView used
+            // on the unavailable branches instead of crashing the host.
+            if #available(iOS 16, macOS 13, watchOS 9, *), data.min < data.max {
                 if label.isEmpty {
                     return AnyView(Gauge(value: data.value, in: data.min...data.max) { EmptyView() })
                 }
@@ -682,10 +686,16 @@ struct Renderer {
                 get: { value },
                 set: { [d = context.dispatcher] new in d?.send(event, .double(new)) }
             )
+            // Guard the ClosedRange: Builder forwards range bounds verbatim with no
+            // re-validation, so a decoded IR where min>max would trap `mn...mx`.
+            // Normalize the bounds and widen a degenerate range so a corrupt slider
+            // renders (clamped) instead of crashing the host.
+            let lo = Swift.min(mn, mx)
+            let hi = Swift.max(mn, mx) > lo ? Swift.max(mn, mx) : lo + 1
             if let step {
-                return AnyView(Slider(value: binding, in: mn...mx, step: step))
+                return AnyView(Slider(value: binding, in: lo...hi, step: step))
             }
-            return AnyView(Slider(value: binding, in: mn...mx))
+            return AnyView(Slider(value: binding, in: lo...hi))
             #endif
 
         case .stepper(let label, let value, let mn, let mx, let step, let event):
@@ -3084,7 +3094,7 @@ struct Renderer {
     func datePicker(label: [ViewNode], selection: Binding<Date>, components: String,
                     minE: Double?, maxE: Double?) -> some View {
         let comps = dateComponents(components)
-        if let minE, let maxE {
+        if let minE, let maxE, minE <= maxE {
             DatePicker(selection: selection,
                        in: Date(timeIntervalSince1970: minE)...Date(timeIntervalSince1970: maxE),
                        displayedComponents: comps) { renderChildren(label) }

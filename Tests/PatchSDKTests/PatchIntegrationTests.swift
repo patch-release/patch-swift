@@ -165,14 +165,17 @@ final class PatchIntegrationTests: XCTestCase {
             checker: UpdateChecker(baseURL: URL(string: "https://api.test/api/v1")!, transport: transport))
 
         let outcome = await patch.checkAndApply()
-        // The corrupt 2.0.0 fails to activate → recover to previous (1.0.0).
+        // The corrupt 2.0.0 throws BEFORE installCurrent ran, so the on-disk `current`
+        // (1.1.0) is still GOOD → activateBest re-activates it in place (R4 #1263: NOT
+        // demoted to previous, which would needlessly delete the good current's bytes and
+        // downgrade the device a version).
         if case .fallback(let state) = outcome {
-            XCTAssertEqual(state, .previous(version: "1.0.0"))
+            XCTAssertEqual(state, .current(version: "1.1.0"))
         } else {
             XCTFail("expected fallback outcome, got \(outcome)")
         }
-        XCTAssertEqual(storage.currentVersion, "1.0.0")
-        // The recovered module still runs.
+        XCTAssertEqual(storage.currentVersion, "1.1.0")
+        // The recovered (kept) current module still runs.
         XCTAssertEqual(Int64(bitPattern: try patch.call("add_i64", [.i64(3), .i64(4)])[0].i64), 7)
         // Error + fallback telemetry fired.
         let types = events.eventTypes()

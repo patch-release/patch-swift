@@ -296,20 +296,29 @@ public final class PatchViewPatchRegistry {
         // everything it can instead of refusing the whole module, and a reactive view on a pre-v9
         // SDK demotes to native (the dev's real ForEach) instead of empty-rendering (R2-#24/#48).
         var out: [String: PatchViewManifest.Entry] = [:]
-        var refused = 0
+        var refusedTypes: [String] = []
         for entry in manifest.views {
-            if (entry.minVersion ?? manifest.schemaVersion) <= PatchViewIRSchema.version {
+            let req = entry.minVersion ?? manifest.schemaVersion
+            // Route through the schema's own renderability predicate so BOTH bounds —
+            // floor (`minSupportedVersion`) and ceiling (`version`) — stay in lockstep
+            // with any future floor bump. A sub-floor entry demotes instead of being
+            // admitted and then mis-rendering (the hand-rolled `<= version` checked only
+            // the ceiling).
+            if PatchViewIRSchema.isSupported(req) {
                 out[entry.type] = entry
             } else {
-                refused += 1
+                refusedTypes.append(entry.type)
             }
         }
-        if refused > 0 {
-            // R2-#100 diagnostic: surface the version skew so a dev on a too-old pinned PatchSDK
-            // learns their patch is partially inert (the console otherwise just shows "rolled out").
+        if !refusedTypes.isEmpty {
+            // R2-#100 diagnostic: NAME the refused views so a dev on a too-old pinned PatchSDK
+            // learns exactly which patch is inert (the console otherwise just shows "rolled
+            // out"). Naming the views also makes distinct skews produce distinct strings, so
+            // warnOnce (which dedups on the full message) can't swallow a later, different skew.
             PatchRuntimeLog.warnOnce(
-                "PatchSDK v\(PatchViewIRSchema.version): \(refused) patched view(s) need a newer "
-                + "PatchViewIR schema — rendered natively. Update PatchSDK to render them OTA.")
+                "PatchSDK v\(PatchViewIRSchema.version): \(refusedTypes.count) patched view(s) need a newer "
+                + "PatchViewIR schema — rendered natively. Update PatchSDK to render them OTA. "
+                + "Views: [\(refusedTypes.sorted().joined(separator: ", "))].")
         }
         return out
     }
