@@ -120,7 +120,33 @@ public enum PatchViewIRSchema {
     // render ZERO rows. Purely additive (a v9 host decodes v1–v8 guests); the per-view manifest
     // `minVersion` gates a reactive-marshalling view to v9 so an older host DEMOTES it to native
     // (the dev's real `ForEach` then renders) instead of empty-rendering.
-    public static let version = 9
+    //
+    // v9 ALSO adds the `actionSlotButton(id:role:label:)` `NodeKind` case — a Button inside an
+    // actions-list builder (`.swipeActions`/`.toolbar`/`.alert`/`Menu`/`.contextMenu`) whose action
+    // is a NATIVE method call: the LABEL + `role` lower (OTA-patchable) while the ACTION is a
+    // NATIVE SLOT closure (`() -> Void`, closing over `self`) the thunk's `__patchActionSlots()`
+    // supplies by id and the renderer wires to the Button. Purely additive (a v9 host decodes
+    // v1–v8 guests, which never carry the new case); a guest USING an actionSlotButton stamps the
+    // per-view manifest `minVersion` to 9 so an older host (without the new case → would collapse
+    // the whole view on decode) DEMOTES it to native instead. An UNCOVERED slot id demotes the
+    // whole view at runtime (mirrors the opaque-leaf / row-slot demote-safety) — never a dead button.
+
+    // v10 = NATIVE EFFECT-MODIFIER SLOTS: the `Modifier.nativeEffectSlot(id)` case — an
+    // undispatchable EFFECT modifier (`.task`/`.onAppear`/`.refreshable`/`.onSubmit`/`.onTapGesture`/
+    // `.gesture`/`.onLongPressGesture`/`.onDisappear`) whose closure runs a NATIVE side-effect the
+    // guest can't re-run in WASM, but whose presence should NOT demote the rest of the view. The
+    // MODIFIED SUBTREE lowers to WASM normally (so editing unrelated text inside the view ships OTA);
+    // the modifier carries only a content-stable id, and the build-time thunk's `__patchEffectSlots()`
+    // supplies `[id: (AnyView) -> AnyView]` applying the REAL modifier expression (over `self`) to its
+    // content. The renderer applies that closure to the rendered subtree; the native effect runs
+    // exactly as before, and an instance-state mutation re-renders the guest via the existing
+    // Observation + re-marshal path. Purely additive (a v10 host decodes v1–v9 guests, which never
+    // carry the new case); a guest USING a `nativeEffectSlot` stamps the per-view manifest `minVersion`
+    // to 10 so an older host (whose synthesized `Modifier` decoder would THROW on the unknown case →
+    // collapse the whole view on decode) DEMOTES it to native instead. An UNCOVERED slot id demotes
+    // the whole view at runtime (mirrors the opaque-leaf / action-slot demote-safety) — never strips a
+    // body whose effect it can't supply (which would silently re-show the OLD native view).
+    public static let version = 10
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

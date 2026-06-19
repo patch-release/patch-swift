@@ -83,6 +83,8 @@ extension ViewNode {
             return "TabView(tabs:\(tabs.count),style:\(style.rawValue))"
         case .button(let id, let role, _):
             return "Button(action:#\(id),role:\(role?.rawValue ?? "nil"))"
+        case .actionSlotButton(let id, let role, _):
+            return "ActionSlotButton(slot:#\(id),role:\(role?.rawValue ?? "nil"))"
         case .label(let t, let i): return "Label(title:\(t.count),icon:\(i.count))"
         case .toggle(_, let v, let e): return "Toggle(isOn:\(v),event:#\(e.id))"
         case .slider(let v, let lo, let hi, let st, let e):
@@ -384,6 +386,7 @@ extension Modifier {
         case .presentationCompactAdaptation(let s): return ".presentationCompactAdaptation(\(s))"
 
         case .opaque(let s): return ".opaque(\(s))"
+        case .nativeEffectSlot(let id): return ".nativeEffectSlot(#\(id))"
         }
     }
 }

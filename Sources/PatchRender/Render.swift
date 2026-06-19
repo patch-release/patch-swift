@@ -105,6 +105,41 @@ public final class RowSlotTable {
     public func count(for id: String) -> Int? { counts[id] }
 }
 
+/// Maps an `.actionSlotButton` id to its NATIVE action closure `() -> Void` — the build-time
+/// thunk's, closing over the view's `self`, so the real native method call (`deleteSubscription(s)`,
+/// `resetAllData()`) runs faithfully when the user taps the reconstituted Button. Filled by
+/// `PatchedBodyHost` from the thunk's `__patchActionSlots()` before rendering, then read by the
+/// renderer when it hits an `.actionSlotButton(id:role:label:)` node. A missing closure is demote-
+/// handled upstream (`PatchedBodyHost` refuses to render a tree whose action-slot id the thunk
+/// didn't cover) — never ships a dead button — so the renderer's no-op fallback here is belt-and-
+/// suspenders rather than the primary safety net. (Distinct from `ActionTable`, which carries the
+/// guest-DISPATCH closures for ordinary lowered Buttons; an action slot is a NATIVE closure, not a
+/// guest UPDATE event.)
+public final class ActionSlotTable {
+    private var actions: [String: () -> Void] = [:]
+    public init() {}
+    public func set(_ id: String, _ action: @escaping () -> Void) { actions[id] = action }
+    public func action(for id: String) -> (() -> Void)? { actions[id] }
+}
+
+/// Maps a `.nativeEffectSlot(id)` modifier id to its NATIVE EFFECT-APPLICATION closure
+/// `(AnyView) -> AnyView` — the build-time thunk's, closing over the view's `self`, so the
+/// real native modifier expression (`{ content in AnyView(content.task { await self.load() }) }`)
+/// runs faithfully over the rendered subtree. Filled by `PatchedBodyHost` from the thunk's
+/// `__patchEffectSlots()` before rendering, then read by the renderer when it hits a
+/// `.nativeEffectSlot(id)` modifier: it applies the closure to the already-rendered modified
+/// subtree. A missing closure is demote-handled upstream (`PatchedBodyHost` refuses to render a
+/// tree whose effect-slot id the thunk didn't cover — never strips a body whose effect it can't
+/// supply), so the renderer's identity fallback here is belt-and-suspenders rather than the
+/// primary safety net. (Distinct from `ActionSlotTable`, which carries `() -> Void` tap actions;
+/// an effect slot is a MODIFIER application, not a control action.)
+public final class EffectSlotTable {
+    private var effects: [String: (AnyView) -> AnyView] = [:]
+    public init() {}
+    public func set(_ id: String, _ apply: @escaping (AnyView) -> AnyView) { effects[id] = apply }
+    public func apply(for id: String) -> ((AnyView) -> AnyView)? { effects[id] }
+}
+
 /// Maps a token id to its host-supplied `Color`/`Font`. Filled by `PatchedBodyHost`
 /// from the thunk's `__patchTokens()` before rendering, then read by the renderer
 /// when it hits a `.hostToken(id)` color or a `.fontToken(id)` modifier. A missing
@@ -167,6 +202,15 @@ public struct RenderContext {
     /// slot id, the row factory `(Int) -> AnyView` (the thunk's, closing over `self`)
     /// and the host-evaluated row count. Empty for a view with no indexed-row slots.
     public var rowSlots: RowSlotTable
+    /// Host-supplied NATIVE-ACTION SLOTS (`.actionSlotButton`): per slot id, the action
+    /// closure `() -> Void` (the thunk's, closing over `self`) for an actions-list Button
+    /// whose action is a native method call. Empty for a view with no action slots.
+    public var actionSlots: ActionSlotTable
+    /// Host-supplied NATIVE EFFECT-MODIFIER SLOTS (`.nativeEffectSlot`): per slot id, the
+    /// effect-application closure `(AnyView) -> AnyView` (the thunk's, closing over `self`)
+    /// that applies the real `.task`/`.onAppear`/gesture/etc. modifier to its subtree. Empty
+    /// for a view with no native effect slots.
+    public var effectSlots: EffectSlotTable
     /// Where interactive controls send their events (the host forwards to the
     /// guest `dispatch`). When nil, controls render but are inert (read-only).
     public var dispatcher: Dispatcher?
@@ -180,6 +224,8 @@ public struct RenderContext {
                 opaques: OpaqueTable = OpaqueTable(),
                 tokens: HostTokenTable = HostTokenTable(),
                 rowSlots: RowSlotTable = RowSlotTable(),
+                actionSlots: ActionSlotTable = ActionSlotTable(),
+                effectSlots: EffectSlotTable = EffectSlotTable(),
                 dispatcher: Dispatcher? = nil,
                 showOpaqueStubs: Bool = true,
                 geometryRebuild: GeometryRebuild? = nil) {
@@ -187,6 +233,8 @@ public struct RenderContext {
         self.opaques = opaques
         self.tokens = tokens
         self.rowSlots = rowSlots
+        self.actionSlots = actionSlots
+        self.effectSlots = effectSlots
         self.dispatcher = dispatcher
         self.showOpaqueStubs = showOpaqueStubs
         self.geometryRebuild = geometryRebuild
@@ -648,6 +696,23 @@ struct Renderer {
             }
             return AnyView(
                 Button(action: action) { renderChildren(label) }
+            )
+
+        case .actionSlotButton(let id, let role, let label):
+            // NATIVE-ACTION SLOT Button: the label + role rode WASM (OTA-patchable); the action
+            // is the thunk's native closure (closing over `self`, so the real method call runs
+            // faithfully) keyed by `id`. A missing closure demotes the WHOLE view upstream
+            // (PatchedBodyHost refuses a tree whose action-slot id the thunk didn't cover), so the
+            // no-op fallback here only bites a bare `render(_:)` without a host — never ships a
+            // dead button in production.
+            let slotAction = context.actionSlots.action(for: id) ?? {}
+            if let role {
+                return AnyView(
+                    Button(role: buttonRole(role), action: slotAction) { renderChildren(label) }
+                )
+            }
+            return AnyView(
+                Button(action: slotAction) { renderChildren(label) }
             )
 
         case .label(let title, let icon):
@@ -1896,6 +1961,15 @@ struct Renderer {
         case .opaque:
             // A modifier we couldn't lower — leave the view unchanged. The
             // native-fallback owns whatever behavior it implied.
+            return v
+
+        case .nativeEffectSlot(let id):
+            // A NATIVE EFFECT-MODIFIER SLOT (`.task`/`.onAppear`/gesture/etc.): apply the
+            // thunk's `(AnyView) -> AnyView` closure (closing over `self`) to the rendered
+            // subtree, so the real native modifier expression runs EXACTLY as before. If the
+            // host supplied none (PatchedBodyHost would normally have demoted the whole view —
+            // never strips a body it can't supply the effect for), leave the subtree unchanged.
+            if let applyEffect = context.effectSlots.apply(for: id) { return applyEffect(v) }
             return v
         }
     }

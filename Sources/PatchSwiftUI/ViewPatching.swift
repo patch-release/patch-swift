@@ -895,6 +895,16 @@ public struct PatchedBodyHost: View {
     /// (`collection.count`) + a per-row factory `(Int) -> AnyView` (the thunk's, closing
     /// over `self`). Empty for a view with no body-local-collection per-row slots.
     let rowSlots: [String: PatchRowSlot]
+    /// NATIVE-ACTION SLOTS for this view's `.actionSlotButton` nodes, keyed by the shipped
+    /// tree's slot id. Each is the action closure `() -> Void` (the thunk's, closing over
+    /// `self`) for an actions-list Button whose action is a native method call. Empty for a
+    /// view with no action slots.
+    let actionSlots: [String: () -> Void]
+    /// NATIVE EFFECT-MODIFIER SLOTS for this view's `.nativeEffectSlot` modifiers, keyed by the
+    /// shipped tree's slot id. Each is the effect-application closure `(AnyView) -> AnyView` (the
+    /// thunk's, closing over `self`) that applies the real `.task`/`.onAppear`/gesture/etc.
+    /// modifier expression to its rendered subtree. Empty for a view with no native effect slots.
+    let effectSlots: [String: (AnyView) -> AnyView]
 
     @State private var guestState: String = ""
     /// The freshly-marshalled native props snapshot captured at the moment the guest
@@ -920,7 +930,9 @@ public struct PatchedBodyHost: View {
     init(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
          writebacks: [PatchScalarWriteback], slots: [String: ([String]) -> AnyView] = [:],
          tokens: [String: PatchHostToken] = [:],
-         rowSlots: [String: PatchRowSlot] = [:]) {
+         rowSlots: [String: PatchRowSlot] = [:],
+         actionSlots: [String: () -> Void] = [:],
+         effectSlots: [String: (AnyView) -> AnyView] = [:]) {
         self.typeName = typeName
         self.entry = entry
         self.propsJSON = propsJSON
@@ -928,6 +940,8 @@ public struct PatchedBodyHost: View {
         self.slots = slots
         self.tokens = tokens
         self.rowSlots = rowSlots
+        self.actionSlots = actionSlots
+        self.effectSlots = effectSlots
     }
 
     public var body: some View {
@@ -1021,6 +1035,39 @@ public struct PatchedBodyHost: View {
             return demoteFallback()
         }
 
+        // NATIVE-ACTION SLOT SAFETY NET: every `.actionSlotButton(id:…)` node in the tree must
+        // have an action closure from the thunk's `__patchActionSlots()`. If a patch introduced an
+        // action-slot id the installed build doesn't supply (it changed native action code that
+        // isn't compiled in), we can't supply the closure — DEMOTE the whole view rather than ship
+        // a Button that does NOTHING on tap (the worst outcome: the OLD native view silently runs).
+        // A patch that only re-arranges the lowered structure / edits a button LABEL keeps the same
+        // slot ids, so this never trips for ordinary text/layout edits.
+        let neededActionIDs = Self.collectActionSlotIDs(tree)
+        let uncoveredActions = neededActionIDs.filter { actionSlots[$0] == nil }
+        if !uncoveredActions.isEmpty {
+            let name = typeName
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
+        }
+
+        // NATIVE EFFECT-MODIFIER SLOT SAFETY NET: every `.nativeEffectSlot(id)` modifier in the
+        // tree must have an effect-application closure from the thunk's `__patchEffectSlots()`. If a
+        // patch introduced an effect-slot id the installed build doesn't supply (it changed native
+        // effect code that isn't compiled in), we can't apply the modifier — DEMOTE the whole view
+        // rather than strip a body whose `.task`/`.onAppear`/gesture/etc. we can't supply (which
+        // would silently re-show the OLD native view, the dev's edit lost — the WORST outcome). A
+        // patch that only re-arranges the lowered structure / edits text keeps the same slot ids,
+        // so this never trips for ordinary edits.
+        let neededEffectIDs = Self.collectEffectSlotIDs(tree)
+        let uncoveredEffects = neededEffectIDs.filter { effectSlots[$0] == nil }
+        if !uncoveredEffects.isEmpty {
+            let name = typeName
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
+        }
+
         var context = RenderContext(showOpaqueStubs: false)
         // Fill the renderer's opaque table with the native leaf renderers. A
         // PARAMETERIZED slot's factory is applied to the emission's `slotArgs[id]`
@@ -1042,6 +1089,17 @@ public struct PatchedBodyHost: View {
                 context.rowSlots.set(id, count: slot.count, factory: slot.factory)
             }
         }
+        // Fill the renderer's native-action-slot table: each is the thunk's `() -> Void` (closing
+        // over `self`, so the real native method call runs faithfully) for an actions-list Button.
+        for id in neededActionIDs {
+            if let action = actionSlots[id] { context.actionSlots.set(id, action) }
+        }
+        // Fill the renderer's native effect-slot table: each is the thunk's `(AnyView) -> AnyView`
+        // (closing over `self`, so the real native `.task`/`.onAppear`/gesture/etc. runs faithfully)
+        // applied to the modified subtree.
+        for id in neededEffectIDs {
+            if let applyEffect = effectSlots[id] { context.effectSlots.set(id, applyEffect) }
+        }
         // GeometryReader (C): wire a rebuild closure so a `geometryReader` node re-
         // evaluates its lowered child body against the LIVE proxy. On each layout the
         // host merges the proxy's size/frame as reserved `__geo_*` inputs into the
@@ -1055,6 +1113,8 @@ public struct PatchedBodyHost: View {
         let coveredSlotIDs = Set(slots.keys)
         let coveredTokenIDs = Set(tokens.keys)
         let coveredRowIDs = Set(rowSlots.keys)
+        let coveredActionIDs = Set(actionSlots.keys)
+        let coveredEffectIDs = Set(effectSlots.keys)
         let geoName = typeName
         let geoEpoch = renderEpoch
         context.geometryRebuild = GeometryRebuild { gid, w, h, minX, minY in
@@ -1073,7 +1133,9 @@ public struct PatchedBodyHost: View {
                 let opaqueOK = Self.collectOpaqueIDs(child).allSatisfy { coveredSlotIDs.contains($0) }
                 let tokenOK = Self.collectTokenIDs(child).allSatisfy { coveredTokenIDs.contains($0) }
                 let rowOK = Self.collectRowSlotIDs(child).allSatisfy { coveredRowIDs.contains($0) }
-                if !(opaqueOK && tokenOK && rowOK) {
+                let actionOK = Self.collectActionSlotIDs(child).allSatisfy { coveredActionIDs.contains($0) }
+                let effectOK = Self.collectEffectSlotIDs(child).allSatisfy { coveredEffectIDs.contains($0) }
+                if !(opaqueOK && tokenOK && rowOK && actionOK && effectOK) {
                     Task { @MainActor in
                         PatchViewPatchRegistry.shared.markFailed(typeName: geoName, forEpoch: geoEpoch)
                     }
@@ -1346,6 +1408,39 @@ public struct PatchedBodyHost: View {
         return out
     }
 
+    /// Every `.actionSlotButton` node id in the tree — the NATIVE-ACTION slots the thunk must
+    /// supply a `() -> Void` closure for. Walks `childNodes` AND modifier content (an
+    /// actions-list Button lives in a `.swipeActions`/`.toolbar`/`.alert`/`Menu`/`.contextMenu`
+    /// MODIFIER subtree, NOT `childNodes`), so a slot nested in an actions-list is still covered.
+    nonisolated static func collectActionSlotIDs(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: ViewNode) {
+            if case .actionSlotButton(let id, _, _) = n.kind { out.append(id) }
+            for child in n.childNodes { walk(child) }
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Every `.nativeEffectSlot(id)` MODIFIER id in the tree — the native effect-application
+    /// closures the thunk must supply a `(AnyView) -> AnyView` for. Unlike the node-based slots,
+    /// this walks the MODIFIER list (an effect slot is a modifier, not a node); it also recurses
+    /// into `childNodes` AND modifier content (an effect slot on a sheet/overlay body must still
+    /// be covered). An uncovered id demotes the whole view (like an opaque leaf / action slot).
+    nonisolated static func collectEffectSlotIDs(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: ViewNode) {
+            for m in n.modifiers {
+                if case .nativeEffectSlot(let id) = m { out.append(id) }
+                for child in m.contentNodes { walk(child) }
+            }
+            for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
     /// Every DESIGN-SYSTEM TOKEN id in the tree (`ColorRef.hostToken(id)` colors and
     /// `Modifier.fontToken(id)` fonts, including a token nested in an `IRShapeStyle.color`
     /// of a `.fill`/`.background(style)`/`.foregroundStyle`/`.stroke`/etc.). The thunk's
@@ -1484,11 +1579,29 @@ extension Patch {
     ///
     /// Steady-state cost when NOT patched: a configuration check, an Observation
     /// read, an epoch compare and a dictionary lookup.
+    /// `actionSlots` is a provider of NATIVE-ACTION SLOTS (`() -> Void` closures, closing over
+    /// the view's `self`), keyed by the content-stable id the tree carries in
+    /// `.actionSlotButton(id:…)`. This is what lets a `Button` inside an actions-list builder
+    /// (`.swipeActions`/`.toolbar`/`.alert`/`Menu`/`.contextMenu`) whose action is a native method
+    /// call LOWER — the label + role ride WASM (patchable) while the native action comes from this
+    /// compiled-in `self`-closing closure. Like the others, invoked only when routing; defaulted so
+    /// existing thunks keep compiling (no action slots → an action-slot-using view simply isn't
+    /// routable, identical to the pre-change demote behavior).
+    /// `effectSlots` is a provider of NATIVE EFFECT-MODIFIER SLOTS (`(AnyView) -> AnyView` closures,
+    /// closing over the view's `self`), keyed by the content-stable id the tree carries in a
+    /// `.nativeEffectSlot(id)` modifier. This is what lets a view with an undispatchable EFFECT
+    /// modifier (`.task { await load() }`/`.onAppear`/`.refreshable`/`.onSubmit`/gesture) OTA-patch
+    /// its OTHER content — the modified subtree rides WASM (patchable) while the real native effect
+    /// (which can't be re-run in WASM) comes from this compiled-in `self`-closing closure applied to
+    /// the rendered subtree. Like the others, invoked only when routing; defaulted so existing thunks
+    /// keep compiling (no effect slots → an effect-using view stays demoted, identical to before).
     @MainActor
     public func thunkBody(typeName: String, instance: Any,
                           slots: () -> [String: ([String]) -> AnyView] = { [:] },
                           tokens: () -> [String: PatchHostToken] = { [:] },
-                          rowSlots: () -> [String: PatchRowSlot] = { [:] }) -> PatchedBodyHost? {
+                          rowSlots: () -> [String: PatchRowSlot] = { [:] },
+                          actionSlots: () -> [String: () -> Void] = { [:] },
+                          effectSlots: () -> [String: (AnyView) -> AnyView] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return nil
@@ -1499,7 +1612,9 @@ extension Patch {
                                writebacks: extraction.writebacks,
                                slots: slots(),
                                tokens: tokens(),
-                               rowSlots: rowSlots())
+                               rowSlots: rowSlots(),
+                               actionSlots: actionSlots(),
+                               effectSlots: effectSlots())
     }
 }
 #endif

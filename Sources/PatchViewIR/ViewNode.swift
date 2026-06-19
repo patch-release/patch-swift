@@ -1002,6 +1002,30 @@ public enum Modifier: Equatable, Sendable {
     /// Carries a label for diagnostics; the host ignores it (the un-lowered
     /// behavior is the native-fallback's responsibility).
     case opaque(String)
+
+    // MARK: Native effect slot (effect-coverage)
+
+    /// A NATIVE EFFECT-MODIFIER SLOT (`.task`/`.onAppear`/`.refreshable`/`.onSubmit`/
+    /// `.onTapGesture`/`.gesture`/`.onLongPressGesture`/`.onDisappear`) whose closure runs a
+    /// NATIVE side-effect (`await self.load()`, `self.startAnimation()`) the guest can't re-run
+    /// in WASM — but whose presence should NOT demote the rest of the view. The MODIFIED SUBTREE
+    /// lowers to WASM normally (so editing unrelated text inside the view ships OTA); this
+    /// modifier carries only a content-stable `id`. The build-time thunk's `__patchEffectSlots()`
+    /// supplies `[id: (AnyView) -> AnyView]` where each closure applies the REAL modifier
+    /// expression over `self` to its content (`{ content in AnyView(content.task { await self.load() }) }`).
+    /// The renderer, at this modifier, applies that `(AnyView) -> AnyView` to the rendered subtree
+    /// — the native closure runs EXACTLY as it did natively; when it mutates instance state the
+    /// body reads, the existing Observation + re-marshal path re-renders the guest tree (the same
+    /// mechanism `actionSlotButton` mutations rely on). Only emitted when the same-file/same-scope
+    /// thunk provably reaches every symbol the effect closure reads (the SAME accessibility check
+    /// the opaque-leaf / action-slot path uses) AND the effect is FIDELITY-SAFE (fires on
+    /// lifecycle/user-input, doesn't WATCH guest state — `.onChange`/`.onReceive` stay demoted —
+    /// and contains no `withAnimation`/`.animation`-driven render through the guest boundary).
+    /// Like an `.opaque` leaf / action slot, an UNCOVERED id (no closure supplied) DEMOTES the
+    /// WHOLE view to native — never strips a body whose effect it can't supply (which would
+    /// silently render the OLD native view, the dev's edit lost). An un-slotable effect keeps the
+    /// view's `hasUndispatchableEffect` demote (the dev's real native view renders).
+    case nativeEffectSlot(String)
 }
 
 // MARK: - Built-in style enums
@@ -1182,6 +1206,21 @@ public indirect enum NodeKind: Equatable, Sendable {
     /// (`.destructive`/`.cancel`/nil) so alert/confirmationDialog/context-menu
     /// actions render correctly; the action is the `actionID` (auto-wired host-side).
     case button(actionID: String, role: IRButtonRole?, label: [ViewNode])
+
+    /// A `Button` inside an ACTIONS-LIST builder (`.swipeActions`/`.toolbar`/`.alert`/
+    /// `Menu`/`.contextMenu`) whose action is a NATIVE method call (`deleteSubscription(s)`,
+    /// `resetAllData()`) — NOT a guest-dispatchable state mutation. The LABEL + `role` ride
+    /// WASM (so an edit to the button title/role ships OTA), but the ACTION is supplied as a
+    /// NATIVE SLOT closure (`() -> Void`, closing over the view's `self`, so the real method
+    /// call runs faithfully) keyed by the content-stable `id`. The build-time thunk's
+    /// `__patchActionSlots()` provides `[id: () -> Void]`; the SDK renderer wires the
+    /// reconstituted Button's `action:` to that closure. Like an `.opaque` leaf / row slot, an
+    /// UNCOVERED id (no closure supplied) DEMOTES the WHOLE view to native — never ships a
+    /// dead button. Only emitted when the action references members the same-file/same-scope
+    /// thunk can reach (the SAME accessibility check the opaque-leaf slot path uses); an action
+    /// reading a cross-file-`private`/body-local member stays a `hasUndispatchableAction` demote
+    /// (the dev's real native view renders). `role` is preserved for alert/swipe styling.
+    case actionSlotButton(id: String, role: IRButtonRole?, label: [ViewNode])
 
     /// `Label { title } icon: { icon }` — the GENERAL form: title + icon are lowered
     /// subtrees so custom title/icon closures recurse. The
@@ -1386,6 +1425,8 @@ extension ViewNode {
         case .boundTabView(_, _, let tabs, _, _):
             return tabs.flatMap { $0.tabItem + $0.content }
         case .button(_, _, let label):
+            return label
+        case .actionSlotButton(_, _, let label):
             return label
         case .label(let title, let icon):
             return title + icon

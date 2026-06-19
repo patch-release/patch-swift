@@ -474,6 +474,14 @@ public enum EmbeddedJSON {
                     ob.field("label") { v in v.array { ar in for c in label { ar.element { emitNode(c, into: &$0) } } } }
                 }
             }
+        case .actionSlotButton(let id, let role, let label):
+            singleAssoc(&out, "actionSlotButton") { o in
+                o.object { ob in
+                    ob.field("id") { $0.string(id) }
+                    ob.field("role") { v in if let role { v.string(role.rawValue) } else { v.null() } }
+                    ob.field("label") { v in v.array { ar in for c in label { ar.element { emitNode(c, into: &$0) } } } }
+                }
+            }
         case .label(let title, let icon):
             singleAssoc(&out, "label") { o in
                 o.object { ob in
@@ -1408,6 +1416,9 @@ public enum EmbeddedJSON {
 
         case .opaque(let s):
             singleAssoc(&out, "opaque") { $0.object { $0.field("_0") { $0.string(s) } } }
+        case .nativeEffectSlot(let id):
+            // Matches the host's synthesized Codable shape `{"nativeEffectSlot":{"_0":id}}`.
+            singleAssoc(&out, "nativeEffectSlot") { $0.object { $0.field("_0") { $0.string(id) } } }
         }
     }
 

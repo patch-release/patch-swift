@@ -175,6 +175,13 @@ public enum N {
                               role: IRButtonRole? = nil) -> ViewNode {
         ViewNode(.button(actionID: actionID, role: role, label: [N.text(title)]))
     }
+    /// A NATIVE-ACTION-SLOT Button (see `NodeKind.actionSlotButton`): a Button inside an
+    /// actions-list builder whose action is a native method call. The label + role lower;
+    /// the action is a `() -> Void` slot the thunk's `__patchActionSlots()` supplies by `id`.
+    public static func actionSlotButton(id: String, role: IRButtonRole? = nil,
+                                        label: [ViewNode]) -> ViewNode {
+        ViewNode(.actionSlotButton(id: id, role: role, label: label))
+    }
 
     /// `Label { title } icon: { icon }` — the general form.
     public static func label(title: [ViewNode], icon: [ViewNode]) -> ViewNode {
