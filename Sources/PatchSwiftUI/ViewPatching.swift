@@ -514,8 +514,50 @@ func _patchDecodeJSON<V>(_ type: V.Type, from jsonFragment: String) -> V? {
           let data = jsonFragment.data(using: .utf8) else { return nil }
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .secondsSince1970
-    guard let decoded = try? decoder.decode(decodableType, from: data) else { return nil }
-    return decoded as? V
+    // BUG R4-MED: `PatchValueEncoder` emits `Data` as a JSON int array `[1,2,3]`, but a
+    // vanilla `JSONDecoder` defaults `dataDecodingStrategy` to `.base64` (it expects a
+    // base64 STRING) — so a top-level `Data` @State, or any Decodable struct holding a
+    // `Data` field, fails to decode and the write-back is silently dropped. Pin
+    // `.deferredToData` so the int-array form round-trips, exactly as the `Date` pin above.
+    decoder.dataDecodingStrategy = .deferredToData
+    if let decoded = try? decoder.decode(decodableType, from: data) {
+        return decoded as? V
+    }
+    // BUG R4-HIGH: `PatchValueEncoder.encodeEnum` emits an enum as `{"case":"<label>"[,…]}`,
+    // a shape the vanilla decoder above cannot round-trip (Swift's synthesized `Codable`
+    // encodes a no-payload/raw-`String` case as a BARE STRING and an associated-value case
+    // as `{caseName:{payload}}`, never `{"case":…}`). Without this, a `Picker`/segmented
+    // enum @State/@Binding write-back is DEAD. Detect the `{"case":…}` envelope and retry
+    // against the shape the synthesized decoder expects, so the mutation reaches the guest.
+    if let reshaped = _patchReshapeEnumFragment(jsonFragment),
+       let decoded = try? decoder.decode(decodableType, from: reshaped) {
+        return decoded as? V
+    }
+    return nil
+}
+
+/// Reshape a `PatchValueEncoder`-emitted enum envelope `{"case":"<label>"[, "_0":…,…]}`
+/// into the form Swift's synthesized `Codable` decodes:
+///   * no associated values → a BARE JSON string `"<label>"` (handles a raw-`String` /
+///     no-payload case — the dominant Picker/segmented-control shape);
+///   * associated values     → `{"<label>":{<payload-without-the-"case"-key>}}`.
+/// Returns nil for anything that isn't a recognizable `{"case":…}` object (so the caller
+/// falls through and the write-back is skipped rather than corrupted — demote-safe).
+@MainActor
+func _patchReshapeEnumFragment(_ jsonFragment: String) -> Data? {
+    guard let data = jsonFragment.data(using: .utf8),
+          let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let caseName = obj["case"] as? String else { return nil }
+    var payload = obj
+    payload.removeValue(forKey: "case")
+    if payload.isEmpty {
+        // No associated values: the synthesized decoder reads a bare string (a raw-String
+        // or no-payload case). Emit a JSON string literal with the same escaping the encoder
+        // uses, so the quoting matches.
+        return PatchInstanceInputs.quotedJSONString(caseName).data(using: .utf8)
+    }
+    // Associated-value case: `{"<label>":{ <payload> }}`.
+    return try? JSONSerialization.data(withJSONObject: [caseName: payload], options: [])
 }
 
 /// One native storage location a guest state field writes back to: the wrapper
@@ -550,7 +592,8 @@ public enum PatchInstanceInputs {
                 // guest body reads the REAL value rather than its compiled-in default.
                 if let wrapper = child.value as? _PatchScalarWrapper {
                     let key = String(rawLabel.dropFirst())
-                    guard !key.isEmpty, let value = wrapper._patchRead(),
+                    guard !key.isEmpty, !isReservedInputKey(key),
+                          let value = wrapper._patchRead(),
                           let fragment = PatchValueEncoder.encode(value) else { continue }
                     fragments.append((key, fragment))
                     // Write-back is wired for any wrapper-backed field whose value
@@ -567,7 +610,8 @@ public enum PatchInstanceInputs {
                     // the VM through this path). Unmarshallable object → key omitted → the view
                     // demotes to native (build-safe = demote-safe).
                     let key = String(rawLabel.dropFirst())
-                    guard !key.isEmpty, let fragment = PatchValueEncoder.encode(object) else { continue }
+                    guard !key.isEmpty, !isReservedInputKey(key),
+                          let fragment = PatchValueEncoder.encode(object) else { continue }
                     fragments.append((key, fragment))
                 } else {
                     continue
@@ -576,7 +620,8 @@ public enum PatchInstanceInputs {
                 // A plain stored property (`let`/`var`). Marshal scalars directly and
                 // structs/arrays/enums/Optionals/Dates via the recursive encoder;
                 // a value the encoder can't represent stays guest-side-defaulted.
-                guard rawLabel != "body", let fragment = PatchValueEncoder.encode(child.value) else { continue }
+                guard rawLabel != "body", !isReservedInputKey(rawLabel),
+                      let fragment = PatchValueEncoder.encode(child.value) else { continue }
                 fragments.append((rawLabel, fragment))
             }
         }
@@ -586,6 +631,21 @@ public enum PatchInstanceInputs {
         let json = "{" + fragments.map { "\"\(escapeJSONKey($0.key))\":\($0.json)" }
             .joined(separator: ",") + "}"
         return Extraction(json: json, writebacks: writebacks)
+    }
+
+    /// BUG R4-LOW: true iff `key` collides with an ENGINE-RESERVED input namespace the
+    /// host merges OVER the guest state at render time — the GeometryReader proxy inputs
+    /// (`__geo_*`) and the input-riding host tokens (`__numtok_*`/`__strtok_*`). A user
+    /// stored property literally named like one of these would be silently clobbered by
+    /// the reserved input on every layout/token pass (override wins in `PatchFlatJSON.merge`).
+    /// `extract` SKIPS such a key so the reserved input can never be overwritten and the
+    /// user field falls back to its guest-side default (build-safe = demote-safe). A normal
+    /// Swift property never starts with `__geo_`/`__numtok_`/`__strtok_`.
+    static func isReservedInputKey(_ key: String) -> Bool {
+        for prefix in ["__geo_", "__numtok_", "__strtok_"] {
+            if key.hasPrefix(prefix) { return true }
+        }
+        return false
     }
 
     /// A flat-JSON value fragment for a supported scalar, else nil. Integral
@@ -599,6 +659,18 @@ public enum PatchInstanceInputs {
         case let i as Int32: return String(i)
         case let i as Int64: return String(i)
         case let u as UInt: return String(u)
+        // BUG R4-MED: the remaining fixed-width integer widths. Without these a
+        // `@State var id: UInt64` (or Int8/Int16/UInt8/UInt16/UInt32) fell past every
+        // scalar/leaf case into Mirror, which has no displayStyle/children for a
+        // fixed-width int → the encoder returned nil → the key was omitted → the guest
+        // rendered its compiled-in default. The write-side `_patchCoerceScalar` already
+        // bridges all these widths, so the read side was the only asymmetric gap.
+        case let i as Int8: return String(i)
+        case let i as Int16: return String(i)
+        case let u as UInt8: return String(u)
+        case let u as UInt16: return String(u)
+        case let u as UInt32: return String(u)
+        case let u as UInt64: return String(u)
         case let d as Double: return doubleFragment(d)
         case let f as Float: return doubleFragment(Double(f))
         case let c as CGFloat: return doubleFragment(Double(c))

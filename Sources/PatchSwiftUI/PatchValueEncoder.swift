@@ -168,6 +168,17 @@ enum PatchValueEncoder {
         case let i as Int32: return String(i)
         case let i as Int64: return String(i)
         case let u as UInt: return String(u)
+        // BUG R4-MED: the remaining fixed-width integer widths, matching
+        // `scalarJSONFragment`. Without these a `[UInt64:V]`/`[Int8:V]` dictionary key was
+        // non-stringy, so the dictionary fell to the `[[k,v],…]` pair form even though the
+        // key has an unambiguous textual form (or, when the key also failed to encode as a
+        // value, dropped the whole dictionary).
+        case let i as Int8: return String(i)
+        case let i as Int16: return String(i)
+        case let u as UInt8: return String(u)
+        case let u as UInt16: return String(u)
+        case let u as UInt32: return String(u)
+        case let u as UInt64: return String(u)
         default: return nil
         }
     }
@@ -217,6 +228,15 @@ enum PatchValueEncoder {
                 guard let frag = encode(child.value, depth: depth + 1) else { return nil }
                 fields.append(("_0", frag))
             }
+            // BUG R4-LOW: dedup the assembled keys. An associated value labelled literally
+            // `case` (collides with the reserved envelope key) or a positional `_0` colliding
+            // with a labelled `_0` (e.g. `foo(Int, _0: Int)`) would emit a JSON object with
+            // DUPLICATE keys; the write-back/guest parsers (`JSONSerialization`) silently
+            // collapse duplicates, dropping one associated value. We can't produce an
+            // unambiguous shape, so return nil → the caller omits the key and the field falls
+            // back to its guest-side default (demote-safe), exactly like an unencodable value.
+            var seenKeys = Set<String>()
+            for (k, _) in fields where !seenKeys.insert(k).inserted { return nil }
             return "{" + fields.map { "\(PatchInstanceInputs.quotedJSONString($0.0)):\($0.1)" }
                 .joined(separator: ",") + "}"
         }
