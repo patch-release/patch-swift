@@ -375,7 +375,7 @@ struct UIKitRenderer {
             return NSLayoutConstraint(
                 item: view, attribute: firstAttr, relatedBy: relation,
                 toItem: nil, attribute: .notAnAttribute,
-                multiplier: CGFloat(c.multiplier == 0 ? 1 : c.multiplier),
+                multiplier: CGFloat(c.multiplier),
                 constant: CGFloat(c.constant)).withPriority(c.priority)
         }
 
@@ -385,7 +385,7 @@ struct UIKitRenderer {
         return NSLayoutConstraint(
             item: view, attribute: firstAttr, relatedBy: relation,
             toItem: secondItem, attribute: layoutAttribute(second.anchor),
-            multiplier: CGFloat(c.multiplier == 0 ? 1 : c.multiplier),
+            multiplier: CGFloat(c.multiplier),
             constant: CGFloat(c.constant)).withPriority(c.priority)
     }
 
@@ -598,9 +598,15 @@ struct UIKitRenderer {
 }
 
 private extension NSLayoutConstraint {
-    /// Apply an optional priority (nil = leave `.required`).
+    /// Apply an optional priority (nil = leave `.required`). The raw value is
+    /// clamped to UILayoutPriority's valid 1...1000 range: a priority UIKit treats
+    /// as a programmer error (and which can trap when toggled to/from `.required`
+    /// on an active constraint) must never reach Auto Layout — clamp defensively.
     func withPriority(_ p: Double?) -> NSLayoutConstraint {
-        if let p { self.priority = UILayoutPriority(Float(p)) }
+        if let p {
+            let clamped = min(max(Float(p), 1), 1000)
+            self.priority = UILayoutPriority(clamped)
+        }
         return self
     }
 }

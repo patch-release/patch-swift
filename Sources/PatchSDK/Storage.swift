@@ -183,6 +183,18 @@ public final class ModuleStorage: @unchecked Sendable {
     public var currentVersion: String? { manifest().current?.version }
     public var previousVersion: String? { manifest().previous?.version }
 
+    /// A CONSISTENT (current, previous) pair read from the manifest under a single
+    /// lock. The individual `currentVersion`/`previousVersion` accessors each take
+    /// the lock and re-decode the manifest independently, so a concurrent
+    /// `installCurrent`/`promotePreviousToCurrent` between the two reads can yield a
+    /// pair that never co-existed. Callers needing a coherent snapshot (telemetry,
+    /// diff-base labels) should use this instead.
+    public func versions() -> (current: String?, previous: String?) {
+        lock.lock(); defer { lock.unlock() }
+        let m = readManifestLocked()
+        return (m.current?.version, m.previous?.version)
+    }
+
     /// Install `bytes` (already inflated + verified) as the new **current**,
     /// demoting the existing current to **previous**. Atomic: the file is
     /// written to a temp path then swapped, and the manifest is updated last.
@@ -217,6 +229,32 @@ public final class ModuleStorage: @unchecked Sendable {
         }
         m.current = Manifest.Entry(version: version, sha256: sha256, size: bytes.count)
         try writeManifestLocked(m)
+
+        // Crash-window cleanup. The module/overlay files are written BEFORE the
+        // manifest commit above, so a process kill in between can leave an orphaned
+        // <version>.wasm/.overlay that the manifest never references and the
+        // demote-prune (which only targets the old-previous version) would never
+        // remove — leaking a few MB per crash-during-install. Now that the manifest
+        // is committed and authoritative, sweep any module file whose version is not
+        // the live current/previous.
+        pruneOrphanModuleFilesLocked(keeping: m)
+    }
+
+    /// Remove every `*.wasm`/`*.overlay` in `modulesDir` whose version is neither the
+    /// manifest's current nor previous. Called under the lock after a manifest commit.
+    private func pruneOrphanModuleFilesLocked(keeping m: Manifest) {
+        var keep = Set<String>()
+        if let c = m.current?.version { keep.insert(moduleURL(version: c).lastPathComponent); keep.insert(overlayURL(version: c).lastPathComponent) }
+        if let p = m.previous?.version { keep.insert(moduleURL(version: p).lastPathComponent); keep.insert(overlayURL(version: p).lastPathComponent) }
+        guard let entries = try? fm.contentsOfDirectory(at: modulesDir,
+                                                        includingPropertiesForKeys: nil) else { return }
+        for url in entries {
+            let name = url.lastPathComponent
+            guard name.hasSuffix(".wasm") || name.hasSuffix(".overlay") else { continue }
+            if !keep.contains(name) {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     /// Promote **previous** to **current** (used by the fallback chain after the

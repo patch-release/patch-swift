@@ -111,9 +111,21 @@ extension WASMRuntime {
     public func pumpToCompletion(
         contract: AsyncPumpContract = .default,
         maxRounds: Int = 1_000_000,
+        maxHostResolveOnlyStreak: Int = 1_024,
         hostResolve: ((WASMRuntime) throws -> Bool)? = nil
     ) throws -> Int {
         var rounds = 0
+        // Forward-progress guard: a `hostResolve` that drains an owed item reports
+        // `progressed == true`, but that is NOT proof the top-level Task advanced —
+        // a guest that immediately re-suspends on a fresh host request can keep the
+        // resolver "progressing" forever (each round doing a real blocking fetch)
+        // without ever running a guest job or signaling done. A genuinely live guest
+        // runs at least one job (`pumpOnce > 0`) shortly after each resolve. So we
+        // count CONSECUTIVE rounds that made progress ONLY via the host resolver
+        // (zero jobs ran) and bail once that streak exceeds the cap — far below
+        // `maxRounds`, so a re-suspension spin can't perform up to `maxRounds`
+        // blocking fetches before surfacing.
+        var hostResolveOnlyStreak = 0
         while try isDone(contract) == false {
             let ran = try pumpOnce(contract)
             if ran == 0 {
@@ -123,6 +135,13 @@ extension WASMRuntime {
                 if !progressed {
                     throw AsyncPumpError.stuck(pending: try pendingCount(contract))
                 }
+                hostResolveOnlyStreak += 1
+                if hostResolveOnlyStreak >= maxHostResolveOnlyStreak {
+                    throw AsyncPumpError.neverCompleted(rounds: rounds)
+                }
+            } else {
+                // Real guest work executed → reset the host-only streak.
+                hostResolveOnlyStreak = 0
             }
             rounds += 1
             if rounds >= maxRounds { throw AsyncPumpError.neverCompleted(rounds: rounds) }
