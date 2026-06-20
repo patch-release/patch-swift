@@ -332,6 +332,119 @@ final class RenderHotPathBenchmarkTests: XCTestCase {
         writeReport(out, marker: "MIRROR")
     }
 
+    // MARK: - Granular marshalling breakdown (where the ~159µs actually is)
+
+    // Splits extract's cost into (a) field-selection (the cheap Mirror walk),
+    // (b) the change-detector fingerprint (the cheap hash walk), (c) the recursive JSON
+    // string-build (the expensive part), for a SCALAR-only instance vs a rich (10-row
+    // array of structs) instance. Confirms the fingerprint is ~Mirror-cheap (so memoizing
+    // it is a real win) and that the string-build is the dominant cost.
+    func testMarshallingStageBreakdown() throws {
+        let iterations = 5000
+        let warmup = 500
+        let rich = RichInstance()
+        let scalar = SettingsInstance()
+
+        func bench(_ instance: Any, _ name: String) -> String {
+            var selectNs: UInt64 = 0, fpNs: UInt64 = 0, buildNs: UInt64 = 0, fullNs: UInt64 = 0
+            for i in 0..<(iterations + warmup) {
+                let measure = i >= warmup
+                var t = Self.nowNanos()
+                let fields = PatchInstanceInputs.selectFields(from: instance)
+                let dSelect = Self.nowNanos() - t
+                t = Self.nowNanos()
+                let fp = PatchInstanceInputs.fingerprint(of: fields)
+                let dFp = Self.nowNanos() - t
+                t = Self.nowNanos()
+                let full = PatchInstanceInputs.extract(from: instance).json
+                let dFull = Self.nowNanos() - t
+                // build-only ≈ full − select (full re-does select internally); report full and
+                // derive the string-build as full − (select+fp) for the breakdown.
+                _ = (fp, full)
+                if measure { selectNs += dSelect; fpNs += dFp; fullNs += dFull }
+            }
+            let sel = Double(selectNs) / Double(iterations)
+            let fp = Double(fpNs) / Double(iterations)
+            let full = Double(fullNs) / Double(iterations)
+            let build = max(0, full - sel)   // the recursive string build inside extract
+            var s = "\n  [\(name)]"
+            s += String(format: "\n    select-fields (Mirror walk):  %10.1f ns", sel)
+            s += String(format: "\n    fingerprint (hash walk):      %10.1f ns   <- the memo change-detector", fp)
+            s += String(format: "\n    full extract (select+build):  %10.1f ns", full)
+            s += String(format: "\n    => recursive JSON build ≈     %10.1f ns   (full − select)", build)
+            s += String(format: "\n    => memo WARM cost ≈ select+fp = %8.1f ns  (skips the build)", sel + fp)
+            if full > 0 { s += String(format: "\n    => warm/cold ratio ≈ %.2fx faster", full / max(1, sel + fp)) }
+            return s
+        }
+
+        var out = "\n=== MARSHALLING STAGE BREAKDOWN  (iterations=\(iterations), config=\(buildConfig)) ==="
+        out += bench(scalar, "scalar 3-field")
+        out += bench(rich, "rich +optional+10-row-array+set+dict+date+enum")
+        out += "\n  => the fingerprint walk is ~Mirror-cheap; a HIT pays select+fp and SKIPS the string build."
+        print(out)
+        writeReport(out, marker: "MARSHAL_STAGES")
+    }
+
+    // MARK: - Marshalling memoization payoff (the P0 fix's steady-state win)
+
+    // Measures the COLD-MISS marshalling cost (full Mirror + recursive JSON build) vs the
+    // WARM-HIT cost (cheap field-select + fingerprint, string-build SKIPPED) through the
+    // PUBLIC memoizing entry point `extract(from:typeName:)`. With a constant instance —
+    // SwiftUI's steady state — every extract after the first is a HIT.
+    func testMarshallingMemoizationSpeedup() throws {
+        let instance = RichInstance()
+        let typeName = "RichBenchInstance"
+        let iterations = 4000
+        let warmup = 400
+
+        var coldNs: UInt64 = 0
+        var warmNs: UInt64 = 0
+
+        // Pre-warm the cache once so the warm loop hits.
+        PatchMarshalCache.shared.reset()
+        _ = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+
+        for i in 0..<(iterations + warmup) {
+            let measure = i >= warmup
+
+            // WARM HIT: cache already holds this fingerprint → select+fp, no string build.
+            let tw = Self.nowNanos()
+            let warm = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+            let dWarm = Self.nowNanos() - tw
+            XCTAssertEqual(PatchMarshalCache.shared.entryCount(typeName: typeName), 1,
+                           "steady-state extract must stay a single cached entry (a HIT)")
+
+            // COLD MISS: clear the cache so this extract must rebuild the JSON string.
+            PatchMarshalCache.shared.reset()
+            let tc = Self.nowNanos()
+            let cold = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+            let dCold = Self.nowNanos() - tc
+
+            // Transparency invariant: warm and cold json are byte-identical.
+            XCTAssertEqual(warm.json, cold.json, "warm-hit json must equal cold-miss json (transparent)")
+
+            if measure { warmNs += dWarm; coldNs += dCold }
+        }
+
+        let coldMean = Double(coldNs) / Double(iterations)
+        let warmMean = Double(warmNs) / Double(iterations)
+        let speedup = warmMean > 0 ? coldMean / warmMean : 0
+
+        var out = "\n=== MARSHALLING MEMOIZATION (iterations=\(iterations), config=\(buildConfig)) ==="
+        out += String(format: "\n  COLD MISS (Mirror + recursive JSON build): %12.1f ns/extract", coldMean)
+        out += String(format: "\n  WARM HIT  (select + fingerprint, build SKIPPED): %8.1f ns/extract", warmMean)
+        out += String(format: "\n  => speedup: %.1fx faster on a steady-state (unchanged) marshal", speedup)
+        out += "\n  (A warm hit re-collects live writebacks + computes the change-detector fingerprint,"
+        out += "\n   then reuses the cached propsJSON — the ~159µs recursive string build is gone.)"
+        print(out)
+        writeReport(out, marker: "MARSHAL_MEMO")
+
+        XCTAssertLessThan(warmMean, coldMean, "warm hit must be cheaper than cold miss")
+        // The recursive string build is the dominant cost on the rich instance, so a warm hit
+        // (which skips it) must be materially faster. Conservative bound; observed >>3x.
+        XCTAssertGreaterThan(speedup, 2.0, "memoization should skip the dominant string-build (≥2x)")
+    }
+
     // MARK: - Tree-walk isolation
 
     func testTreeWalkCostIsolated() throws {
@@ -525,6 +638,64 @@ final class RenderHotPathBenchmarkTests: XCTestCase {
         // regression that defeats the cache fails CI. (Conservative bound; observed >>10x.)
         XCTAssertLessThan(warmMean, coldMean, "warm hit must be cheaper than cold miss")
         XCTAssertGreaterThan(speedup, 3.0, "memoization should skip the dominant WASM stage (≥3x)")
+    }
+
+    // MARK: - End-to-end steady-state: marshalling memoization on TOP of the render cache
+
+    // The REAL production steady-state render now memoizes BOTH the WASM-derived tree (the
+    // shipped render cache) AND the marshalled input JSON (this session). This benchmark
+    // measures the marshalling slice of that steady-state render with the marshal cache WARM
+    // (production) vs COLD (the pre-this-session behavior: a full Mirror + recursive JSON
+    // build every render), through the exact public entry point the thunk uses.
+    func testSteadyStateMarshallingSliceWarmVsCold() throws {
+        let instance = RichInstance()
+        let typeName = "EngineSettingsViewE2E"
+        let iterations = 4000
+        let warmup = 400
+
+        // Warm the marshal cache once (production: it stays warm in steady state).
+        PatchMarshalCache.shared.reset()
+        _ = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+
+        var warmNs: UInt64 = 0     // production: marshal cache warm
+        var coldNs: UInt64 = 0     // pre-this-session: always-fresh marshal every render
+
+        for i in 0..<(iterations + warmup) {
+            let measure = i >= warmup
+
+            // WARM (production steady state): memoized marshal — fingerprint hit, no rebuild.
+            let tw = Self.nowNanos()
+            let warm = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+            let dWarm = Self.nowNanos() - tw
+
+            // COLD (pre-this-session): the always-fresh `extract(from:)` — a full Mirror +
+            // recursive JSON build, exactly what ran every render before marshalling memoization.
+            let tc = Self.nowNanos()
+            let cold = PatchInstanceInputs.extract(from: instance)
+            let dCold = Self.nowNanos() - tc
+
+            XCTAssertEqual(warm.json, cold.json, "the memoized marshal must be byte-identical to the fresh one")
+
+            if measure { warmNs += dWarm; coldNs += dCold }
+        }
+
+        let warmMean = Double(warmNs) / Double(iterations)
+        let coldMean = Double(coldNs) / Double(iterations)
+        let speedup = warmMean > 0 ? coldMean / warmMean : 0
+
+        var out = "\n=== STEADY-STATE MARSHALLING SLICE (iterations=\(iterations), config=\(buildConfig)) ==="
+        out += String(format: "\n  FRESH marshal (current code, every render):  %12.1f ns/render", coldMean)
+        out += String(format: "\n  WARM  marshal (memoized, build SKIPPED):     %12.1f ns/render", warmMean)
+        out += String(format: "\n  => %.2fx faster than re-marshalling on a steady-state render", speedup)
+        out += "\n  NB: the FRESH number ALSO benefits from this session's cold-path cleanup (the"
+        out += "\n  type-probe guard + objectFieldValues fast path). Against the ORIGINAL pre-session"
+        out += "\n  baseline (~163µs fresh, see MIRROR report on `main`), the WARM steady-state marshal"
+        out += String(format: "\n  is ~%.1fx faster (163000 / %.0f).", 163000.0 / max(1, warmMean), warmMean)
+        out += "\n  (This is the marshalling slice; the render cache already removed the ~656µs WASM call.)"
+        print(out)
+        writeReport(out, marker: "STEADYSTATE_MARSHAL")
+
+        XCTAssertLessThan(warmMean, coldMean, "warm steady-state marshal must be cheaper than the pre-session fresh marshal")
     }
 
     // MARK: - report sink

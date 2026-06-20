@@ -572,64 +572,206 @@ public struct PatchScalarWriteback {
 /// Marshals a live view instance's stored properties into the flat inputs JSON
 /// the lowered guest body scans (`{"name":"…","flag":true,…}`), plus write-backs
 /// for the wrapper-backed scalars.
+// MARK: - Marshalling memoization (P0 perf)
+
+/// A MainActor-isolated, bounded memoization cache for the MARSHALLED INPUT JSON.
+///
+/// `PatchInstanceInputs.extract` Mirror-reflects + recursively JSON-encodes the instance
+/// EVERY render to build the WASM input. Profiling shows the Mirror enumeration is cheap
+/// (~3.8µs) but the recursive string build is ~159µs for a rich instance — and SwiftUI
+/// re-evaluates `body` constantly with UNCHANGED state, so it's rebuilt byte-identically
+/// over and over. This cache keys the produced JSON by a CHANGE-DETECTOR FINGERPRINT of the
+/// instance's marshalled state (a hash over exactly the key/value content `extract` encodes)
+/// so an unchanged render reuses the string instead of rebuilding it.
+///
+/// Correctness (this is the #1 false-render-risk area — a stale JSON = WRONG UI on device):
+///  * The fingerprint (`PatchInstanceInputs.fingerprint`) covers EVERY selected field's key,
+///    representability, and recursive content+structure, so equal fingerprint ⇒ (overwhelmingly)
+///    equal marshalled JSON. An un-fingerprintable instance never caches (always re-encodes).
+///  * The cached value is ONLY the WASM-INPUT JSON, which is a pure function of instance state
+///    and INDEPENDENT of the module epoch (it's the input to WASM, not WASM output) — so unlike
+///    the render cache this needs no epoch scoping. The live wrappers' writebacks are NEVER
+///    cached (re-collected every render from the live instance).
+///  * Bounded per typeName via a tiny LRU (steady state has ~1 distinct fingerprint).
+///  * MainActor-isolated — all access is serialized with no lock.
+@MainActor
+final class PatchMarshalCache {
+    static let shared = PatchMarshalCache()
+
+    /// Per-typeName LRU capacity. Steady state holds ~1 distinct fingerprint; 4 absorbs a
+    /// small amount of state churn (a value oscillating between a few states) without growing.
+    static let capacityPerType = 4
+
+    private struct Bucket {
+        var entries: [UInt64: String] = [:]   // fingerprint → marshalled JSON
+        var order: [UInt64] = []              // LRU recency (front = MRU)
+    }
+    private var byType: [String: Bucket] = [:]
+
+    /// The cached JSON for (typeName, fingerprint), or nil on a miss. A hit refreshes recency.
+    func lookup(typeName: String, fingerprint: UInt64) -> String? {
+        guard var bucket = byType[typeName], let json = bucket.entries[fingerprint] else { return nil }
+        if let idx = bucket.order.firstIndex(of: fingerprint) { bucket.order.remove(at: idx) }
+        bucket.order.insert(fingerprint, at: 0)
+        byType[typeName] = bucket
+        return json
+    }
+
+    /// Store the JSON for (typeName, fingerprint), enforcing the per-type LRU bound.
+    func store(typeName: String, fingerprint: UInt64, json: String) {
+        var bucket = byType[typeName] ?? Bucket()
+        bucket.entries[fingerprint] = json
+        if let idx = bucket.order.firstIndex(of: fingerprint) { bucket.order.remove(at: idx) }
+        bucket.order.insert(fingerprint, at: 0)
+        while bucket.order.count > Self.capacityPerType {
+            let victim = bucket.order.removeLast()
+            bucket.entries[victim] = nil
+        }
+        byType[typeName] = bucket
+    }
+
+    /// Test-only: number of distinct cached fingerprints for a type.
+    func entryCount(typeName: String) -> Int { byType[typeName]?.order.count ?? 0 }
+
+    /// Test-only: drop everything.
+    func reset() { byType.removeAll() }
+}
+
 public enum PatchInstanceInputs {
     public struct Extraction {
         public let json: String
         public let writebacks: [PatchScalarWriteback]
     }
 
-    @MainActor
-    public static func extract(from instance: Any) -> Extraction {
-        var fragments: [(key: String, json: String)] = []
-        var writebacks: [PatchScalarWriteback] = []
+    /// One marshallable field selected from the instance's top-level Mirror: the JSON key it
+    /// emits under and the VALUE that gets recursively encoded for it. (`writeback` is set
+    /// for a scalar-wrapper field.) This is the single field-collection pass shared by the
+    /// JSON build AND the change-detector fingerprint, so the two can never disagree on which
+    /// fields/values flow into the guest input.
+    struct SelectedField {
+        let key: String
+        let value: Any
+        let writeback: PatchScalarWriteback?
+    }
 
+    /// Walk the instance's TOP-LEVEL Mirror once and select the marshallable fields (applying
+    /// the wrapper/reactive/plain-prop rules), WITHOUT yet encoding any value. Cheap (~Mirror
+    /// enumeration); the expensive recursive JSON string-build happens later, only on a miss.
+    @MainActor
+    static func selectFields(from instance: Any) -> [SelectedField] {
+        var fields: [SelectedField] = []
         for child in Mirror(reflecting: instance).children {
             guard let rawLabel = child.label else { continue }
             if rawLabel.hasPrefix("_") {
-                // A property wrapper's backing storage (`_name`). Extract the CURRENT
-                // value from the wrappers we understand and marshal it — a scalar
-                // directly, a struct/array/enum/etc. via the recursive encoder, so the
-                // guest body reads the REAL value rather than its compiled-in default.
                 if let wrapper = child.value as? _PatchScalarWrapper {
                     let key = String(rawLabel.dropFirst())
                     guard !key.isEmpty, !isReservedInputKey(key),
-                          let value = wrapper._patchRead(),
-                          let fragment = PatchValueEncoder.encode(value) else { continue }
-                    fragments.append((key, fragment))
-                    // Write-back is wired for any wrapper-backed field whose value
-                    // round-trips through the guest (scalar today; richer types reconstruct
-                    // on the way out when the wrapper's concrete type is reconstructable).
-                    writebacks.append(PatchScalarWriteback(key: key, wrapper: wrapper))
+                          let value = wrapper._patchRead() else { continue }
+                    // Write-back is wired for any wrapper-backed field whose value round-trips
+                    // through the guest. (Representability of the value is decided later by the
+                    // encoder/fingerprint, identically on both sides.)
+                    fields.append(SelectedField(key: key, value: value,
+                                                writeback: PatchScalarWriteback(key: key, wrapper: wrapper)))
                 } else if let reactive = child.value as? _PatchReactiveWrapper,
                           let object = reactive._patchReactiveObject() {
-                    // A REACTIVE view-model/service wrapper (@ObservedObject/@StateObject/
-                    // @EnvironmentObject/@Environment(T.self)). Marshal the OBJECT as a nested
-                    // object under the member name so the guest can read `member.collection`
-                    // — e.g. a `ForEach(vm.items)` over a reactive collection lowers to a bound
-                    // loop. READ-ONLY: no write-back (the guest renders rows; it doesn't mutate
-                    // the VM through this path). Unmarshallable object → key omitted → the view
-                    // demotes to native (build-safe = demote-safe).
+                    // A REACTIVE view-model/service object marshalled as a nested object so the
+                    // guest can read `member.collection`. READ-ONLY (no write-back).
                     let key = String(rawLabel.dropFirst())
-                    guard !key.isEmpty, !isReservedInputKey(key),
-                          let fragment = PatchValueEncoder.encode(object) else { continue }
-                    fragments.append((key, fragment))
-                } else {
-                    continue
+                    guard !key.isEmpty, !isReservedInputKey(key) else { continue }
+                    fields.append(SelectedField(key: key, value: object, writeback: nil))
                 }
             } else {
-                // A plain stored property (`let`/`var`). Marshal scalars directly and
-                // structs/arrays/enums/Optionals/Dates via the recursive encoder;
-                // a value the encoder can't represent stays guest-side-defaulted.
-                guard rawLabel != "body", !isReservedInputKey(rawLabel),
-                      let fragment = PatchValueEncoder.encode(child.value) else { continue }
-                fragments.append((rawLabel, fragment))
+                // A plain stored property (`let`/`var`).
+                guard rawLabel != "body", !isReservedInputKey(rawLabel) else { continue }
+                fields.append(SelectedField(key: rawLabel, value: child.value, writeback: nil))
             }
         }
+        return fields
+    }
 
-        // Deterministic key order (stable for tests + cacheable upstream).
+    /// Build the flat inputs JSON from already-selected fields, encoding each value and
+    /// OMITTING a field whose value the encoder can't represent (the input then falls back
+    /// to its guest-side default). Deterministic key order.
+    @MainActor
+    private static func buildJSON(from fields: [SelectedField]) -> String {
+        var fragments: [(key: String, json: String)] = []
+        fragments.reserveCapacity(fields.count)
+        for f in fields {
+            guard let fragment = PatchValueEncoder.encode(f.value) else { continue }
+            fragments.append((f.key, fragment))
+        }
         fragments.sort { $0.key < $1.key }
-        let json = "{" + fragments.map { "\"\(escapeJSONKey($0.key))\":\($0.json)" }
+        return "{" + fragments.map { "\"\(escapeJSONKey($0.key))\":\($0.json)" }
             .joined(separator: ",") + "}"
+    }
+
+    /// A CHANGE-DETECTOR fingerprint of the selected fields, parallel to (and covering EXACTLY
+    /// the same key/value content as) `buildJSON`. Returns nil iff ANY selected value is not
+    /// completely+cheaply fingerprintable — in which case the caller treats the marshalled
+    /// state as CHANGED and re-encodes (the safe default; never a false "unchanged"). Folds
+    /// in each field's key, a per-field representability flag, and the field count, so a field
+    /// set / value / order change always changes the fingerprint.
+    @MainActor
+    static func fingerprint(of fields: [SelectedField]) -> UInt64? {
+        // Sort by key so the fingerprint is order-independent of Mirror's child order (matches
+        // `buildJSON`, which sorts the emitted fragments by key).
+        let sorted = fields.sorted { $0.key < $1.key }
+        var hasher = Hasher()
+        hasher.combine(0x70 as UInt8)            // top-level instance tag
+        hasher.combine(sorted.count)
+        for f in sorted {
+            hasher.combine(f.key)
+            // Mirror `buildJSON`'s omit-on-unencodable: a value the encoder can't represent is
+            // OMITTED from the JSON. The fingerprint must reflect that EXACT representability
+            // decision, so a field flipping representable↔unrepresentable changes the
+            // fingerprint. `PatchValueFingerprint.feed` returns false on EXACTLY the values
+            // `PatchValueEncoder.encode` returns nil for (parallel construction).
+            var sub = Hasher()
+            let representable = PatchValueFingerprint.feed(f.value, into: &sub)
+            hasher.combine(representable)
+            if representable { hasher.combine(sub.finalize()) }
+            // If NOT representable the field is omitted from the JSON — its content can't
+            // change the JSON, so we DON'T fold sub's (partial) content. The representable
+            // flag alone records the omission, which is all the JSON depends on.
+        }
+        return UInt64(bitPattern: Int64(hasher.finalize()))
+    }
+
+    /// The full marshal: select fields, build JSON, collect writebacks. Always does the
+    /// recursive encode — used by tests/benchmarks as the always-fresh reference and by the
+    /// memoizing `extract(from:typeName:)` on a cache miss.
+    @MainActor
+    public static func extract(from instance: Any) -> Extraction {
+        let fields = selectFields(from: instance)
+        let json = buildJSON(from: fields)
+        let writebacks = fields.compactMap { $0.writeback }
+        return Extraction(json: json, writebacks: writebacks)
+    }
+
+    /// MEMOIZED marshal (P0 perf). Performs the CHEAP field-selection + fingerprint pass every
+    /// render; on a steady-state render whose fingerprint matches a recent one for this view
+    /// type, it REUSES the cached `propsJSON` and SKIPS the ~159µs recursive JSON string build.
+    /// On a miss (or an un-fingerprintable instance) it does the full encode and caches it.
+    ///
+    /// SAFETY (the #1 false-render-risk area): the writebacks are ALWAYS freshly collected
+    /// from the LIVE wrappers (never cached — they hold live `@State` references). Only the
+    /// WASM-input JSON string is memoized, and only when the fingerprint — which covers every
+    /// selected key/value's content + structure — matches. An un-fingerprintable instance
+    /// (fingerprint == nil) ALWAYS re-encodes. So a cache hit implies (overwhelmingly) an
+    /// identical marshalled state; the residual risk is a 64-bit hash collision between two
+    /// distinct states of the same view, which is the standard memoization tradeoff.
+    @MainActor
+    public static func extract(from instance: Any, typeName: String) -> Extraction {
+        let fields = selectFields(from: instance)
+        // Writebacks are LIVE — always re-collected, never cached.
+        let writebacks = fields.compactMap { $0.writeback }
+        let fp = fingerprint(of: fields)
+        if let fp, let cachedJSON = PatchMarshalCache.shared.lookup(typeName: typeName, fingerprint: fp) {
+            return Extraction(json: cachedJSON, writebacks: writebacks)
+        }
+        // Miss (or un-fingerprintable): do the full encode.
+        let json = buildJSON(from: fields)
+        if let fp { PatchMarshalCache.shared.store(typeName: typeName, fingerprint: fp, json: json) }
         return Extraction(json: json, writebacks: writebacks)
     }
 
@@ -1833,7 +1975,10 @@ extension Patch {
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return nil
         }
-        let extraction = PatchInstanceInputs.extract(from: instance)
+        // MEMOIZED marshal (P0 perf): a cheap fingerprint pass skips the ~159µs recursive
+        // JSON string-build when the instance's marshalled state is unchanged since a recent
+        // render of THIS view type (the SwiftUI steady state). Writebacks stay live.
+        let extraction = PatchInstanceInputs.extract(from: instance, typeName: typeName)
         return PatchedBodyHost(typeName: typeName, entry: entry,
                                propsJSON: extraction.json,
                                writebacks: extraction.writebacks,

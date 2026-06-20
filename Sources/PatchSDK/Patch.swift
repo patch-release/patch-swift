@@ -1331,7 +1331,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.8"
+    public static let sdkVersion = "1.5.9"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

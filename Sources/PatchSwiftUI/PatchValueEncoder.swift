@@ -309,10 +309,40 @@ enum PatchValueEncoder {
         return false
     }
 
-    private static func encodeObject(_ mirror: Mirror, depth: Int) -> String? {
-        var entries: [(String, String)] = []
-        // Walk the type's own children plus any superclass mirror (class
-        // hierarchies expose inherited stored props via `superclassMirror`).
+    /// The (emitKey → childValue) field set for an object, AFTER all of `encodeObject`'s
+    /// selection rules (superclass walk, `_$` macro-plumbing skip, `_name` strip vs raw,
+    /// `@Published` unwrap, label dedup). This is the SINGLE SOURCE OF TRUTH for which
+    /// fields an object contributes and under what key — `encodeObject` encodes these and
+    /// `PatchValueFingerprint.feedObject` fingerprints these, so the two can NEVER diverge
+    /// on field selection (a divergence would let the fingerprint say "unchanged" while the
+    /// marshalled field set differs — a stale-render hazard). It does NOT decide
+    /// encodability of a field's VALUE (the caller does that, skipping a non-encodable /
+    /// non-fingerprintable value identically on both sides). Returns the values in an
+    /// insertion order that the caller sorts by key.
+    ///
+    /// Derives EVERYTHING from `mirror` (`.children` for the macro-plumbing probe, each
+    /// child's `type(of:)` for the wrapper-type probe) — it never reads the top-level
+    /// subject, so the encoder and fingerprint can both call it with just the mirror.
+    static func objectFieldValues(mirror: Mirror) -> [(key: String, value: Any)] {
+        // FAST PATH — the overwhelmingly common shape: a single-level struct/class (no
+        // superclass) whose every field label is a PLAIN identifier (no leading `_`). Such an
+        // object can have NO macro plumbing (`_$…` is underscored), no name-stripping, and no
+        // emit-key collisions (a struct's own Mirror labels are unique), so none of the Set
+        // bookkeeping / type probes below apply. Emitting the children directly avoids 2 Set
+        // allocations + the per-child work — a real saving on a nested struct-array fingerprint
+        // (each row hit this path). A single underscored OR inherited field falls to the full
+        // path. Byte-identical output to the full path for this shape.
+        if mirror.superclassMirror == nil {
+            var simple: [(key: String, value: Any)] = []
+            simple.reserveCapacity(mirror.children.count)
+            var allPlain = true
+            for child in mirror.children {
+                guard let label = child.label, !label.isEmpty else { continue }
+                if label.hasPrefix("_") { allPlain = false; break }
+                simple.append((label, child.value))
+            }
+            if allPlain { return simple }
+        }
         // Detect macro backing: `@Observable`/`@Model` inject a `_$observationRegistrar`
         // (and `@Model` a `_$backingData`). When present, the `_name` children are MACRO
         // BACKING (read by the developer + guest as the STRIPPED `name`), so we must NOT
@@ -328,90 +358,65 @@ enum PatchValueEncoder {
                 probe = pm.superclassMirror
             }
         }
+        var entries: [(key: String, value: Any)] = []
         var current: Mirror? = mirror
         var seen = Set<String>()
+        var emittedKeys = Set<String>()
         while let m = current {
             for child in m.children {
                 guard let label = child.label, !label.isEmpty, !seen.contains(label) else { continue }
-                // Skip macro-generated plumbing. The `@Observable` / `@Model` macros inject
-                // `_$observationRegistrar` (and `@Model` a `_$backingData`); these aren't view
-                // data and don't encode (the registrar mirrors to non-representable internals),
-                // and WITHOUT this skip a single such child would fail the WHOLE object (the
-                // `encode(...)` below) — so an `@Observable` view-model would never marshal.
-                // Skipping `_$…` lets its real stored fields (`_items`, surfaced under `items`)
-                // encode. A normal field never starts with `_$`.
+                // Skip macro-generated plumbing (`_$observationRegistrar`/`_$backingData`).
                 if label.hasPrefix("_$") { seen.insert(label); continue }
-                // A property-wrapper field inside a value type surfaces as `_name`;
-                // present it under the user-facing key (`name`). We encode its stored
-                // value as Mirror reflects it (a nested live `@State` box isn't
-                // faithfully readable off its SwiftUI storage, so we don't special-case
-                // it — plain value-type fields are the norm here).
-                //
-                // BUG #47/#70: a SOURCE field literally named `_count`/`_id` would be
-                // dropped if we ONLY emitted the stripped key — the CLI guest scans the
-                // RAW source name (`binding.pattern.trimmedDescription`, including the
-                // leading underscore), so `m._count` read its guest default.
+                // BUG #47/#70: a SOURCE field literally named `_count`/`_id`; the CLI guest
+                // scans the RAW source name (including the leading underscore).
                 let strippedKey = label.hasPrefix("_") ? String(label.dropFirst()) : label
                 guard !strippedKey.isEmpty else { continue }
-                // A classic `@Published var x` inside an ObservableObject surfaces as
-                // `_x: Published<X>`, which Mirror exposes as `{storage: .value(X)}` — so
-                // without unwrapping, `x` would marshal as `{"storage":{"case":"value",...}}`
-                // (useless to the guest). Unwrap to the real value so a `@Published`
-                // collection marshals as a clean array (classic MVVM, alongside @Observable).
                 seen.insert(label)
                 let childValue: Any
-                // BUG #47/#70 key choice. A `_name` label is EITHER (a) a property-wrapper /
-                // macro BACKING field, whose developer + CLI-guest name is the STRIPPED
-                // `name`, OR (b) a PLAIN field literally named `_name`, whose source/guest
-                // name IS `_name`. Decide which, so we emit the ONE key the guest scans:
-                //   * a known wrapper TYPE (`Published<…>` etc.)                → STRIPPED
-                //   * any `_name` field on an `@Observable`/`@Model` (macro plumbing) → STRIPPED
-                //   * else (a plain struct/class field literally named `_name`)  → RAW
-                let valueTypeName = String(describing: type(of: child.value))
-                let isWrapperBacking = label.hasPrefix("_")
-                    && (PatchValueEncoder.isPropertyWrapperTypeName(valueTypeName) || hasMacroPlumbing)
-                if let unwrapped = unwrapPublished(child.value) {
+                let isUnderscored = label.hasPrefix("_")
+                // BUG #47/#70 key choice (see encodeObject's history). The wrapper-type probe
+                // (a per-child `String(describing: type(of:))`, which is NOT cheap) is only
+                // consulted for an UNDERSCORED label — a plain `title`/`id` field can never be
+                // wrapper-backing — so skip building the type-name string for the common
+                // non-underscored field (this is on both the encode AND fingerprint hot path).
+                let isWrapperBacking = isUnderscored
+                    && (PatchValueEncoder.isPropertyWrapperTypeName(String(describing: type(of: child.value)))
+                        || hasMacroPlumbing)
+                // `@Published` unwrap only applies to an underscored backing field (`_x:
+                // Published<X>`); a plain field is never `Published`, so skip the probe.
+                if isUnderscored, let unwrapped = unwrapPublished(child.value) {
                     childValue = unwrapped
-                } else if PatchValueEncoder.isPublished(child.value) {
-                    // BUG #9/#3: a `@Published` whose current value `unwrapPublished` could
-                    // not reach (neither a settled `.value` NOR a `.publisher` subject with a
-                    // readable `currentValue`). Encoding the raw `Published<…>` would marshal
-                    // garbage `{"storage":…}`. SKIP it cleanly rather than corrupt the object.
-                    // (The common `.assign(to:&$items)` / `$items.sink` MVVM case is NO LONGER
-                    // skipped — `unwrapPublished` now reads the `.publisher` subject's live
-                    // `currentValue`, so a populated collection marshals as a clean array.)
+                } else if isUnderscored, PatchValueEncoder.isPublished(child.value) {
+                    // BUG #9/#3: a `@Published` whose value can't be reached — skip cleanly.
                     continue
                 } else {
                     childValue = child.value
                 }
-                // SKIP-DON'T-FAIL (bug #6): a single unencodable SIBLING (a `Set<AnyCancellable>`,
-                // a stored closure, a service reference, or a `.publisher`-state `@Published`)
-                // must NOT zero out the WHOLE object. Before this fix, `encodeObject` returned
-                // nil on the first unencodable child, so a reactive view-model holding e.g.
-                // `var cancellables: Set<AnyCancellable>` alongside `var items: [Row]` marshalled
-                // to `{}` — and a `ForEach(vm.items)` then read an EMPTY array, silently rendering
-                // ZERO rows for a populated list. We now OMIT the unencodable field and keep the
-                // encodable ones, so the data fields (the collection the body reads) survive. The
-                // guest only ever reads fields the engine proved reconstructable; an omitted key
-                // falls back to its guest-side default. The collection field itself is guaranteed
-                // encodable by construction (the engine only registers a reactive collection whose
-                // element type is scalar/flat-struct), so this never drops the NEEDED collection.
-                guard let frag = encode(childValue, depth: depth + 1) else { continue }
-                // Emit under the ONE name the guest scans (bug #47/#70): a wrapper/macro
-                // backing field under its STRIPPED name (`items`), a plain underscored
-                // field under its RAW source name (`_count`). A non-underscored field has
-                // strippedKey == label, so this is just `label`.
-                let emitKey = (label.hasPrefix("_") && !isWrapperBacking) ? label : strippedKey
-                entries.append((emitKey, frag))
+                let emitKey = (isUnderscored && !isWrapperBacking) ? label : strippedKey
+                // Dedup the EMIT key (a sibling could legitimately share the stripped name —
+                // keep the first). `encodeObject` previously deduped post-hoc; doing it here
+                // keeps the field set the fingerprint sees identical to the one encoded.
+                guard emittedKeys.insert(emitKey).inserted else { continue }
+                entries.append((emitKey, childValue))
             }
             current = m.superclassMirror
         }
-        // Stable key order; drop any duplicate (raw == stripped can't recur, but a
-        // sibling could legitimately share the stripped name — keep the first).
+        return entries
+    }
+
+    private static func encodeObject(_ mirror: Mirror, depth: Int) -> String? {
+        // SKIP-DON'T-FAIL (bug #6): a single unencodable SIBLING field must NOT zero out the
+        // WHOLE object — omit it and keep the encodable ones. `objectFieldValues` already
+        // applied the field-SELECTION rules; here we encode each selected value and drop a
+        // non-encodable one (the fingerprint mirrors this exact skip).
+        var entries: [(String, String)] = []
+        for (emitKey, childValue) in PatchValueEncoder.objectFieldValues(mirror: mirror) {
+            guard let frag = encode(childValue, depth: depth + 1) else { continue }
+            entries.append((emitKey, frag))
+        }
+        // Stable key order (the field set is already emit-key-deduped in objectFieldValues).
         entries.sort { $0.0 < $1.0 }
-        var seenKeys = Set<String>()
-        let deduped = entries.filter { seenKeys.insert($0.0).inserted }
-        return "{" + deduped.map { "\(PatchInstanceInputs.quotedJSONString($0.0)):\($0.1)" }
+        return "{" + entries.map { "\(PatchInstanceInputs.quotedJSONString($0.0)):\($0.1)" }
             .joined(separator: ",") + "}"
     }
 }
