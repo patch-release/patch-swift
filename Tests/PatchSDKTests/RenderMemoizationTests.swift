@@ -57,8 +57,8 @@ final class RenderMemoizationTests: XCTestCase {
             idSets: PatchedBodyIDSets(opaque: [], token: [], row: [], action: [], effect: [], button: [], animationValueKeys: []))
     }
 
-    override func setUp() async throws {
-        try await super.setUp()
+    override func setUp() {
+        super.setUp()
         PatchedBodyRenderCache.shared.reset()
     }
 
