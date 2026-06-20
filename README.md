@@ -40,7 +40,7 @@ Add the package with Swift Package Manager:
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/patch-release/patch-swift", from: "1.0.0")
+.package(url: "https://github.com/patch-release/patch-swift", from: "1.5.0")
 ```
 
 ```swift
@@ -245,6 +245,19 @@ compiled `body`. Edit a view's text, a modifier, the layout, or add a subview, t
 (patchable); non-lowerable leaves (a custom child view, `Color(red:…)`, an
 unsupported modifier) render natively from compiled-in slot closures — so almost
 any view is routable, including interactive `Toggle`/`Stepper`/`TextField` screens.
+
+**Zero overhead on what you didn't patch.** Preparing a view for OTA does *not*
+make it slower in the common case. Each generated thunk bakes in a content hash of
+the body it was built from; on device the SDK compares that against the active
+module's hash for the view. When they match — i.e. no OTA patch has actually
+changed this view — the thunk renders your **original native body with zero WASM
+round-trip** (no marshalling, no interpreter), so an unpatched prepared view costs
+only a cheap registry read and a string compare. Only views a patch genuinely
+changed run in WasmKit. For a patched view whose structure is static, the rendered
+tree is cached after the first frame, so subsequent frames skip the interpreter
+too. This is fail-safe by construction: any case where equality can't be proven
+(an older build, a missing hash) routes through WASM, so a real patch is never
+silently dropped.
 
 `Patch.shared.thunkBody(...)` is the entry the generated thunks call; `PatchViewIR`
 is the shared, dependency-free IR (depend on it alone to build or inspect a
