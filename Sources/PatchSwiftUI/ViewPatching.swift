@@ -90,14 +90,27 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
         /// (ignores this key). `minSupportedVersion` is unchanged (this is not a wire-format
         /// node case — it's an optional scalar that rides the existing manifest JSON).
         public let bodyHash: String?
+        /// STRUCTURALLY-STATIC CACHE: when `true`, the engine proved the WASM-emitted
+        /// ViewNode tree for this view is identical across ALL inputs — no bound input
+        /// name appears in a live tree position, no input-riding host token, no
+        /// GeometryReader, no interactive state model. The SDK caches the decoded tree
+        /// after the FIRST WASM call and skips WASM on ALL subsequent renders.
+        /// ADDITIVE + backward-decode safe: `nil` (absent in an older manifest) or `false`
+        /// = always-WASM (the safe prior behavior). A newer host still decodes an older
+        /// manifest (absent → nil → treated as false); an older host decodes a newer
+        /// manifest (ignores this key). No `minSupportedVersion` bump — this is a purely
+        /// optional optimization field, not a wire-format node case.
+        public let isStructurallyStatic: Bool?
         public init(type: String, export: String, dispatch: String?, thunkSafe: Bool,
-                    minVersion: Int? = nil, bodyHash: String? = nil) {
+                    minVersion: Int? = nil, bodyHash: String? = nil,
+                    isStructurallyStatic: Bool? = nil) {
             self.type = type
             self.export = export
             self.dispatch = dispatch
             self.thunkSafe = thunkSafe
             self.minVersion = minVersion
             self.bodyHash = bodyHash
+            self.isStructurallyStatic = isStructurallyStatic
         }
     }
     /// PatchViewIR schema version the module's emissions target.
@@ -1462,6 +1475,54 @@ final class PatchedBodyRenderCache {
     func reset() { scopes.removeAll() }
 }
 
+// MARK: - Structurally-static template cache
+
+/// A decoded ViewNode tree cached for a view the engine proved STRUCTURALLY STATIC
+/// (identical tree regardless of inputs). Keyed by (typeName, export, moduleEpoch):
+/// a hot-swap bumps the epoch and invalidates all entries (the new module may have
+/// a different tree). Per-(typeName,export) so a static view's template is stored ONCE
+/// and reused across all instances and all input values — the tree is a pure constant.
+///
+/// Correctness:
+///  * Only populated when `entry.isStructurallyStatic == true` (engine opt-in, engine
+///    proved the invariant — conservative, demote-safe).
+///  * `moduleEpoch` is part of the key; a hot-swap bumps the epoch → the entry is a
+///    MISS on the next call → WASM runs once to re-prime the cache (invariant #1).
+///  * Stores ONLY WASM-derived data (tree/slotArgs/idSets) — the live native slot
+///    closures/tokens/rowSlots are filled from `self` on every render, exactly as
+///    with the input-hash cache (invariant #2).
+///  * MainActor-isolated: `PatchedBodyHost.body` runs on the MainActor, so all
+///    access is serialized with no lock (invariant #3).
+@MainActor
+final class PatchedBodyStaticTemplateCache {
+    static let shared = PatchedBodyStaticTemplateCache()
+
+    private struct Key: Hashable {
+        let typeName: String
+        let export: String
+        let epoch: UInt64
+    }
+
+    private var cache: [Key: PatchedBodyCacheEntry] = [:]
+
+    /// Look up the cached template for (typeName, export, epoch). Returns nil on a miss.
+    func lookup(typeName: String, export: String, epoch: UInt64) -> PatchedBodyCacheEntry? {
+        cache[Key(typeName: typeName, export: export, epoch: epoch)]
+    }
+
+    /// Store the template for (typeName, export, epoch). An existing entry for the
+    /// same key is replaced (idempotent — the static tree is the same on every call).
+    func store(typeName: String, export: String, epoch: UInt64, payload: PatchedBodyCacheEntry) {
+        cache[Key(typeName: typeName, export: export, epoch: epoch)] = payload
+    }
+
+    /// Test-only: drop everything (so a test starts from a clean cache).
+    func reset() { cache.removeAll() }
+
+    /// Test-only: count of cached entries.
+    var count: Int { cache.count }
+}
+
 // MARK: - The patched-body host view
 
 /// A mutable holder for the last successfully-rendered tree (bug #50). A class (not
@@ -1591,6 +1652,23 @@ public struct PatchedBodyHost: View {
         // The six pre-collected id-sets (opaque/token/row/action/effect/button). Computed
         // once per distinct input and reused on a cache hit, skipping the 6 full-tree walks.
         let idSets: PatchedBodyIDSets
+        // STRUCTURALLY-STATIC TEMPLATE CACHE (perf — zero WASM after first render):
+        // when the engine proved this view's WASM tree is identical for ALL inputs, we
+        // run WASM ONCE and cache the tree keyed by (typeName, export, epoch) — no input
+        // string needed. Subsequent renders skip WASM entirely. A hot-swap bumps the epoch
+        // → a MISS → WASM runs once to re-prime, then the template is cached again.
+        // SAFETY: only applied when `entry.isStructurallyStatic == true` (engine opt-in;
+        // conservative detection). The input-hash cache below is still checked + populated
+        // for the general case — the static path is strictly a faster route for the views
+        // the engine provably identified as constant-tree.
+        if entry.isStructurallyStatic == true,
+           let staticEntry = PatchedBodyStaticTemplateCache.shared.lookup(
+               typeName: typeName, export: entry.export, epoch: renderEpoch) {
+            // Static cache HIT: tree is a constant — reuse it with zero WASM.
+            tree = staticEntry.tree
+            slotArgs = staticEntry.slotArgs
+            idSets = staticEntry.idSets
+        } else {
         // INPUT-HASH MEMOIZATION (P0 perf): the guest body is a DETERMINISTIC function of
         // its input string, so a byte-identical `merged` (the common steady-state case in
         // SwiftUI — body re-evaluates constantly with unchanged state) yields a byte-
@@ -1627,10 +1705,21 @@ public struct PatchedBodyHost: View {
             // RenderHotPathPerfRoundTests) — pure speed, no behavior change — and matters at
             // real-screen node counts where 6 passes cost ~6× one pass.
             idSets = Self.collectAllIDs(tree)
+            let cachePayload = PatchedBodyCacheEntry(tree: tree, slotArgs: slotArgs, idSets: idSets)
             PatchedBodyRenderCache.shared.store(
                 typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch,
-                payload: PatchedBodyCacheEntry(tree: tree, slotArgs: slotArgs, idSets: idSets))
+                payload: cachePayload)
+            // STRUCTURALLY-STATIC TEMPLATE CACHE PRIME: if this view is static and we just
+            // ran WASM (a static-cache miss, i.e. the first render or post-hot-swap), store
+            // the result as the template for (typeName, export, epoch). Future renders skip
+            // WASM entirely — the tree is identical regardless of input.
+            if entry.isStructurallyStatic == true {
+                PatchedBodyStaticTemplateCache.shared.store(
+                    typeName: typeName, export: entry.export, epoch: renderEpoch,
+                    payload: cachePayload)
+            }
         }
+        } // end static-template cache else-branch
 
         // MIXED-VIEW SAFETY NET: every opaque leaf in the tree must have a native
         // slot closure. If a patch introduced a leaf with no matching slot (i.e. it
