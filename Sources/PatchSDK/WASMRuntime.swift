@@ -98,6 +98,26 @@ public final class WASMRuntime {
     /// Name of the exported linear memory. Standard for Swift reactor modules.
     private let memoryName: String
 
+    // MARK: - Export-handle cache (per-render speedup; PERF batch)
+    //
+    // `instance.exports[function:]` / `[memory:]` are string-keyed dictionary lookups
+    // (with an `ExternalValue` box allocation) that run on EVERY `callPacked`: the
+    // target export, the allocator (`patch_malloc`), `patch_free`, and the memory are
+    // each re-resolved per invoke (2–3+ lookups/render). The `Instance` is IMMUTABLE
+    // for this runtime's lifetime — a hot-swap replaces the WHOLE `WASMRuntime` (new
+    // module ⇒ new runtime ⇒ fresh cache), so a once-resolved `Function`/`Memory`
+    // handle stays valid until the runtime is dropped. Cache them.
+    //
+    // The handles are value-type WasmKit structs (`Function`/`Memory`) wrapping stable
+    // internal references; storing them is sound. The cache is guarded by a lock so it
+    // is safe even though `WASMRuntime` is not itself `Sendable` (production access is
+    // already serialized through `Patch.callQueue`, but the lock makes it robust to any
+    // direct/concurrent use and keeps it strict-concurrency clean).
+    private let handleCacheLock = NSLock()
+    private var _functionCache: [String: Function] = [:]
+    private var _functionMissCache: Set<String> = []     // names PROVEN absent (negative cache)
+    private var _memoryHandle: Memory??                   // outer nil = unresolved, inner nil = absent
+
     // MARK: - Lifecycle
 
     /// Parse, instantiate, and WASI-initialize a module from raw bytes.
@@ -194,17 +214,32 @@ public final class WASMRuntime {
 
     // MARK: - Invocation
 
-    /// Look up an exported function by name.
+    /// Look up an exported function by name (cached — see the handle-cache note).
     public func function(_ name: String) throws -> Function {
-        guard let fn = instance.exports[function: name] else {
-            throw PatchRuntimeError.exportNotFound(name)
+        if let fn = cachedFunction(name) { return fn }
+        throw PatchRuntimeError.exportNotFound(name)
+    }
+
+    /// The resolved `Function` handle for `name`, or nil if no such export — memoized
+    /// per runtime so a repeated invoke skips the `instance.exports[function:]` dict
+    /// lookup + `ExternalValue` box. A negative result is cached too (the routing layer
+    /// calls `hasFunction` on every candidate instance per render).
+    private func cachedFunction(_ name: String) -> Function? {
+        handleCacheLock.lock()
+        defer { handleCacheLock.unlock() }
+        if let fn = _functionCache[name] { return fn }
+        if _functionMissCache.contains(name) { return nil }
+        if let fn = instance.exports[function: name] {
+            _functionCache[name] = fn
+            return fn
         }
-        return fn
+        _functionMissCache.insert(name)
+        return nil
     }
 
     /// Whether an export with the given name exists as a function.
     public func hasFunction(_ name: String) -> Bool {
-        instance.exports[function: name] != nil
+        cachedFunction(name) != nil
     }
 
     /// Invoke an exported function with raw `Value`s, mapping traps to
@@ -224,11 +259,24 @@ public final class WASMRuntime {
 
     // MARK: - Linear memory
 
-    /// The module's exported linear memory.
+    /// The module's exported linear memory (cached — resolved once per runtime).
+    ///
+    /// `Memory` is a value-type handle into the instance's memory ENTITY (the entity is
+    /// mutable — `data`/size grow as the guest allocates — but the handle that addresses
+    /// it is stable for the instance lifetime), so caching the handle and re-reading
+    /// `.data` each access stays correct: a `patch_malloc` that grows linear memory is
+    /// observed through the same cached handle on the next `read`/`write`.
     public func memory() throws -> Memory {
-        guard let mem = instance.exports[memory: memoryName] else {
-            throw PatchRuntimeError.memoryMissing
+        handleCacheLock.lock()
+        if let resolved = _memoryHandle {
+            handleCacheLock.unlock()
+            guard let mem = resolved else { throw PatchRuntimeError.memoryMissing }
+            return mem
         }
+        let mem = instance.exports[memory: memoryName]
+        _memoryHandle = .some(mem)
+        handleCacheLock.unlock()
+        guard let mem else { throw PatchRuntimeError.memoryMissing }
         return mem
     }
 

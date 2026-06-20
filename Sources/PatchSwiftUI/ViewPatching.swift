@@ -861,10 +861,301 @@ enum PatchFlatJSON {
     static func merge(base: String, override: String) -> String {
         if override.isEmpty { return base.isEmpty ? "{}" : base }
         if base.isEmpty { return override }
+        // PARSE-FREE FAST PATH (PERF batch): when BOTH inputs are flat top-level JSON
+        // objects of cheaply-canonicalizable scalars (the common case — props / guest
+        // scalar state / token merges), splice them WITHOUT a full JSONSerialization
+        // parse + NSNumber-boxing reserialize. The result is BYTE-IDENTICAL to the
+        // JSONSerialization path (it canonicalizes each scalar through the SAME rules
+        // `fragment(for:)`/`serialize` use, and sorts keys the same way), so it feeds
+        // the render-cache key identically. ANY non-flat / escaped / edge input on
+        // EITHER side falls through to the proven JSONSerialization path below.
+        if let spliced = flatScalarMerge(base: base, override: override) {
+            return spliced
+        }
+        return mergeViaJSONSerialization(base: base, override: override)
+    }
+
+    /// The ORIGINAL JSONSerialization merge (parse both → dict-union → reserialize). This
+    /// is the proven reference path `merge` falls back to, and the byte-identical oracle the
+    /// transparency tests diff the fast path against. NOT the hot path — kept callable so a
+    /// test can assert the parse-free splice matches it exactly for every input shape.
+    static func mergeViaJSONSerialization(base: String, override: String) -> String {
+        if override.isEmpty { return base.isEmpty ? "{}" : base }
+        if base.isEmpty { return override }
         guard var baseObj = parse(base) else { return override }
         guard let overObj = parse(override) else { return base }
         for (k, v) in overObj { baseObj[k] = v }
         return serialize(baseObj)
+    }
+
+    // MARK: - Parse-free flat-scalar merge (the fast path)
+
+    /// One scanned `key: rawValueSlice` of a flat JSON object, already canonicalized to
+    /// the exact bytes `serialize`/`fragment(for:)` would emit. `nil` value means the
+    /// field is dropped (matches `serialize`'s `guard let frag … else { continue }`).
+    private struct FlatField { var key: String; var canonical: String? }
+
+    /// Attempt the parse-free splice. Returns the merged canonical string, or `nil` to
+    /// signal "fall back to the JSONSerialization path" (any input shape this can't
+    /// PROVE byte-identical). Conservative by construction: it only emits when every
+    /// scanned value is a scalar it can canonicalize to the same bytes the slow path
+    /// would, with no nesting/escapes it can't reproduce.
+    private static func flatScalarMerge(base: String, override: String) -> String? {
+        guard let baseFields = scanFlatScalarObject(base) else { return nil }
+        guard let overFields = scanFlatScalarObject(override) else { return nil }
+        // Merge by key, override wins. Preserve the SAME drop semantics as `serialize`:
+        // a field whose canonical is nil is omitted. Duplicate keys WITHIN one object are
+        // disallowed by the scanner (returns nil → fall back) so last-wins ambiguity can't
+        // diverge from JSONSerialization.
+        var byKey: [String: String?] = [:]
+        byKey.reserveCapacity(baseFields.count + overFields.count)
+        for f in baseFields { byKey[f.key] = f.canonical }
+        for f in overFields { byKey[f.key] = f.canonical }   // override wins
+        var pairs: [(key: String, json: String)] = []
+        pairs.reserveCapacity(byKey.count)
+        for (k, v) in byKey { if let v { pairs.append((k, v)) } }
+        pairs.sort { $0.key < $1.key }
+        var out = "{"
+        var first = true
+        for p in pairs {
+            if !first { out += "," }
+            first = false
+            out += PatchInstanceInputs.quotedJSONString(p.key)
+            out += ":"
+            out += p.json
+        }
+        out += "}"
+        return out
+    }
+
+    /// Scan a FLAT top-level JSON object whose values are all scalars (string/number/
+    /// bool/null) into `(key, canonicalValueBytes)` fields, WITHOUT JSONSerialization.
+    /// Returns `nil` (→ caller falls back) on the FIRST sign the splice can't be proven
+    /// byte-identical: a nested object/array value, an escaped string the canonical
+    /// form would rewrite, a number that doesn't canonicalize trivially, a duplicate
+    /// key, or any malformed/edge byte. NEVER guesses — a `nil` is always safe.
+    private static func scanFlatScalarObject(_ s: String) -> [FlatField]? {
+        // CHEAP PRE-REJECT (keeps the fallback path from paying the full structured scan):
+        // walk the UTF8 view ONCE — no allocation — and bail the instant a structural byte
+        // proves this isn't a flat-scalar object: a nested `{`/`[` outside a string. (A `{`
+        // or `[` INSIDE a string value is skipped correctly, respecting `\"` escapes.) This
+        // makes an array/object-bearing input — which MUST fall back — skip straight to the
+        // JSONSerialization path without allocating `Array(s.utf8)` or scanning twice.
+        if !flatScalarPreScan(s.utf8) { return nil }
+
+        let bytes = Array(s.utf8)
+        var i = 0
+        let n = bytes.count
+        @inline(__always) func skipWS() { while i < n, bytes[i] == 0x20 || bytes[i] == 0x09 || bytes[i] == 0x0A || bytes[i] == 0x0D { i += 1 } }
+        skipWS()
+        guard i < n, bytes[i] == UInt8(ascii: "{") else { return nil }
+        i += 1
+        skipWS()
+        var fields: [FlatField] = []
+        var seenKeys = Set<String>()
+        if i < n, bytes[i] == UInt8(ascii: "}") {
+            i += 1; skipWS()
+            return i == n ? fields : nil   // trailing garbage ⇒ fall back
+        }
+        while true {
+            skipWS()
+            // ---- key (a JSON string) ----
+            guard i < n, bytes[i] == UInt8(ascii: "\"") else { return nil }
+            guard let (rawKey, decodedKey, kEnd) = scanString(bytes, from: i) else { return nil }
+            i = kEnd
+            // The canonical KEY emission is `quotedJSONString(decodedKey)`. If the raw
+            // key slice (incl. quotes) is NOT already that exact form, the splice would
+            // differ — only accept when raw == canonical (no escapes ⇒ they match). The
+            // map below keys on the DECODED key (so two keys that decode equal can't both
+            // survive); a duplicate decoded key ⇒ fall back (JSONSerialization last-wins
+            // is order-dependent and we don't want to replicate it heuristically).
+            if PatchInstanceInputs.quotedJSONString(decodedKey) != rawKey { return nil }
+            if !seenKeys.insert(decodedKey).inserted { return nil }
+            skipWS()
+            guard i < n, bytes[i] == UInt8(ascii: ":") else { return nil }
+            i += 1
+            skipWS()
+            // ---- value (scalar only) ----
+            guard i < n else { return nil }
+            let c = bytes[i]
+            let canonical: String?
+            if c == UInt8(ascii: "\"") {
+                guard let (rawStr, decodedStr, vEnd) = scanString(bytes, from: i) else { return nil }
+                // Canonical string emission = quotedJSONString(decoded). Accept only when
+                // the raw slice already equals that (no escape the canonical form rewrites).
+                if PatchInstanceInputs.quotedJSONString(decodedStr) != rawStr { return nil }
+                canonical = rawStr
+                i = vEnd
+            } else if c == UInt8(ascii: "t") || c == UInt8(ascii: "f") || c == UInt8(ascii: "n") {
+                guard let (lit, vEnd) = scanLiteral(bytes, from: i) else { return nil }
+                canonical = lit         // "true"/"false"/"null" are already canonical
+                i = vEnd
+            } else if c == UInt8(ascii: "-") || (c >= UInt8(ascii: "0") && c <= UInt8(ascii: "9")) {
+                guard let (canon, vEnd) = scanNumberCanonical(bytes, from: i) else { return nil }
+                canonical = canon
+                i = vEnd
+            } else {
+                // '{' or '[' (nested) or anything else ⇒ not a flat scalar ⇒ fall back.
+                return nil
+            }
+            fields.append(FlatField(key: decodedKey, canonical: canonical))
+            skipWS()
+            guard i < n else { return nil }
+            if bytes[i] == UInt8(ascii: ",") { i += 1; continue }
+            if bytes[i] == UInt8(ascii: "}") {
+                i += 1; skipWS()
+                return i == n ? fields : nil
+            }
+            return nil
+        }
+    }
+
+    /// A fast structural pre-check: is `utf8` plausibly a FLAT object of scalars? Returns
+    /// `false` (→ the caller falls back to JSONSerialization WITHOUT the full structured
+    /// scan) the moment it sees a nested `{`/`[` outside a string. Strings are skipped
+    /// correctly (a `{`/`[`/`}`/`]` inside a string value can't false-trigger), honoring
+    /// `\"`/`\\` escapes. A `true` is NOT a promise the input is valid flat-scalar JSON —
+    /// just that the structured scan is worth attempting; the scan still validates fully.
+    private static func flatScalarPreScan(_ utf8: String.UTF8View) -> Bool {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var sawTopObject = false
+        for b in utf8 {
+            if inString {
+                if escaped { escaped = false; continue }
+                if b == UInt8(ascii: "\\") { escaped = true; continue }
+                if b == UInt8(ascii: "\"") { inString = false }
+                continue
+            }
+            switch b {
+            case UInt8(ascii: "\""):
+                inString = true
+            case UInt8(ascii: "{"):
+                depth += 1
+                if depth == 1 { sawTopObject = true }
+                else { return false }          // a nested object ⇒ not flat
+            case UInt8(ascii: "["):
+                return false                    // any array ⇒ not flat (top-level or nested)
+            case UInt8(ascii: "}"):
+                depth -= 1
+            default:
+                continue
+            }
+        }
+        // Only worth attempting if we saw exactly the top-level object and it closed cleanly.
+        return sawTopObject && depth == 0 && !inString
+    }
+
+    /// Scan a JSON string starting at `from` (must point at the opening `"`). Returns the
+    /// RAW slice (incl. both quotes), the DECODED string, and the index PAST the closing
+    /// quote. Returns `nil` on an unterminated/invalid string. Decodes the standard escape
+    /// set; an escape it doesn't model (`\u…`, `\/`, etc.) is decoded conservatively so the
+    /// `raw == quotedJSONString(decoded)` equality check the caller runs will simply FAIL
+    /// for those (→ fall back), never producing a wrong splice.
+    private static func scanString(_ bytes: [UInt8], from start: Int) -> (raw: String, decoded: String, end: Int)? {
+        let n = bytes.count
+        var i = start + 1            // past opening quote
+        var decoded: [UInt8] = []
+        while i < n {
+            let b = bytes[i]
+            if b == UInt8(ascii: "\"") {
+                let raw = String(decoding: bytes[start...i], as: UTF8.self)
+                let dec = String(decoding: decoded, as: UTF8.self)
+                return (raw, dec, i + 1)
+            }
+            if b == UInt8(ascii: "\\") {
+                guard i + 1 < n else { return nil }
+                let e = bytes[i + 1]
+                switch e {
+                case UInt8(ascii: "\""): decoded.append(UInt8(ascii: "\""))
+                case UInt8(ascii: "\\"): decoded.append(UInt8(ascii: "\\"))
+                case UInt8(ascii: "n"): decoded.append(0x0A)
+                case UInt8(ascii: "t"): decoded.append(0x09)
+                case UInt8(ascii: "r"): decoded.append(0x0D)
+                default:
+                    // An escape we don't canonicalize 1:1 (\/ , \b, \f, \uXXXX). Decode the
+                    // escaped byte verbatim so `raw == quotedJSONString(decoded)` FAILS and
+                    // the caller falls back — correct (never a wrong splice), just not fast.
+                    decoded.append(e)
+                }
+                i += 2
+                continue
+            }
+            decoded.append(b)
+            i += 1
+        }
+        return nil   // unterminated
+    }
+
+    /// Scan one of the bare literals `true` / `false` / `null` at `from`. Returns the
+    /// literal text + the index past it, or `nil` if the bytes don't match exactly.
+    private static func scanLiteral(_ bytes: [UInt8], from start: Int) -> (String, Int)? {
+        func match(_ lit: String) -> Int? {
+            let l = Array(lit.utf8)
+            guard start + l.count <= bytes.count else { return nil }
+            for k in 0..<l.count where bytes[start + k] != l[k] { return nil }
+            return start + l.count
+        }
+        if let e = match("true") { return ("true", e) }
+        if let e = match("false") { return ("false", e) }
+        if let e = match("null") { return ("null", e) }
+        return nil
+    }
+
+    /// Scan a JSON number at `from` and return its CANONICAL emission — byte-identical to
+    /// what `fragment(for:)` produces (an INTEGER literal → `String(int64Value)`; a literal
+    /// with `.`/`e`/`E` → `doubleFragment(Double(...))`) — plus the index past the number.
+    /// Returns `nil` (→ fall back) for anything that can't be canonicalized exactly: an
+    /// integer that overflows `Int64`, a non-finite/over-precision double, or a malformed
+    /// token. This MIRRORS JSONSerialization's int-vs-float decision (presence of `.`/`e`/`E`).
+    private static func scanNumberCanonical(_ bytes: [UInt8], from start: Int) -> (String, Int)? {
+        let n = bytes.count
+        var i = start
+        var isFloat = false
+        if i < n, bytes[i] == UInt8(ascii: "-") { i += 1 }
+        let digitsStart = i
+        while i < n, bytes[i] >= UInt8(ascii: "0"), bytes[i] <= UInt8(ascii: "9") { i += 1 }
+        if i == digitsStart { return nil }   // need ≥1 integer digit
+        // JSON's integer grammar forbids a LEADING ZERO (`00`/`01` are invalid — and
+        // JSONSerialization REJECTS the whole object, so `merge` would return the OTHER
+        // side). Reject a multi-digit run that starts with `0` so the splice falls back
+        // and reproduces that rejection, never canonicalizing an invalid number.
+        if bytes[digitsStart] == UInt8(ascii: "0"), i - digitsStart > 1 { return nil }
+        if i < n, bytes[i] == UInt8(ascii: ".") {
+            isFloat = true
+            i += 1
+            let fracStart = i
+            while i < n, bytes[i] >= UInt8(ascii: "0"), bytes[i] <= UInt8(ascii: "9") { i += 1 }
+            if i == fracStart { return nil }   // a `.` with no fraction digit is malformed
+        }
+        if i < n, bytes[i] == UInt8(ascii: "e") || bytes[i] == UInt8(ascii: "E") {
+            isFloat = true
+            i += 1
+            if i < n, bytes[i] == UInt8(ascii: "+") || bytes[i] == UInt8(ascii: "-") { i += 1 }
+            let expStart = i
+            while i < n, bytes[i] >= UInt8(ascii: "0"), bytes[i] <= UInt8(ascii: "9") { i += 1 }
+            if i == expStart { return nil }
+        }
+        let literal = String(decoding: bytes[start..<i], as: UTF8.self)
+        if isFloat {
+            guard let d = Double(literal), d.isFinite else { return nil }
+            // Replicate fragment(for:)'s float branch EXACTLY: scalarJSONFragment(doubleValue)
+            // → doubleFragment. (Cross-check below guards the rare String(Double) rounding.)
+            let canon = PatchInstanceInputs.scalarJSONFragment(d) ?? ""
+            // SAFETY NET: only accept if re-parsing the canonical form yields the SAME Double
+            // JSONSerialization would have produced (both go through Double(String)), so the
+            // splice can't diverge from the slow path's number formatting. Equal-or-fall-back.
+            guard let back = Double(canon), back == d || (back.isNaN && d.isNaN) else { return nil }
+            return (canon, i)
+        } else {
+            // INTEGER literal: fragment(for:) emits String(n.int64Value). JSON forbids leading
+            // zeros / leading `+`, but `-0` is legal and canonicalizes to `0` — Int64("-0")==0
+            // → String → "0", matching. Overflow ⇒ fall back (JSONSerialization would make it a
+            // Double, a different branch).
+            guard let v = Int64(literal) else { return nil }
+            return (String(v), i)
+        }
     }
 
     static func parse(_ json: String) -> [String: Any]? {

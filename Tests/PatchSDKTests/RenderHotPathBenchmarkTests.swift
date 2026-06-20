@@ -698,6 +698,59 @@ final class RenderHotPathBenchmarkTests: XCTestCase {
         XCTAssertLessThan(warmMean, coldMean, "warm steady-state marshal must be cheaper than the pre-session fresh marshal")
     }
 
+    // MARK: - PERF batch #1: parse-free flat-scalar merge (the fast path) vs the oracle
+
+    // Times the production `PatchFlatJSON.merge` (parse-free splice for all-scalar flat
+    // objects) against `mergeViaJSONSerialization` (the old JSONSerialization path) on
+    // REALISTIC flat-scalar inputs — the common case (scalar @State/props + a scalar
+    // guest-state override) the fast path targets. Reports both, asserts the fast path
+    // is byte-identical AND faster. (The RENDER-HOT-PATH benchmark above uses a RichInstance
+    // whose props carry an ARRAY → its merge takes the fallback, so this isolates the win.)
+    func testFlatScalarMergeFastPathSpeedup() {
+        // A realistic settings-screen props ∪ guest scalar override (all flat scalars).
+        let props = #"{"badgeCount":3,"displayName":"Ada Lovelace","notificationsOn":true,"theme":"dark","volume":0.75,"streak":42}"#
+        let override = #"{"badgeCount":7,"volume":0.5}"#
+
+        let iterations = 20000
+        let warmup = 2000
+        var fastNs: UInt64 = 0
+        var oracleNs: UInt64 = 0
+
+        for i in 0..<(iterations + warmup) {
+            let measure = i >= warmup
+            let t0 = Self.nowNanos()
+            let fast = PatchFlatJSON.merge(base: props, override: override)
+            let dFast = Self.nowNanos() - t0
+            let t1 = Self.nowNanos()
+            let oracle = PatchFlatJSON.mergeViaJSONSerialization(base: props, override: override)
+            let dOracle = Self.nowNanos() - t1
+            XCTAssertEqual(fast, oracle, "fast-path merge must be byte-identical to the JSONSerialization oracle")
+            if measure { fastNs += dFast; oracleNs += dOracle }
+        }
+
+        let fastMean = Double(fastNs) / Double(iterations)
+        let oracleMean = Double(oracleNs) / Double(iterations)
+        let speedup = fastMean > 0 ? oracleMean / fastMean : 0
+
+        var out = "\n=== FLAT-SCALAR MERGE (PERF #1) (iterations=\(iterations), config=\(buildConfig)) ==="
+        out += String(format: "\n  JSONSerialization merge (old path): %12.1f ns/merge", oracleMean)
+        out += String(format: "\n  parse-free splice (production path):%12.1f ns/merge", fastMean)
+        out += String(format: "\n  => %.2fx faster on a flat-scalar merge (byte-identical output)", speedup)
+        out += "\n  (NB the RENDER-HOT-PATH merge stage uses a RichInstance whose props carry an"
+        out += "\n   array → that merge takes the FALLBACK; this isolates the common all-scalar win.)"
+        print(out)
+        writeReport(out, marker: "FLATMERGE")
+
+        // The perf claim is a RELEASE assertion. In DEBUG, full bounds-checking on the
+        // hand-written byte scanner can make it slower than JSONSerialization's compiled
+        // C path — meaningless for the optimization, which only runs optimized. The
+        // byte-IDENTICAL transparency check inside the loop above runs in BOTH configs
+        // (correctness is never conditioned); only the timing bound is RELEASE-gated.
+        #if !DEBUG
+        XCTAssertLessThan(fastMean, oracleMean, "the parse-free splice must be faster than JSONSerialization on flat-scalar input (RELEASE)")
+        #endif
+    }
+
     // MARK: - report sink
 
     private func writeReport(_ text: String, marker: String) {
