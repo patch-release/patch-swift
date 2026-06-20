@@ -182,6 +182,60 @@ final class PatchIntegrationTests: XCTestCase {
         XCTAssertTrue(types.contains("error"))
         XCTAssertTrue(types.contains("fallback"))
     }
+
+    /// P0 rollback-stickiness fix: when the backend returns `revert: true` (the
+    /// device's cached version was rolled back with no active replacement), the
+    /// orchestration must DEACTIVATE the live module, DROP the cached current
+    /// slot (so the revert survives a relaunch), and BUMP `moduleEpoch` (so
+    /// auto-patched SwiftUI views re-render native).
+    func testCheckAndApplyRevertDeactivatesAndClearsCurrent() async throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let bytes = try marshalBytes()
+
+        // Seed + activate a current module (the now-rolled-back patch).
+        let storage = try ModuleStorage(appKey: "revert", baseDirectory: dir)
+        try storage.installCurrent(
+            version: "1.0.0", sha256: SHA256Hash.hexString(of: Data(bytes)), bytes: bytes)
+
+        // Backend says: revert (has_update:false, revert:true).
+        let resp = UpdateCheckResponse(has_update: false, revert: true)
+        let respJSON = try JSONEncoder().encode(resp)
+        let transport = RoutingTransport { req in
+            let p = req.url?.absoluteString ?? ""
+            if p.hasSuffix("/modules/check") { return (respJSON, 200) }
+            if p.hasSuffix("/events") { return (Data(), 201) }
+            return (Data(), 404)
+        }
+
+        let patch = Patch()
+        patch.bridges.registerDefaults()
+        patch.injectForTesting(
+            configuration: PatchConfiguration(
+                appKey: "revert", appID: "33333333-3333-3333-3333-333333333333",
+                apiBaseURL: URL(string: "https://api.test/api/v1")!,
+                fingerprint: "fp", deviceID: "dev-3"),
+            storage: storage,
+            checker: UpdateChecker(
+                baseURL: URL(string: "https://api.test/api/v1")!, transport: transport))
+
+        // Bring the cached module up first (so there's something to deactivate).
+        _ = patch.activateBestLocal()
+        XCTAssertTrue(patch.hasActiveModule, "precondition: cached module is active")
+        XCTAssertEqual(storage.currentVersion, "1.0.0")
+        let epochBefore = patch.moduleEpoch
+
+        // The revert directive must tear everything down.
+        let outcome = await patch.checkAndApply()
+
+        XCTAssertFalse(patch.hasActiveModule, "revert must deactivate the live module")
+        XCTAssertNil(storage.currentVersion, "revert must drop the cached current slot (durable)")
+        XCTAssertGreaterThan(patch.moduleEpoch, epochBefore,
+                             "revert must bump moduleEpoch so views re-render native")
+        // No module left → noModule outcome.
+        if case .noModule = outcome {} else {
+            XCTFail("expected .noModule after revert, got \(outcome)")
+        }
+    }
 }
 
 /// Collects event POST bodies for assertions.

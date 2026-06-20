@@ -282,19 +282,35 @@ extension Patch {
                                          showSlotStubs: false, tokens: tokenTable)
         let (rendered, viewsByID) = renderUIKitIndexed(emission.root, context: context)
 
+        // Detect REUSE: a prior patch-installed root in contentView means this cell
+        // instance was already configured (from a previous dequeue). Observer effects
+        // (`NotificationCenter.addObserver`) MUST NOT run again on reuse — they are not
+        // idempotent and `NotificationCenter` never deduplicates by selector, so calling
+        // `addObserver` a second time on the same object/selector registers a DUPLICATE
+        // observer that causes notification handlers to fire twice, tripling on the third
+        // reuse, etc. (a P0 false-behavior bug). We detect reuse before clearPatchedRoot
+        // so the check is based on the state entering this configure call.
+        let isReuse = contentView.subviews.contains { $0.tag == Self.patchedRootTag }
+
         // Lever 1: apply the view-attached GESTURE WIRINGS. Each is keyed by the source
         // view's local name (the rendered node's id); the thunk's closure does the real
         // native `addGestureRecognizer(<gesture>(target: self, action: #selector(...)))`
         // against the matching rendered view. A wiring whose view didn't end up in the tree
         // is silently skipped (the gesture's view isn't visible anyway) — never a demote.
+        // Gesture wirings MUST re-run on every configure call because the rendered view tree
+        // is freshly rebuilt each time (the gestures attach to the NEW rendered views).
         for (nodeID, applies) in w.gestureWirings {
             guard let view = viewsByID[nodeID] else { continue }
             for apply in applies { apply(view) }
         }
-        // Lever 2: run the method-level OBSERVER EFFECTS once at install. Each re-runs the
-        // verbatim `NotificationCenter.default.addObserver(self, selector: #selector(...))`
-        // against `self` (selector resolved natively in the thunk).
-        for effect in w.observerEffects { effect() }
+        // Lever 2: run the method-level OBSERVER EFFECTS, but ONLY on first install (not
+        // on cell reuse). `NotificationCenter.addObserver` is NOT idempotent — calling it
+        // again without a prior `removeObserver` accumulates duplicate registrations whose
+        // handlers fire N times after N reuses. Observer effects are cell-instance-scoped
+        // (they observe `self`), so they survive cell reuse as-is without re-registration.
+        if !isReuse {
+            for effect in w.observerEffects { effect() }
+        }
 
         // Goal 1: replay the QUARANTINED NATIVE EFFECTS in SOURCE ORDER (the engine already
         // sorted by ordinal). Each runs once against `self` (the closure captures the live
@@ -302,6 +318,9 @@ extension Patch {
         // couldn't lower but vetted as a faithful native side effect. The surrounding
         // declarative construction still rode WASM (the whole win over the old whole-method
         // demote); these effects ride the compiled-in thunk, exactly like the observers.
+        // Native effects run on EVERY configure (including reuse) because they commonly
+        // re-configure live stored subviews (`self.tableView.delegate = self`) that are
+        // part of the freshly re-rendered slot tree.
         for effect in w.nativeEffects { effect() }
 
         // Install into contentView: clear any prior PATCH-installed root, then add the

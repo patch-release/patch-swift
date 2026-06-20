@@ -80,6 +80,51 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertNil(resp.version)
         XCTAssertNil(resp.module_url)
         XCTAssertFalse(resp.mandatory)  // backend may omit → defaults false
+        XCTAssertFalse(resp.revert)     // absent `revert` → false (backward-compat)
+    }
+
+    // MARK: - Rollback (`revert`) directive
+
+    func testDecodesRevertTrueDirective() throws {
+        // The backend emits `revert: true` (with has_update:false) when the
+        // device's cached version was rolled back and there's no replacement.
+        let json = #"{"has_update": false, "revert": true}"#
+        let resp = try JSONDecoder().decode(
+            UpdateCheckResponse.self, from: Data(json.utf8))
+        XCTAssertFalse(resp.has_update)
+        XCTAssertTrue(resp.revert)
+    }
+
+    func testRevertAbsentDecodesAsFalseBackwardCompat() throws {
+        // An OLD backend never emits `revert` at all → it must decode to false
+        // so a new SDK against an old backend is a strict no-op.
+        let json = #"{"has_update": false}"#
+        let resp = try JSONDecoder().decode(
+            UpdateCheckResponse.self, from: Data(json.utf8))
+        XCTAssertFalse(resp.revert)
+    }
+
+    func testRevertExplicitFalseDecodes() throws {
+        // The backend defaults `revert: false` and may serialize it explicitly.
+        let json = #"{"has_update": true, "version": "2.0.0", "revert": false}"#
+        let resp = try JSONDecoder().decode(
+            UpdateCheckResponse.self, from: Data(json.utf8))
+        XCTAssertTrue(resp.has_update)
+        XCTAssertEqual(resp.version, "2.0.0")
+        XCTAssertFalse(resp.revert)
+    }
+
+    func testRevertResponseDecodesOverTheWire() async throws {
+        // End-to-end through the checker's decode path (not just JSONDecoder).
+        let transport = MockTransport {
+            _ in (Data(#"{"has_update": false, "revert": true}"#.utf8), 200)
+        }
+        let checker = UpdateChecker(baseURL: base, transport: transport)
+        let resp = try await checker.check(.init(
+            current_version: "1.0.0", fingerprint: "fp", device_id: "d",
+            app_id: "11111111-1111-1111-1111-111111111111"))
+        XCTAssertFalse(resp.has_update)
+        XCTAssertTrue(resp.revert)
     }
 
     func testHTTPErrorStatusThrows() async {

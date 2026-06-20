@@ -63,6 +63,13 @@ public struct UpdateCheckResponse: Codable, Equatable, Sendable {
     public var diff_size: Int?
     public var mandatory: Bool
     public var release_notes: String?
+    /// Rollback directive. `true` when the device's reported `current_version`
+    /// was ROLLED BACK and there is NO active replacement to move to — the SDK
+    /// must `deactivate()` the cached (now-bad) module and revert to the native
+    /// shell. Backward-compatible: the backend defaults it to `false` and an
+    /// older backend omits the key entirely, so it decodes as `false` (a no-op,
+    /// today's behavior). Always accompanies `has_update: false`.
+    public var revert: Bool
 
     public init(
         has_update: Bool,
@@ -73,7 +80,8 @@ public struct UpdateCheckResponse: Codable, Equatable, Sendable {
         size: Int? = nil,
         diff_size: Int? = nil,
         mandatory: Bool = false,
-        release_notes: String? = nil
+        release_notes: String? = nil,
+        revert: Bool = false
     ) {
         self.has_update = has_update
         self.version = version
@@ -84,10 +92,11 @@ public struct UpdateCheckResponse: Codable, Equatable, Sendable {
         self.diff_size = diff_size
         self.mandatory = mandatory
         self.release_notes = release_notes
+        self.revert = revert
     }
 
     public enum CodingKeys: String, CodingKey {
-        case has_update, version, module_url, diff_url, sha256, size, diff_size, mandatory, release_notes
+        case has_update, version, module_url, diff_url, sha256, size, diff_size, mandatory, release_notes, revert
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +111,9 @@ public struct UpdateCheckResponse: Codable, Equatable, Sendable {
         // backend defaults mandatory=false and may omit it; tolerate absence.
         mandatory = try c.decodeIfPresent(Bool.self, forKey: .mandatory) ?? false
         release_notes = try c.decodeIfPresent(String.self, forKey: .release_notes)
+        // backend defaults revert=false and an OLD backend omits the key entirely;
+        // tolerate absence → false (no-op, today's behavior).
+        revert = try c.decodeIfPresent(Bool.self, forKey: .revert) ?? false
     }
 }
 

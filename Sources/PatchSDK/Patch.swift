@@ -1091,6 +1091,22 @@ public final class Patch: @unchecked Sendable {
                 type: .error, errorMessage: "\(error)"))
             return .noModule
         }
+        // ROLLBACK DIRECTIVE (P0). The backend sets `revert: true` when this
+        // device's cached `current_version` was ROLLED BACK and there is no
+        // active replacement to move to. Without acting on it, the device would
+        // keep serving the now-bad cached module forever (it only ever sees
+        // `has_update: false`). DEACTIVATE the live module set (which also bumps
+        // `moduleEpoch` so auto-patched SwiftUI views re-render native) AND drop
+        // the cached current slot so the revert is DURABLE across relaunch — on
+        // the next `start()` the local fallback chain would otherwise re-promote
+        // the rolled-back `current` module. Honored regardless of `autoApply`:
+        // unwinding a known-bad patch is a safety action, not an "apply".
+        if response.revert {
+            deactivate()
+            storage.clearCurrent()
+            return storage.currentVersion.map { .activated(version: $0) } ?? .noModule
+        }
+
         guard response.has_update, cfg.autoApply else {
             return storage.currentVersion.map { .activated(version: $0) } ?? .noModule
         }
@@ -1331,7 +1347,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.13"
+    public static let sdkVersion = "1.5.14"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //
