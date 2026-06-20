@@ -78,13 +78,26 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
         /// whole-module behavior). A newer module stamps it per view (9 for a reactive-collection
         /// marshalling view, 8 otherwise) so an older host demotes only the views it can't render.
         public let minVersion: Int?
+        /// NATIVE-FAST-PATH: the per-view body content hash the engine stamped at build
+        /// time (`BodyLowering.viewBodyContentHash` over the view's lowered `guestBody` +
+        /// parameterized-slot literals). The SDK compares it against the thunk's baked
+        /// `baselineHash`: when EQUAL, the active module's body for this view is byte-
+        /// identical to the build's shipped baseline (no OTA patch changed it), so the
+        /// thunk renders the NATIVE body with ZERO WASM. ADDITIVE + backward-decode safe —
+        /// `nil` for a manifest from a cli that predates the field (the SDK then fail-safes
+        /// that view to WASM, the prior always-route behavior). A newer host still decodes
+        /// an older manifest (this key absent → nil); an older host decodes a newer manifest
+        /// (ignores this key). `minSupportedVersion` is unchanged (this is not a wire-format
+        /// node case — it's an optional scalar that rides the existing manifest JSON).
+        public let bodyHash: String?
         public init(type: String, export: String, dispatch: String?, thunkSafe: Bool,
-                    minVersion: Int? = nil) {
+                    minVersion: Int? = nil, bodyHash: String? = nil) {
             self.type = type
             self.export = export
             self.dispatch = dispatch
             self.thunkSafe = thunkSafe
             self.minVersion = minVersion
+            self.bodyHash = bodyHash
         }
     }
     /// PatchViewIR schema version the module's emissions target.
@@ -151,6 +164,32 @@ public final class PatchViewPatchRegistry {
     /// Test seam: when set, `reload()` uses this JSON instead of calling the
     /// module's manifest export.
     var manifestJSONOverrideForTesting: (() -> String?)?
+
+    /// Test seam (NATIVE-FAST-PATH): install a manifest's worth of entries directly and
+    /// PIN the loaded epoch so `syncWithModuleEpoch` won't reload over them. Lets a unit
+    /// test exercise `entryIfPatchable` / the `thunkBody` fast-path gate against a precise
+    /// `bodyHash` set without standing up a real WASM module + epoch dance. Clears the
+    /// failed-type demote set so the entries route cleanly.
+    func installEntriesForTesting(_ entries: [PatchViewManifest.Entry]) {
+        // Burn the one-shot setup guards FIRST: `entryIfPatchable` would otherwise call
+        // `ensureActivationOnce()` (which can activate a cached module from a prior test and
+        // bump `Patch.moduleEpoch` AFTER we pin it → `syncWithModuleEpoch` reloads + clobbers
+        // our installed entries). Disabling them keeps the next lookup a pure read.
+        self.didEnsureActivation = true
+        self.didInstallChangeHandler = true
+        self.entries = Dictionary(entries.map { ($0.type, $0) }, uniquingKeysWith: { _, b in b })
+        self.failedTypes.removeAll()
+        // Pin to the live epoch so the next `entryIfPatchable` doesn't re-sync + clobber.
+        self.loadedEpoch = Patch.shared.moduleEpoch
+    }
+
+    /// Test seam: clear all installed entries + demote state (call at the END of a test
+    /// that used `installEntriesForTesting`, to keep the singleton clean for the next).
+    func resetForTesting() {
+        self.entries.removeAll()
+        self.failedTypes.removeAll()
+        self.loadedEpoch = nil
+    }
 
     #if canImport(Observation)
     private var _signalStorage: AnyObject?
@@ -1581,16 +1620,13 @@ public struct PatchedBodyHost: View {
                 }
                 return demoteFallback()
             }
-            // Collect the six id-sets ONCE for this fresh tree, then cache them with the tree
-            // so an identical-input render skips both the WASM stage and these walks.
-            idSets = PatchedBodyIDSets(
-                opaque: Self.collectOpaqueIDs(tree),
-                token: Self.collectTokenIDs(tree),
-                row: Self.collectRowSlotIDs(tree),
-                action: Self.collectActionSlotIDs(tree),
-                effect: Self.collectEffectSlotIDs(tree),
-                button: Self.collectButtonActionIDs(tree),
-                animationValueKeys: Self.collectAnimationValueKeys(tree))
+            // Collect the six id-sets (+ animation keys) ONCE for this fresh tree in a SINGLE
+            // traversal (T2), then cache them with the tree so an identical-input render skips
+            // both the WASM stage AND these walks. `collectAllIDs` is the multiset-identical,
+            // false-render-safe equivalent of the six separate collectors (proven by
+            // RenderHotPathPerfRoundTests) — pure speed, no behavior change — and matters at
+            // real-screen node counts where 6 passes cost ~6× one pass.
+            idSets = Self.collectAllIDs(tree)
             PatchedBodyRenderCache.shared.store(
                 typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch,
                 payload: PatchedBodyCacheEntry(tree: tree, slotArgs: slotArgs, idSets: idSets))
@@ -2001,6 +2037,86 @@ public struct PatchedBodyHost: View {
         return out
     }
 
+    // MARK: - Combined single-pass id collection (P0 perf — T2)
+
+    /// The seven id-sets a render needs from the tree, collected in ONE traversal instead
+    /// of the six (+ animation) separate full-tree walks. At real-screen node counts
+    /// (hundreds of nodes) the six independent walks cost ~6× a single pass; this folds them
+    /// into one DFS that fills every set, then packs the result into `PatchedBodyIDSets`.
+    ///
+    /// CORRECTNESS INVARIANT (proven by `RenderHotPathPerfRoundTests`): the combined result is
+    /// EXACTLY the same set of ids — same elements, same multiplicities, NONE added/dropped — as
+    /// the six originals + `collectAnimationValueKeys`. Concretely:
+    ///   * `opaque`/`row`/`action`/`button` are BYTE-IDENTICAL arrays to their originals (same
+    ///     order): the originals are node-first / children-before-modifier-content, which this
+    ///     traversal matches exactly.
+    ///   * `token`/`effect`/`animation` are MULTISET-IDENTICAL (same ids, possibly a different
+    ///     order): their originals recurse modifier-content-before-childNodes, the opposite
+    ///     subtree order, which a single DFS cannot also satisfy for the node-first families.
+    ///     The differential gate asserts SORTED equality for these three.
+    /// ORDER IS PROVABLY IRRELEVANT downstream: every consumer of all seven arrays uses them for
+    /// set-membership (`filter { table[$0] == nil }`) or idempotent dict population
+    /// (`for id in … { table.set(id, …) }`) — never order-dependent. So multiset-identity is the
+    /// real safety-net invariant, and this is a pure speed change with zero behavioral effect.
+    ///
+    /// (The originals stay defined above — they are the proven reference the differential gate
+    /// diffs against, and the geometry-rebuild path still calls the single-type variants on a
+    /// per-child basis where a one-shot all-types collection isn't wanted.)
+    nonisolated static func collectAllIDs(_ node: ViewNode) -> PatchedBodyIDSets {
+        var opaque: [String] = []
+        var token: [String] = []
+        var row: [String] = []
+        var action: [String] = []
+        var effect: [String] = []
+        var button: [String] = []
+        var animation: [String] = []
+
+        func tokenIDs(in m: Modifier, into out: inout [String]) {
+            func add(_ c: ColorRef) { if case .hostToken(let id) = c { out.append(id) } }
+            func add(_ s: IRShapeStyle) { if case .color(let c) = s { add(c) } }
+            switch m {
+            case .fontToken(let id): out.append(id)
+            case .foregroundColor(let c), .background(let c), .tint(let c): add(c)
+            case .accentColor(let c?): add(c)
+            case .shadow(let c?, _, _, _): add(c)
+            case .foregroundStyle(let layers): for s in layers { add(s) }
+            case .backgroundStyle(let s, _), .tintStyle(let s),
+                 .fill(let s, _), .stroke(let s, _), .strokeBorder(let s, _),
+                 .border(let s, _), .overlayStyle(let s, _): add(s)
+            default: break
+            }
+        }
+
+        func walk(_ n: ViewNode) {
+            // Kind-derived ids (mutually-exclusive node kinds) emit PRE-ORDER — matches the
+            // node-first originals (opaque/row/action/button), which append before recursing.
+            switch n.kind {
+            case .opaque(let id, _): opaque.append(id)
+            case .indexedForEachSlot(let id, _, _): row.append(id)
+            case .actionSlotButton(let id, _, _): action.append(id)
+            case .button(let actionID, _, _): button.append(actionID)
+            default: break
+            }
+            // This node's OWN modifier-derived ids (token/effect/animation) emit while scanning
+            // `n.modifiers` — matches the modifier-first originals (which scan modifiers before
+            // recursing childNodes).
+            for m in n.modifiers {
+                tokenIDs(in: m, into: &token)
+                if case .nativeEffectSlot(let id) = m { effect.append(id) }
+                if case .animation(_, let valueKey) = m, !valueKey.isEmpty { animation.append(valueKey) }
+            }
+            // Recurse childNodes BEFORE modifier content — matches opaque/row/action/button
+            // (children-first), and is order-equivalent for token/effect/animation because their
+            // originals emit this node's own modifier ids (above) before any subtree, and the
+            // remaining subtree ids are membership-only downstream.
+            for child in n.childNodes { walk(child) }
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
+        }
+        walk(node)
+        return PatchedBodyIDSets(opaque: opaque, token: token, row: row, action: action,
+                                 effect: effect, button: button, animationValueKeys: animation)
+    }
+
     /// Every `.opaque` node id in the tree — the leaves the thunk must supply a
     /// native slot for (mixed views). Walks both `childNodes` AND modifier content
     /// (a sheet/alert/overlay body's opaque leaf must still be covered).
@@ -2256,7 +2372,7 @@ extension Patch {
     /// the rendered subtree. Like the others, invoked only when routing; defaulted so existing thunks
     /// keep compiling (no effect slots → an effect-using view stays demoted, identical to before).
     @MainActor
-    public func thunkBody(typeName: String, instance: Any,
+    public func thunkBody(typeName: String, baselineHash: String? = nil, instance: Any,
                           slots: () -> [String: ([String]) -> AnyView] = { [:] },
                           tokens: () -> [String: PatchHostToken] = { [:] },
                           rowSlots: () -> [String: PatchRowSlot] = { [:] },
@@ -2264,6 +2380,23 @@ extension Patch {
                           effectSlots: () -> [String: (AnyView) -> AnyView] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
+            return nil
+        }
+        // NATIVE-FAST-PATH (the single highest-value perf win): when this build's baked
+        // `baselineHash` EQUALS the active module's manifest `bodyHash` for this view, the
+        // active body is BYTE-IDENTICAL to what the app shipped (no OTA patch touched this
+        // view — typically the bundled baseline module, lowered FROM the native code). The
+        // WASM render would reproduce exactly the native body, so we return nil and the
+        // thunk renders the ORIGINAL native body with ZERO WASM round-trip. This skips even
+        // the `PatchInstanceInputs.extract` marshal below — an unpatched view costs only the
+        // registry's epoch/Observation read + this string compare.
+        //
+        // FAIL-SAFE: any case where the hashes can't be PROVEN equal routes WASM (the prior
+        // always-route behavior) — a missing baselineHash (a thunk from an OLD cli), a
+        // missing manifest bodyHash (an OLD module), or any inequality. A false "native"
+        // (silently not applying a real patch) is the only dangerous outcome, and SHA256
+        // equality makes it impossible: equal hash ⟺ identical body.
+        if let bh = baselineHash, let eh = entry.bodyHash, bh == eh {
             return nil
         }
         // MEMOIZED marshal (P0 perf): a cheap fingerprint pass skips the ~159µs recursive

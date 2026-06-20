@@ -94,6 +94,45 @@ final class EffectSlotTests: XCTestCase {
             "every effect-slot id is collected, incl. one nested in a modifier content subtree")
     }
 
+    // MARK: - 4. onChange effect slot: FALSE-RENDER correctness (fires exactly on the change).
+
+    /// The #1 false-render-risk property for the onChange-coverage pass: a slotted `.onChange(of: X)`
+    /// is FAITHFUL because the engine re-applies the developer's REAL `.onChange(of: self.X) { … }`
+    /// over the rendered subtree — i.e. the effect-slot closure is exactly `{ content in
+    /// AnyView(content.onChange(of: self.X, …)) }`, and SwiftUI's OWN `.onChange` machinery then fires
+    /// it on the real change of the live `self.X` (so there is no Patch-side "fire" logic that could
+    /// mis-fire). This test pins the deterministic half of that contract: the renderer invokes the
+    /// effect-slot closure EXACTLY ONCE over the lowered subtree, and the closure that applies a REAL
+    /// `.onChange` produces a valid view without crashing — so the developer's native watcher is wired
+    /// to the rendered content verbatim. (The "fires exactly on change" half is SwiftUI's own
+    /// guarantee for the verbatim-reapplied modifier; a guest-OWNED watched value never reaches this
+    /// path — it's kept DEMOTED at the engine, proven in the cli suite.)
+    @MainActor
+    func testOnChangeEffectSlotAppliesRealOnChangeOnce() {
+        let model = _OnChangeWatched()
+        var applied = 0
+
+        // The effect-slot closure the thunk's `__patchEffectSlots()` supplies for an `.onChange`:
+        // it applies the developer's REAL `.onChange(of: self.X) { … }` over `content` (over `self`).
+        let onChangeEffect: (AnyView) -> AnyView = { content in
+            applied += 1
+            return AnyView(content.onChange(of: model.x) { _ in /* developer's native side-effect */ })
+        }
+
+        let tree = N.text("Body").with(.nativeEffectSlot("eff_onchange"))
+        let ctx = RenderContext(showOpaqueStubs: false)
+        ctx.effectSlots.set("eff_onchange", onChangeEffect)
+
+        // The renderer applies the effect closure (which wraps the real `.onChange`) to the subtree.
+        _ = render(tree, context: ctx)
+        XCTAssertEqual(applied, 1,
+            "the renderer applies the thunk's real `.onChange` effect closure to the lowered subtree exactly once")
+        // The SAME table the renderer reads returns the registered closure by id (no double-apply path).
+        XCTAssertNotNil(ctx.effectSlots.apply(for: "eff_onchange"),
+            "the renderer resolves the native `.onChange` effect closure by id")
+        _ = model
+    }
+
     // MARK: - helpers
 
     private func findEffectSlot(_ node: ViewNode) -> ViewNode? {
@@ -105,4 +144,9 @@ final class EffectSlotTests: XCTestCase {
         return nil
     }
 }
+
+// MARK: - onChange test support
+
+/// An observable stand-in for the native `self.X` source-of-truth the slotted `.onChange` watches.
+@MainActor private final class _OnChangeWatched: ObservableObject { @Published var x: Int = 0 }
 #endif
