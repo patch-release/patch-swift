@@ -57,14 +57,17 @@ final class RenderMemoizationTests: XCTestCase {
             idSets: PatchedBodyIDSets(opaque: [], token: [], row: [], action: [], effect: [], button: [], animationValueKeys: []))
     }
 
-    override func setUp() {
-        super.setUp()
-        PatchedBodyRenderCache.shared.reset()
-    }
+    // Each test resets the shared cache up-front. NOTE: we do NOT override `setUp()` —
+    // XCTestCase.setUp() is nonisolated, so a synchronous override can't touch the
+    // @MainActor `PatchedBodyRenderCache.shared`, and an `async` override trips Swift 6
+    // strict-concurrency ("sending main actor-isolated XCTestCase"). The class is
+    // @MainActor, so resetting at the top of each (MainActor-isolated) test method is
+    // the proven-clean pattern — mirrors RenderHotPathBenchmarkTests.
 
     // MARK: - (a) Unchanged input → HIT → SAME tree
 
     func testUnchangedInputIsHitAndSameTree() throws {
+        PatchedBodyRenderCache.shared.reset()
         let patch = try makePatch()
         let export = bodyExport(patch)
         let state = "" // guest defaults — deterministic
@@ -96,6 +99,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - (b) Changed input → MISS → DIFFERENT (fresh) tree
 
     func testChangedInputIsMissAndFreshTree() throws {
+        PatchedBodyRenderCache.shared.reset()
         let patch = try makePatch()
         let export = bodyExport(patch)
         let epoch = patch.moduleEpoch
@@ -130,6 +134,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - (c) moduleEpoch bump → invalidate → re-fetch (no cross-epoch stale tree)
 
     func testEpochBumpInvalidates() throws {
+        PatchedBodyRenderCache.shared.reset()
         let export = "view_body"
         let typeName = "SettingsView"
         let tree1 = ViewNode(.text("epoch-1"))
@@ -164,6 +169,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - (d) LRU bound holds — Nth+1 distinct input evicts the oldest
 
     func testLRUBoundEvictsOldest() throws {
+        PatchedBodyRenderCache.shared.reset()
         let export = "view_body"
         let typeName = "SettingsView"
         let cap = PatchedBodyRenderCache.capacityPerScope
@@ -196,6 +202,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - LRU recency: a HIT refreshes recency (keeps a hot input alive)
 
     func testLRURecencyOnHit() throws {
+        PatchedBodyRenderCache.shared.reset()
         let export = "view_body"
         let typeName = "SettingsView"
         let cap = PatchedBodyRenderCache.capacityPerScope
@@ -224,6 +231,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - Collision safety: the hash bucket compares the FULL string
 
     func testHashBucketComparesFullString() throws {
+        PatchedBodyRenderCache.shared.reset()
         // We can't easily force a real hashValue collision, but we can prove the lookup
         // is gated on the EXACT input string: two different inputs never alias, and the
         // wrong-input lookup never returns the other's tree even if they shared a bucket.
@@ -245,6 +253,7 @@ final class RenderMemoizationTests: XCTestCase {
     // MARK: - Scope isolation: different (typeName,export) never alias
 
     func testScopeIsolation() throws {
+        PatchedBodyRenderCache.shared.reset()
         let epoch: UInt64 = 1
         let input = "{\"x\":1}"
         PatchedBodyRenderCache.shared.store(typeName: "A", export: "view_body", input: input, epoch: epoch, payload: payload(tree: ViewNode(.text("A"))))
