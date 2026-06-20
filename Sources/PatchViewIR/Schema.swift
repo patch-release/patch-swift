@@ -146,7 +146,23 @@ public enum PatchViewIRSchema {
     // collapse the whole view on decode) DEMOTES it to native instead. An UNCOVERED slot id demotes
     // the whole view at runtime (mirrors the opaque-leaf / action-slot demote-safety) — never strips a
     // body whose effect it can't supply (which would silently re-show the OLD native view).
-    public static let version = 10
+    //
+    // v11 = FAITHFUL `.animation(_:value:)` RENDERING: the `Modifier.animation(_, valueKey:)` case
+    // already existed (since v2), but the renderer NO-OPPED it — a host applied the value change
+    // INSTANTLY (no animation) while natively it animates. So the engine MARKED an `.animation(value:)`
+    // view UNDISPATCHABLE → it demoted to native (BUG #62). The host now reconstitutes the real
+    // `Animation` (via `Renderer.animation(_:)`) AND watches the watched `@State`'s CURRENT scalar
+    // (resolved from the marshalled input JSON into an `AnyHashable`, plumbed via
+    // `RenderContext.animationValues`) as the `Equatable` trigger — a change to that value across
+    // renders fires the implicit animation, matching native. NO new wire case (the `.animation`
+    // Modifier is unchanged); the bump is a per-view RENDER-FIDELITY gate: a guest that USES
+    // `.animation(_:value:)` stamps the per-view manifest `minVersion` to 11 so an OLDER host (whose
+    // renderer would still NO-OP the animation → render the value change instantly, a SILENTLY
+    // degraded effect) DEMOTES the view to native (where the real implicit animation runs) instead.
+    // DEMOTE-SAFE at render time: an unresolvable trigger scalar degrades to a CONSTANT value (the
+    // curve still attaches; the view stays patched; it just never re-triggers) — never a wrong render
+    // or a crash. Purely additive: a v11 host decodes v1–v10 guests unchanged.
+    public static let version = 11
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

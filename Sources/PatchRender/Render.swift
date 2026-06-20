@@ -211,6 +211,16 @@ public struct RenderContext {
     /// that applies the real `.task`/`.onAppear`/gesture/etc. modifier to its subtree. Empty
     /// for a view with no native effect slots.
     public var effectSlots: EffectSlotTable
+    /// Host-supplied `.animation(_:value:)` TRIGGER VALUES, keyed by the watched
+    /// `@State`'s `valueKey` (the name SwiftUI watches for a change to fire the
+    /// implicit animation — e.g. `"refreshToast"`). `PatchedBodyHost` extracts each
+    /// key's CURRENT marshalled scalar from the guest input JSON (String/Int/Double/
+    /// Bool/nil) as an `AnyHashable` so the renderer can apply `v.animation(_, value:)`
+    /// with a real `Equatable` trigger — a change to the value across renders animates,
+    /// matching native behavior. A `valueKey` absent from this map (unresolvable scalar)
+    /// is demote-safe: the renderer applies the curve with a CONSTANT value (renders
+    /// correctly, just never re-triggers) rather than dropping the animation or crashing.
+    public var animationValues: [String: AnyHashable]
     /// Where interactive controls send their events (the host forwards to the
     /// guest `dispatch`). When nil, controls render but are inert (read-only).
     public var dispatcher: Dispatcher?
@@ -226,6 +236,7 @@ public struct RenderContext {
                 rowSlots: RowSlotTable = RowSlotTable(),
                 actionSlots: ActionSlotTable = ActionSlotTable(),
                 effectSlots: EffectSlotTable = EffectSlotTable(),
+                animationValues: [String: AnyHashable] = [:],
                 dispatcher: Dispatcher? = nil,
                 showOpaqueStubs: Bool = true,
                 geometryRebuild: GeometryRebuild? = nil) {
@@ -235,6 +246,7 @@ public struct RenderContext {
         self.rowSlots = rowSlots
         self.actionSlots = actionSlots
         self.effectSlots = effectSlots
+        self.animationValues = animationValues
         self.dispatcher = dispatcher
         self.showOpaqueStubs = showOpaqueStubs
         self.geometryRebuild = geometryRebuild
@@ -1417,14 +1429,20 @@ struct Renderer {
             return v
 
         // MARK: Animation
-        case .animation(let a, _):
-            // `.animation(_:value:)` — the value trigger is guest-owned; attaching a
-            // value-keyed animation needs the scalar bridge, so we apply the curve as
-            // a transaction-free animation is unavailable on a bare view. Degrade to
-            // no-op (the guest re-emit drives the visible change). Carrying it keeps
-            // the wire faithful + lets a future value-bridge wire it.
-            _ = a
-            return v
+        case .animation(let a, let valueKey):
+            // `.animation(_:value:)` — apply the curve FAITHFULLY, watching the
+            // guest-owned `valueKey`'s CURRENT marshalled scalar (an `AnyHashable`
+            // `PatchedBodyHost` extracted from the input JSON) as the `Equatable`
+            // trigger. SwiftUI animates the subtree when that value CHANGES across
+            // renders (the guest mutates the @State → re-marshal → new scalar →
+            // animation fires), matching native implicit-animation behavior.
+            //
+            // DEMOTE-SAFE: if the host couldn't resolve the scalar (key absent from
+            // `animationValues`), fall back to a CONSTANT trigger — the animation
+            // curve still attaches and the view renders correctly; it just never
+            // re-triggers (strictly better than dropping the animation or crashing).
+            let trigger: AnyHashable = context.animationValues[valueKey] ?? AnyHashable(0)
+            return AnyView(v.animation(animation(a), value: trigger))
         case .transition(let t):
             return AnyView(v.transition(transition(t)))
 
@@ -2575,6 +2593,61 @@ struct Renderer {
             return .asymmetric(insertion: transition(i), removal: transition(r))
         }
     }
+
+    /// Reconstitute a real SwiftUI `Animation` from the lowered `IRAnimation`.
+    /// A `nil` IRAnimation means `.animation(nil, value:)` — animation DISABLED for the
+    /// value, which is faithfully represented by SwiftUI's `nil` Animation. The curve
+    /// families map to the real statics; `.delay`/`.speed`/`.repeatCount`/`.autoreverses`
+    /// compose on top. Spring forms degrade gracefully on SDKs lacking the iOS-17
+    /// `.bouncy`/`.smooth`/`.snappy` presets (fall back to `.spring`/`.easeInOut`).
+    func animation(_ a: IRAnimation?) -> Animation? {
+        guard let a else { return nil }
+        var base: Animation
+        switch a.curve {
+        case "linear":
+            base = a.duration.map { .linear(duration: $0) } ?? .linear
+        case "easeIn":
+            base = a.duration.map { .easeIn(duration: $0) } ?? .easeIn
+        case "easeOut":
+            base = a.duration.map { .easeOut(duration: $0) } ?? .easeOut
+        case "easeInOut":
+            base = a.duration.map { .easeInOut(duration: $0) } ?? .easeInOut
+        case "spring", "interpolatingSpring":
+            // `.spring(response:dampingFraction:)` — both optional; SwiftUI fills defaults.
+            base = .spring(response: a.response ?? 0.55,
+                           dampingFraction: a.dampingFraction ?? 0.825,
+                           blendDuration: 0)
+        case "bouncy":
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                base = .bouncy(duration: a.duration ?? 0.5, extraBounce: 0)
+            } else {
+                base = .spring(response: a.response ?? 0.5, dampingFraction: a.dampingFraction ?? 0.7)
+            }
+        case "smooth":
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                base = .smooth(duration: a.duration ?? 0.5, extraBounce: 0)
+            } else {
+                base = .spring(response: a.response ?? 0.5, dampingFraction: a.dampingFraction ?? 1.0)
+            }
+        case "snappy":
+            if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
+                base = .snappy(duration: a.duration ?? 0.5, extraBounce: 0)
+            } else {
+                base = .spring(response: a.response ?? 0.4, dampingFraction: a.dampingFraction ?? 0.85)
+            }
+        default: // "default" + any unknown family → the system default curve.
+            base = .default
+        }
+        if let speed = a.speed { base = base.speed(speed) }
+        if let count = a.repeatCount {
+            base = base.repeatCount(count, autoreverses: a.autoreverses ?? true)
+        } else if let auto = a.autoreverses, auto {
+            base = base.repeatForever(autoreverses: true)
+        }
+        if let delay = a.delay { base = base.delay(delay) }
+        return base
+    }
+
     private func edge(_ e: String) -> Edge {
         switch e {
         case "top": return .top

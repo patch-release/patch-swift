@@ -847,6 +847,149 @@ enum PatchFlatJSON {
     }
 }
 
+// MARK: - Render-input memoization (P0 perf)
+
+/// The six pre-collected id-sets a render needs from the (WASM-derived) tree. Caching
+/// these alongside the tree lets a cache HIT skip the 6 `collect*IDs` full-tree walks as
+/// well as the WASM invoke+decode. They are a pure deterministic function of the tree
+/// (value types, `Sendable`), so reusing them on an identical-input hit is sound.
+struct PatchedBodyIDSets: Sendable {
+    let opaque: [String]
+    let token: [String]
+    let row: [String]
+    let action: [String]
+    let effect: [String]
+    let button: [String]
+    /// The watched `@State` names of every `.animation(_:value:)` modifier in the tree
+    /// (the `valueKey`s). The host resolves each key's CURRENT scalar from the input JSON
+    /// and hands the renderer an `AnyHashable` trigger so the value-keyed animation fires
+    /// on change. Unlike the slot/token id-sets this is NOT a demote gate: a key whose
+    /// scalar can't be resolved degrades to a constant trigger in the renderer (the curve
+    /// still attaches; the view stays patched), so an `.animation`-using view never demotes
+    /// for an unresolved value.
+    let animationValueKeys: [String]
+}
+
+/// The WASM-DERIVED payload memoized per render input. Holds ONLY data the guest body
+/// produced as a deterministic function of its input string — the decoded `ViewNode`
+/// tree, the parameterized-slot `slotArgs`, and the pre-collected id-sets. It NEVER holds
+/// the per-instance native closures (slots/tokens/rowSlots/actionSlots/effectSlots), which
+/// come from the LIVE instance each render and must not be cached (correctness invariant #2).
+struct PatchedBodyCacheEntry: Sendable {
+    let tree: ViewNode
+    let slotArgs: [String: [String]]
+    let idSets: PatchedBodyIDSets
+}
+
+/// A MainActor-isolated, bounded, epoch-scoped memoization cache for the render hot path.
+///
+/// SwiftUI re-evaluates `body` constantly with byte-identical state, paying the full
+/// WASM-invoke + JSON-decode + 6 tree-walk cost each time even though the guest body is a
+/// DETERMINISTIC function of its input. This cache keys WASM-derived output by the EXACT
+/// final input string (plus typeName/export/moduleEpoch) so a steady-state render reuses
+/// the decoded tree instead of recomputing it.
+///
+/// Correctness:
+///  * Keyed by the FULL input string (not a lossy hash) — looked up via a strong hash
+///    bucket, then a byte-exact `inputString` compare on the candidate, so a hash collision
+///    can NEVER return the wrong tree (invariant #1).
+///  * `moduleEpoch` is part of the key; entries from any other epoch are dropped on access
+///    (a hot-swap changes the WASM, so a stale-epoch tree must never be reused — invariant #1/#3).
+///  * Stores ONLY WASM-derived data (invariant #2).
+///  * Bounded per (typeName, export) via a tiny LRU (steady state has ~1 distinct input),
+///    so memory can't grow unbounded (invariant #3).
+///  * MainActor-isolated — `PatchedBodyHost.body` runs on the MainActor, so all access is
+///    serialized with no lock (invariant #4).
+@MainActor
+final class PatchedBodyRenderCache {
+    static let shared = PatchedBodyRenderCache()
+
+    /// Per (typeName,export) LRU capacity. Steady state holds ~1 distinct input; 4 absorbs
+    /// a small amount of input churn (e.g. a value oscillating between a few states) without
+    /// letting any one view's cache grow unbounded.
+    static let capacityPerScope = 4
+
+    /// A bucket of cached entries for one (typeName, export) scope. `order` is the LRU
+    /// recency list (front = most recent). Each entry remembers the EXACT input string +
+    /// the epoch it was produced under for a collision-proof, epoch-exact match on lookup.
+    private struct Stored {
+        var inputString: String
+        var epoch: UInt64
+        var payload: PatchedBodyCacheEntry
+    }
+    private struct Bucket {
+        var entries: [Int: [Stored]] = [:]   // strong-hash bucket → candidates (collision-safe)
+        var order: [String] = []             // LRU recency by inputString (front = MRU)
+    }
+
+    private var scopes: [String: Bucket] = [:]
+
+    private func scopeKey(typeName: String, export: String) -> String { typeName + "\u{1}" + export }
+
+    /// Look up a cached payload for (typeName, export, input, epoch). Returns nil on a miss.
+    /// A hit also refreshes LRU recency. Entries from a DIFFERENT epoch are never returned
+    /// (and are dropped lazily on the next store for that scope).
+    func lookup(typeName: String, export: String, input: String, epoch: UInt64) -> PatchedBodyCacheEntry? {
+        let sk = scopeKey(typeName: typeName, export: export)
+        guard var bucket = scopes[sk] else { return nil }
+        let h = input.hashValue
+        guard let candidates = bucket.entries[h] else { return nil }
+        // Byte-exact + epoch-exact match (collision-proof; cross-epoch never reused).
+        for cand in candidates where cand.epoch == epoch && cand.inputString == input {
+            // Refresh LRU recency.
+            if let idx = bucket.order.firstIndex(of: input) { bucket.order.remove(at: idx) }
+            bucket.order.insert(input, at: 0)
+            scopes[sk] = bucket
+            return cand.payload
+        }
+        return nil
+    }
+
+    /// Store a WASM-derived payload for (typeName, export, input, epoch). Drops any entries
+    /// from a stale epoch in this scope, then enforces the per-scope LRU bound.
+    func store(typeName: String, export: String, input: String, epoch: UInt64,
+               payload: PatchedBodyCacheEntry) {
+        let sk = scopeKey(typeName: typeName, export: export)
+        var bucket = scopes[sk] ?? Bucket()
+
+        // Epoch invalidation: a hot-swap bumps the epoch, so any entry from a different
+        // epoch is stale WASM output — drop the whole scope's contents before storing.
+        if let firstEpoch = bucket.entries.values.first?.first?.epoch, firstEpoch != epoch {
+            bucket = Bucket()
+        }
+
+        let h = input.hashValue
+        var candidates = bucket.entries[h] ?? []
+        // Replace an existing same-input candidate (same epoch by construction here).
+        candidates.removeAll { $0.inputString == input }
+        candidates.append(Stored(inputString: input, epoch: epoch, payload: payload))
+        bucket.entries[h] = candidates
+
+        // Recency: move this input to the front.
+        if let idx = bucket.order.firstIndex(of: input) { bucket.order.remove(at: idx) }
+        bucket.order.insert(input, at: 0)
+
+        // Enforce the LRU bound: evict least-recently-used inputs beyond capacity.
+        while bucket.order.count > Self.capacityPerScope {
+            let victim = bucket.order.removeLast()
+            let vh = victim.hashValue
+            if var c = bucket.entries[vh] {
+                c.removeAll { $0.inputString == victim }
+                if c.isEmpty { bucket.entries[vh] = nil } else { bucket.entries[vh] = c }
+            }
+        }
+        scopes[sk] = bucket
+    }
+
+    /// Test-only: current number of distinct cached inputs for a scope (== `order.count`).
+    func entryCount(typeName: String, export: String) -> Int {
+        scopes[scopeKey(typeName: typeName, export: export)]?.order.count ?? 0
+    }
+
+    /// Test-only: drop everything (so a test starts from a clean cache).
+    func reset() { scopes.removeAll() }
+}
+
 // MARK: - The patched-body host view
 
 /// A mutable holder for the last successfully-rendered tree (bug #50). A class (not
@@ -973,20 +1116,51 @@ public struct PatchedBodyHost: View {
         // is rendered via the thunk's factory applied to THESE values, so an OTA patch
         // that only edited a string in a slotted custom view shows the new string.
         let slotArgs: [String: [String]]
-        do {
-            let emission = try Patch.shared.viewBodyEmission(state: merged, export: entry.export)
-            tree = emission.root
-            slotArgs = emission.slotArgs ?? [:]
-        } catch {
-            // Demote OUTSIDE this view-update pass; the next thunk evaluation takes the
-            // native branch (iOS 17+ via the Observation bump). This pass shows the last
-            // good tree if any (so the view doesn't go BLANK on iOS 16 — bug #50).
-            let name = typeName
-            let ep = renderEpoch
-            Task { @MainActor in
-                PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep)
+        // The six pre-collected id-sets (opaque/token/row/action/effect/button). Computed
+        // once per distinct input and reused on a cache hit, skipping the 6 full-tree walks.
+        let idSets: PatchedBodyIDSets
+        // INPUT-HASH MEMOIZATION (P0 perf): the guest body is a DETERMINISTIC function of
+        // its input string, so a byte-identical `merged` (the common steady-state case in
+        // SwiftUI — body re-evaluates constantly with unchanged state) yields a byte-
+        // identical tree. Reuse the cached WASM-derived {tree, slotArgs, idSets} instead of
+        // re-running the WASM invoke + JSON decode + 6 tree walks. Keyed by the EXACT final
+        // input string (+ typeName/export/moduleEpoch); a hot-swap bumps the epoch and
+        // invalidates. ONLY WASM-derived data is cached — the live native slot closures are
+        // filled below from `self`, exactly as on a miss.
+        if let cached = PatchedBodyRenderCache.shared.lookup(
+            typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch) {
+            tree = cached.tree
+            slotArgs = cached.slotArgs
+            idSets = cached.idSets
+        } else {
+            do {
+                let emission = try Patch.shared.viewBodyEmission(state: merged, export: entry.export)
+                tree = emission.root
+                slotArgs = emission.slotArgs ?? [:]
+            } catch {
+                // Demote OUTSIDE this view-update pass; the next thunk evaluation takes the
+                // native branch (iOS 17+ via the Observation bump). This pass shows the last
+                // good tree if any (so the view doesn't go BLANK on iOS 16 — bug #50).
+                let name = typeName
+                let ep = renderEpoch
+                Task { @MainActor in
+                    PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep)
+                }
+                return demoteFallback()
             }
-            return demoteFallback()
+            // Collect the six id-sets ONCE for this fresh tree, then cache them with the tree
+            // so an identical-input render skips both the WASM stage and these walks.
+            idSets = PatchedBodyIDSets(
+                opaque: Self.collectOpaqueIDs(tree),
+                token: Self.collectTokenIDs(tree),
+                row: Self.collectRowSlotIDs(tree),
+                action: Self.collectActionSlotIDs(tree),
+                effect: Self.collectEffectSlotIDs(tree),
+                button: Self.collectButtonActionIDs(tree),
+                animationValueKeys: Self.collectAnimationValueKeys(tree))
+            PatchedBodyRenderCache.shared.store(
+                typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch,
+                payload: PatchedBodyCacheEntry(tree: tree, slotArgs: slotArgs, idSets: idSets))
         }
 
         // MIXED-VIEW SAFETY NET: every opaque leaf in the tree must have a native
@@ -995,7 +1169,7 @@ public struct PatchedBodyHost: View {
         // it — DEMOTE the whole view to native rather than show a hole. (A patch
         // that only changes the lowered structure keeps the same leaf ids, so this
         // never trips for text/modifier/layout/rearrange edits.)
-        let neededIDs = Self.collectOpaqueIDs(tree)
+        let neededIDs = idSets.opaque
         let uncovered = neededIDs.filter { slots[$0] == nil }
         if !uncovered.isEmpty {
             let name = typeName
@@ -1011,7 +1185,7 @@ public struct PatchedBodyHost: View {
         // view rather than render a wrong/placeholder color. A patch that only re-arranges
         // the lowered structure keeps the same token ids, so this never trips for ordinary
         // text/layout/color-reselect edits among the build's enumerated tokens.
-        let neededTokenIDs = Self.collectTokenIDs(tree)
+        let neededTokenIDs = idSets.token
         let uncoveredTokens = neededTokenIDs.filter { tokens[$0] == nil }
         if !uncoveredTokens.isEmpty {
             let name = typeName
@@ -1026,7 +1200,7 @@ public struct PatchedBodyHost: View {
         // changed native row code that isn't compiled in), we can't render the rows —
         // DEMOTE the whole view rather than show a hole. A patch that only re-arranges the
         // lowered structure keeps the same slot ids, so this never trips for ordinary edits.
-        let neededRowIDs = Self.collectRowSlotIDs(tree)
+        let neededRowIDs = idSets.row
         let uncoveredRows = neededRowIDs.filter { rowSlots[$0] == nil }
         if !uncoveredRows.isEmpty {
             let name = typeName
@@ -1042,7 +1216,7 @@ public struct PatchedBodyHost: View {
         // a Button that does NOTHING on tap (the worst outcome: the OLD native view silently runs).
         // A patch that only re-arranges the lowered structure / edits a button LABEL keeps the same
         // slot ids, so this never trips for ordinary text/layout edits.
-        let neededActionIDs = Self.collectActionSlotIDs(tree)
+        let neededActionIDs = idSets.action
         let uncoveredActions = neededActionIDs.filter { actionSlots[$0] == nil }
         if !uncoveredActions.isEmpty {
             let name = typeName
@@ -1059,7 +1233,7 @@ public struct PatchedBodyHost: View {
         // would silently re-show the OLD native view, the dev's edit lost — the WORST outcome). A
         // patch that only re-arranges the lowered structure / edits text keeps the same slot ids,
         // so this never trips for ordinary edits.
-        let neededEffectIDs = Self.collectEffectSlotIDs(tree)
+        let neededEffectIDs = idSets.effect
         let uncoveredEffects = neededEffectIDs.filter { effectSlots[$0] == nil }
         if !uncoveredEffects.isEmpty {
             let name = typeName
@@ -1099,6 +1273,20 @@ public struct PatchedBodyHost: View {
         // applied to the modified subtree.
         for id in neededEffectIDs {
             if let applyEffect = effectSlots[id] { context.effectSlots.set(id, applyEffect) }
+        }
+        // Fill the renderer's `.animation(_:value:)` trigger map: for every animation
+        // valueKey in the tree, resolve its CURRENT scalar from the marshalled input JSON
+        // (the SAME `merged` blob the @State was marshalled into) as an `AnyHashable`, so a
+        // change to that value across renders fires the implicit animation (native behavior).
+        // NOT a demote gate — an unresolvable key is simply absent (the renderer degrades to
+        // a constant trigger, keeping the view patched). Parse `merged` once only if needed.
+        let animKeys = idSets.animationValueKeys
+        if !animKeys.isEmpty, let mergedObj = PatchFlatJSON.parse(merged) {
+            for key in animKeys {
+                if let v = Self.animationTriggerValue(mergedObj[key]) {
+                    context.animationValues[key] = v
+                }
+            }
         }
         // GeometryReader (C): wire a rebuild closure so a `geometryReader` node re-
         // evaluates its lowered child body against the LIVE proxy. On each layout the
@@ -1190,7 +1378,7 @@ public struct PatchedBodyHost: View {
             context.dispatcher = dispatcher
             // Lowered Buttons carry actionIDs with engine-emitted UPDATE rules
             // keyed by the SAME id — wire each to a guest dispatch event.
-            for actionID in Self.collectButtonActionIDs(tree) {
+            for actionID in idSets.button {
                 context.actions.set(actionID) {
                     dispatcher.send(EventID(actionID), .none)
                 }
@@ -1441,6 +1629,23 @@ public struct PatchedBodyHost: View {
         return out
     }
 
+    /// Every `.animation(_:value:)` `valueKey` in the tree — the watched `@State` names
+    /// the renderer needs a CURRENT scalar for (to drive the value-keyed implicit
+    /// animation). Walks node modifiers + modifier content + child nodes. NOT a demote
+    /// gate: an unresolved key degrades to a constant trigger in the renderer.
+    nonisolated static func collectAnimationValueKeys(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: ViewNode) {
+            for m in n.modifiers {
+                if case .animation(_, let valueKey) = m, !valueKey.isEmpty { out.append(valueKey) }
+                for child in m.contentNodes { walk(child) }
+            }
+            for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
     /// Every DESIGN-SYSTEM TOKEN id in the tree (`ColorRef.hostToken(id)` colors and
     /// `Modifier.fontToken(id)` fonts, including a token nested in an `IRShapeStyle.color`
     /// of a `.fill`/`.background(style)`/`.foregroundStyle`/`.stroke`/etc.). The thunk's
@@ -1484,6 +1689,28 @@ public struct PatchedBodyHost: View {
                 if let found = geometryChildren(in: child, id: id) { return found }
             }
         }
+        return nil
+    }
+
+    /// Convert a `JSONSerialization`-decoded scalar (from the marshalled input JSON) into a
+    /// stable `AnyHashable` the renderer uses as a `.animation(_:value:)` `Equatable` trigger.
+    /// Handles String/Bool/Int/Double (the marshalled @State scalar shapes) + null; a
+    /// non-scalar (object/array @State, which can't be an `.animation` value trigger) or a
+    /// missing key returns nil → the renderer degrades to a constant trigger (demote-safe).
+    /// Bool is disambiguated BEFORE the numeric casts (an NSNumber Bool would otherwise match),
+    /// and an INTEGER value is carried as `Int64` (not a lossy Double) so a counter-style
+    /// trigger compares exactly across renders.
+    nonisolated static func animationTriggerValue(_ value: Any?) -> AnyHashable? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let n = value as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return AnyHashable(n.boolValue) }
+            if !CFNumberIsFloatType(n) { return AnyHashable(n.int64Value) }
+            return AnyHashable(n.doubleValue)
+        }
+        if let s = value as? String { return AnyHashable(s) }
+        if let b = value as? Bool { return AnyHashable(b) }
+        if let i = value as? Int { return AnyHashable(Int64(i)) }
+        if let d = value as? Double { return AnyHashable(d) }
         return nil
     }
 
