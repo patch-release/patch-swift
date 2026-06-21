@@ -360,8 +360,9 @@ struct Renderer {
         // swipe-to-delete that the no-op closure silently swallowed. Build the base
         // ForEach once and attach exactly the affordances that exist, so a move-only list
         // shows ONLY the reorder handle and a delete-only list ONLY swipe-to-delete.
-        let base = { ForEach(Array(nodes.enumerated()), id: \.offset) { _, child in
-            self.render(child)
+        // Use nodes.indices directly — avoids an Array(enumerated()) allocation; identical position-keying.
+        let base = { ForEach(nodes.indices, id: \.self) { i in
+            self.render(nodes[i])
         } }
         let d = context.dispatcher
         let deleteAction: (IndexSet) -> Void = { indexSet in
@@ -385,10 +386,11 @@ struct Renderer {
     }
 
     private func renderChildren(_ nodes: [ViewNode]) -> AnyView {
-        // ForEach over indices keeps a stable identity for the unrolled list.
+        // ForEach over indices — avoids an Array(enumerated()) allocation on every call;
+        // identical position-keying to the previous \.offset form.
         AnyView(
-            ForEach(Array(nodes.enumerated()), id: \.offset) { _, child in
-                self.render(child)
+            ForEach(nodes.indices, id: \.self) { i in
+                self.render(nodes[i])
             }
         )
     }
@@ -1033,9 +1035,61 @@ struct Renderer {
 
     // MARK: Modifier replay
 
+    /// A `ViewModifier` that applies a contiguous batch of PURE DECLARATIVE modifiers in a single
+    /// `body(content:)` call — one outer `AnyView` per batch instead of N nested wrappers.
+    ///
+    /// IMPORTANT: only use for modifiers that are safe to defer to SwiftUI's layout pass.
+    /// Effect modifiers whose closures must be called EAGERLY (during `render()`) — specifically
+    /// `.nativeEffectSlot` — must be applied outside this stack via the individual `apply()` path.
+    @MainActor
+    private struct PatchModifierStack: ViewModifier {
+        let mods: [Modifier]
+        let renderer: Renderer
+
+        @MainActor func body(content: Content) -> some View {
+            var v: AnyView = AnyView(content)
+            for m in mods { v = renderer.apply(m, to: v) }
+            return v
+        }
+    }
+
+    /// Returns true for modifiers whose application closures are called EAGERLY (during `render()`,
+    /// not deferred to SwiftUI's layout pass). These must remain outside `PatchModifierStack` so that
+    /// their closure invocations happen synchronously when `applyModifiers` is called.
+    private func requiresEagerApplication(_ m: Modifier) -> Bool {
+        if case .nativeEffectSlot = m { return true }
+        return false
+    }
+
+    /// Apply `mods` to `view`, reducing intermediate `AnyView` allocations by batching consecutive
+    /// pure-declarative modifiers into a single `PatchModifierStack`. Modifiers that require eager
+    /// closure evaluation (`.nativeEffectSlot`) are applied individually outside the stack.
     private func applyModifiers(_ mods: [Modifier], to view: AnyView) -> AnyView {
+        guard !mods.isEmpty else { return view }
         var v = view
-        for m in mods { v = apply(m, to: v) }
+        var batch: [Modifier] = []
+        batch.reserveCapacity(mods.count)
+
+        func flushBatch() {
+            guard !batch.isEmpty else { return }
+            if batch.count == 1 {
+                v = apply(batch[0], to: v)
+            } else {
+                v = AnyView(v.modifier(PatchModifierStack(mods: batch, renderer: self)))
+            }
+            batch.removeAll(keepingCapacity: true)
+        }
+
+        for m in mods {
+            if requiresEagerApplication(m) {
+                // Flush the pending styling batch, then apply this modifier eagerly.
+                flushBatch()
+                v = apply(m, to: v)
+            } else {
+                batch.append(m)
+            }
+        }
+        flushBatch()
         return v
     }
 
