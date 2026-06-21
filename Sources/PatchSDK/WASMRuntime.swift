@@ -118,6 +118,18 @@ public final class WASMRuntime {
     private var _functionMissCache: Set<String> = []     // names PROVEN absent (negative cache)
     private var _memoryHandle: Memory??                   // outer nil = unresolved, inner nil = absent
 
+    // MARK: - Cached patch_free probe (PERF R1)
+    //
+    // `free()` previously called `hasFunction("patch_free")` on every invocation.
+    // `hasFunction` acquires `handleCacheLock` (via `cachedFunction`), so each `free()`
+    // call did at least one lock acquire just to answer this question — even though the
+    // export set is FIXED for the lifetime of the instance (a hot-swap replaces the
+    // whole `WASMRuntime`). Resolve the probe ONCE after `_initialize` and store the
+    // Bool; subsequent `free()` calls read an uncontended Bool with no lock.
+    //
+    // `private(set)` so tests can read the cached value.
+    private(set) var _hasPatchFree: Bool = false
+
     // MARK: - Lifecycle
 
     /// Parse, instantiate, and WASI-initialize a module from raw bytes.
@@ -180,6 +192,11 @@ public final class WASMRuntime {
         } catch {
             throw PatchRuntimeError.trap("_initialize failed: \(error)")
         }
+
+        // PERF R1: resolve patch_free export membership ONCE. The Instance export set
+        // is immutable after instantiation; caching as a Bool means free() never
+        // acquires handleCacheLock to answer this question on the hot path.
+        self._hasPatchFree = instance.exports[function: "patch_free"] != nil
     }
 
     /// Convenience: load from a file URL.
@@ -304,8 +321,11 @@ public final class WASMRuntime {
 
     /// Release a buffer previously returned by `allocate` (best-effort; a no-op
     /// if the module exports no `patch_free`).
+    ///
+    /// PERF R1: uses the once-resolved `_hasPatchFree` Bool instead of calling
+    /// `hasFunction("patch_free")` (which acquires `handleCacheLock`) on every call.
     public func free(_ ptr: UInt32) {
-        guard ptr != 0, hasFunction("patch_free") else { return }
+        guard ptr != 0, _hasPatchFree else { return }
         _ = try? invoke("patch_free", [.i32(ptr)])
     }
 
@@ -355,5 +375,44 @@ public final class WASMRuntime {
             throw error
         }
         return (ptr, UInt32(bytes.count))
+    }
+
+    /// Allocate guest memory and write the UTF-8 encoding of `utf8` directly from the
+    /// `String.UTF8View` into the guest — no intermediate `[UInt8]` array allocation.
+    ///
+    /// PERF R2: callers that already hold a `String` (e.g. `viewBodyEmission`) previously
+    /// constructed `[UInt8](state.utf8)` (heap allocation + full copy) before passing to
+    /// `writeBuffer(_:)`. This overload writes the same bytes directly from the lazy UTF-8
+    /// view using `withContiguousStorageIfAvailable` (zero-copy on the common ASCII/NFC
+    /// small-String fast path) falling back to a single `copyBytes` loop. Output is
+    /// byte-identical to the `[UInt8]` path — the same UTF-8 encoding, same length.
+    @discardableResult
+    public func writeBuffer(utf8 view: String.UTF8View) throws -> (ptr: UInt32, len: UInt32) {
+        let byteCount = view.count
+        if byteCount == 0 { return (0, 0) }
+        let ptr = try allocate(byteCount)
+        do {
+            let mem = try memory()
+            let end = Int(ptr) + byteCount
+            guard Int(ptr) >= 0, end <= mem.data.count else {
+                throw PatchRuntimeError.memoryOutOfBounds(ptr: ptr, len: UInt32(byteCount))
+            }
+            mem.withUnsafeMutableBufferPointer(offset: UInt(ptr), count: byteCount) { raw in
+                // Use contiguous-storage fast path when available (avoids per-byte dispatch).
+                // Falls back to a copyBytes loop for non-contiguous views (exotic encodings).
+                let written = view.withContiguousStorageIfAvailable { src in
+                    raw.copyBytes(from: UnsafeBufferPointer(start: src.baseAddress, count: src.count))
+                }
+                if written == nil {
+                    // Fallback: iterate the UTF-8 code units one by one.
+                    var i = 0
+                    for byte in view { raw[i] = byte; i += 1 }
+                }
+            }
+        } catch {
+            free(ptr)
+            throw error
+        }
+        return (ptr, UInt32(byteCount))
     }
 }

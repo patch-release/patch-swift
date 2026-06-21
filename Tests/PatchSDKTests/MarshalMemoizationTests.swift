@@ -313,6 +313,69 @@ final class MarshalMemoizationTests: XCTestCase {
                        "marshal cache must be bounded to capacityPerType")
     }
 
+    // MARK: - B3-R2: array grow/shrink triggers re-marshal (count pre-check)
+
+    /// Array GROW (append): count changes from N to N+1 → must re-marshal (no stale).
+    func testArrayGrowTriggersRemarshal() {
+        PatchMarshalCache.shared.reset()
+        let base = RichInstance(rows: (0..<3).map { Row(id: $0, title: "Row \($0)", enabled: true) })
+        let grown = RichInstance(rows: (0..<4).map { Row(id: $0, title: "Row \($0)", enabled: true) })
+        // Warm the cache with `base`.
+        let jBase = PatchInstanceInputs.extract(from: base, typeName: "Rich").json
+        // Extract grown — count differs → must re-marshal.
+        let jGrown = PatchInstanceInputs.extract(from: grown, typeName: "Rich").json
+        XCTAssertNotEqual(jBase, jGrown, "array grow must produce different json (no stale)")
+        XCTAssertEqual(jGrown, PatchInstanceInputs.extract(from: grown).json,
+                       "grown json must equal a fresh marshal")
+        XCTAssertTrue(jGrown.contains("Row 3") || jGrown.contains("\"id\":3"),
+                      "the new row must appear in the json: \(jGrown)")
+    }
+
+    /// Array SHRINK (remove): count changes from N to N-1 → must re-marshal (no stale).
+    func testArrayShrinkTriggersRemarshal() {
+        PatchMarshalCache.shared.reset()
+        let big = RichInstance(rows: (0..<10).map { Row(id: $0, title: "Row \($0)", enabled: true) })
+        let small = RichInstance(rows: (0..<2).map { Row(id: $0, title: "Row \($0)", enabled: true) })
+        // Warm with big.
+        let jBig = PatchInstanceInputs.extract(from: big, typeName: "Rich").json
+        // Shrink → must re-marshal.
+        let jSmall = PatchInstanceInputs.extract(from: small, typeName: "Rich").json
+        XCTAssertNotEqual(jBig, jSmall, "array shrink must produce different json (no stale)")
+        XCTAssertEqual(jSmall, PatchInstanceInputs.extract(from: small).json,
+                       "shrunk json must equal a fresh marshal")
+    }
+
+    /// Array becomes EMPTY → must re-marshal.
+    func testArrayToEmptyTriggersRemarshal() {
+        PatchMarshalCache.shared.reset()
+        let full = RichInstance(rows: [Row(id: 0, title: "hi", enabled: true)])
+        let empty = RichInstance(rows: [])
+        let jFull = PatchInstanceInputs.extract(from: full, typeName: "Rich").json
+        let jEmpty = PatchInstanceInputs.extract(from: empty, typeName: "Rich").json
+        XCTAssertNotEqual(jFull, jEmpty, "array→empty must produce different json")
+        XCTAssertEqual(jEmpty, PatchInstanceInputs.extract(from: empty).json,
+                       "empty-array json must equal a fresh marshal")
+        // Sanity: count-stable same-content still hits.
+        let jEmpty2 = PatchInstanceInputs.extract(from: RichInstance(rows: []), typeName: "Rich").json
+        XCTAssertEqual(jEmpty, jEmpty2, "same empty state must produce identical json (cache HIT)")
+    }
+
+    /// After a grow, returning to the original size with same content should HIT the cache
+    /// (the count matches again and the fingerprint matches the original entry).
+    func testArrayGrowThenShrinkBackHits() {
+        PatchMarshalCache.shared.reset()
+        let base = RichInstance(rows: [Row(id: 0, title: "A", enabled: true)])
+        let jBase = PatchInstanceInputs.extract(from: base, typeName: "Rich").json
+        // Grow.
+        let grown = RichInstance(rows: [Row(id: 0, title: "A", enabled: true), Row(id: 1, title: "B", enabled: false)])
+        let jGrown = PatchInstanceInputs.extract(from: grown, typeName: "Rich").json
+        XCTAssertNotEqual(jBase, jGrown)
+        // Shrink back to same count+content as `base` → should produce same json as base (HIT).
+        let back = RichInstance(rows: [Row(id: 0, title: "A", enabled: true)])
+        let jBack = PatchInstanceInputs.extract(from: back, typeName: "Rich").json
+        XCTAssertEqual(jBack, jBase, "shrinking back to original state must produce the same json")
+    }
+
     // MARK: - Un-fingerprintable instance still marshals correctly (always re-encodes)
 
     // A value type whose Mirror has NO recognizable scalar/structured representation for one

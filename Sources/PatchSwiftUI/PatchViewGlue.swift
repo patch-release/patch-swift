@@ -38,6 +38,31 @@ public enum PatchViewError: Error, CustomStringConvertible {
 }
 
 extension Patch {
+    // PERF R2: bypass the intermediate `[UInt8](state.utf8)` allocation in the
+    // view-body hot path by writing String.UTF8View directly into guest memory.
+    // This mirrors `callPacked(_:_:)` exactly but uses `writeBuffer(utf8:)`
+    // instead of `writeBuffer(_:)` for the input — byte-identical output.
+    private func callPackedUTF8(_ function: String, utf8 state: String) throws -> [UInt8] {
+        let utf8View = state.utf8
+        return try withRuntime(forFunction: function) { runtime in
+            do {
+                let (inPtr, inLen) = try runtime.writeBuffer(utf8: utf8View)
+                defer { if inPtr != 0 { runtime.free(inPtr) } }
+                let results = try runtime.invoke(function, [.i32(inPtr), .i32(inLen)])
+                guard let first = results.first, case .i64(let packed) = first else {
+                    throw PatchRuntimeError.unexpectedResults(
+                        function: function, got: results.count, expected: "1 i64 (packed ptr,len)")
+                }
+                let outPtr = UInt32(truncatingIfNeeded: packed >> 32)
+                let outLen = UInt32(truncatingIfNeeded: packed & 0xFFFF_FFFF)
+                defer { runtime.free(outPtr) }
+                return try runtime.read(ptr: outPtr, len: outLen)
+            } catch let e as PatchRuntimeError {
+                throw PatchError.runtime(e)
+            }
+        }
+    }
+
     /// Decode + schema-check a `BodyEmission` returned by an export.
     private func decodeEmission(_ bytes: [UInt8]) throws -> BodyEmission {
         let emission: BodyEmission
@@ -71,9 +96,11 @@ extension Patch {
     /// the CURRENT (possibly OTA-edited) literal values. `state` is the guest's
     /// opaque state JSON (empty ⇒ guest defaults).
     public func viewBodyEmission(state: String = "", export: String = "view_body") throws -> BodyEmission {
-        let inBytes: [UInt8] = state.isEmpty ? [] : [UInt8](state.utf8)
+        // PERF R2: use callPackedUTF8 to write String.UTF8View directly into guest
+        // memory, skipping the [UInt8](state.utf8) intermediate allocation.
+        // Empty state → zero-length input (writeBuffer(utf8:) returns (0,0) for empty).
         let outBytes: [UInt8]
-        do { outBytes = try callPacked(export, inBytes) }
+        do { outBytes = try callPackedUTF8(export, utf8: state) }
         catch let e as PatchError { throw PatchViewError.runtime(e) }
         return try decodeEmission(outBytes)
     }

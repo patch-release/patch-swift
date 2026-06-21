@@ -439,6 +439,10 @@ public final class Patch: @unchecked Sendable {
         // Push the overlay to the process-wide redirection AFTER releasing the lock
         // (installing the swizzles touches the ObjC runtime; keep it off the lock).
         ResourceOverlayRedirect.shared.setActiveOverlay(built.overlay)
+        // W5a/W5b: cache the manifest + pre-warm view-body export handles before the
+        // next SwiftUI body eval, so it pays neither the manifest WASM call nor the
+        // first per-export handle resolution.
+        prewarmViewBodyExports()
         notifyModuleSetChanged(epoch)
     }
 
@@ -596,7 +600,63 @@ public final class Patch: @unchecked Sendable {
                 return bumpModuleEpochLocked()
             }
         }
+        // W5a/W5b: pre-warm the new module's export handles + cache its manifest.
+        prewarmViewBodyExports()
         notifyModuleSetChanged(epoch)
+    }
+
+    // MARK: - Cold-start pre-warm (W5a/W5b)
+    //
+    // After a module activates, pre-warm two things: W5b caches the
+    // `patch_view_manifest` bytes (so the first SwiftUI body eval's registry sync
+    // reads the cache instead of making a synchronous WASM call), and W5a invokes
+    // every `view_body__*` export once with `{}` (discarded) so WasmKit memoizes the
+    // export-handle lookup before the first real body eval pays it. Pre-warm failures
+    // are silently ignored so an unrecognized module shape never crashes launch.
+
+    /// W5b — cached `patch_view_manifest` bytes from the most recently activated
+    /// module (nil when none). Read via `cachedManifestBytes()`; cleared on every
+    /// module-set change. Guarded by `lock`.
+    private var _cachedManifestBytes: [UInt8]?
+
+    /// Read the cached manifest bytes (W5b); nil when not loaded / no module active.
+    /// Used by `PatchViewPatchRegistry.loadManifestEntries` to avoid a synchronous
+    /// WASM call on the first SwiftUI body eval.
+    public func cachedManifestBytes() -> [UInt8]? {
+        lock.read { _cachedManifestBytes }
+    }
+
+    /// Minimal Decodable mirror of the view manifest used only by the pre-warm path
+    /// (avoids importing PatchSwiftUI). Kept in sync by the split-repo resync step.
+    private struct _ManifestForPrewarm: Decodable {
+        struct Entry: Decodable {
+            let export: String
+            let thunkSafe: Bool
+        }
+        let views: [Entry]
+    }
+
+    private static let _viewManifestExportName = "patch_view_manifest"
+
+    /// W5a + W5b: cache the manifest + pre-warm each `view_body__*` export handle.
+    /// Errors/traps from pre-warm invocations are silently discarded.
+    private func prewarmViewBodyExports() {
+        let manifestBytes: [UInt8]?
+        if hasFunction(Self._viewManifestExportName),
+           let bytes = try? callPacked(Self._viewManifestExportName, []) {
+            manifestBytes = bytes
+        } else {
+            manifestBytes = nil
+        }
+        lock.write { _cachedManifestBytes = manifestBytes }
+
+        guard let mb = manifestBytes,
+              let manifest = try? JSONDecoder().decode(_ManifestForPrewarm.self,
+                                                       from: Data(mb)) else { return }
+        let emptyInput = [UInt8]("{}".utf8)
+        for entry in manifest.views where entry.thunkSafe {
+            _ = try? callPacked(entry.export, emptyInput)
+        }
     }
 
     /// Drop the active module set (e.g. on rollback).
@@ -609,6 +669,9 @@ public final class Patch: @unchecked Sendable {
             // PHASE 1b: clear the resource overlay too, so the named-lookup
             // redirection falls all the way through to the bundle (native behavior).
             self._activeOverlay = nil
+            // W5b: clear the manifest cache so a subsequent activation's registry
+            // sync never reads stale bytes from the previous epoch.
+            self._cachedManifestBytes = nil
             return bumpModuleEpochLocked()
         }
         ResourceOverlayRedirect.shared.setActiveOverlay(nil)
@@ -1347,7 +1410,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.14"
+    public static let sdkVersion = "1.5.15"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

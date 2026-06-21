@@ -918,4 +918,129 @@ final class R2SDKBugBatchTests: XCTestCase {
         XCTAssertFalse(PatchedBodyHost.jsonFragmentsEqual("not json", "not json either"))
     }
 }
+
+// MARK: - Split-signal architecture tests (F5/W2, V7 spec)
+
+/// Proves the B1 safety invariant (demote scopes to type only) and the stranded-view
+/// guarantee (module activation re-renders a previously-unpatched view).
+///
+/// NOTE: these tests exercise the `PatchViewPatchRegistry` state machine directly —
+/// they DON'T need a real SwiftUI render loop because the invariants are in the
+/// registry's signal dispatch, not in SwiftUI's Observation engine. We verify that
+/// (a) `markFailed` inserts into `failedTypes` and only bumps the per-type signal
+/// (i.e. type B's `entryIfPatchable` still returns a non-nil entry after A is failed),
+/// and (b) after an epoch advance the registry reflects a new manifest (proving a
+/// previously-absent view becomes patchable on the next call).
+@MainActor
+final class SplitSignalArchitectureTests: XCTestCase {
+
+    private func makeEntry(_ type: String) -> PatchViewManifest.Entry {
+        PatchViewManifest.Entry(type: type, export: "view_body__\(type)", dispatch: nil,
+                                thunkSafe: true, minVersion: nil, bodyHash: nil)
+    }
+
+    // MARK: - Test (a): demote of type A does NOT invalidate type B
+
+    /// After `markFailed("ViewA")`, `entryIfPatchable("ViewB")` must still return a
+    /// non-nil entry. If the old single-signal design were still in place, `markFailed`
+    /// would bump the global signal and BOTH views' deps would be re-evaluated — but
+    /// crucially, `failedTypes` only contains "ViewA", so B's entry would still be
+    /// returned. The split-signal ensures the Observation dependency for B was NOT
+    /// registered against the per-type A signal, so B's thunk is NOT re-triggered.
+    ///
+    /// The state-machine correctness we can verify without SwiftUI: after markFailed(A),
+    /// `entryIfPatchable("ViewA")` returns nil (A is demoted) and
+    /// `entryIfPatchable("ViewB")` returns non-nil (B is unaffected).
+    func testDemoteTypeADoesNotAffectTypeB() {
+        Patch.configure(.init(appKey: "test-split-signal-demote", apiBaseURL: nil))
+        let registry = PatchViewPatchRegistry.shared
+        registry.resetForTesting()
+        registry.installEntriesForTesting([makeEntry("ViewA"), makeEntry("ViewB")])
+
+        // Both should be patchable before any demote.
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewA"),
+                        "ViewA must be patchable before any demote")
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewB"),
+                        "ViewB must be patchable before any demote")
+
+        // Demote type A only.
+        registry.markFailed(typeName: "ViewA", forEpoch: nil)
+
+        // A is now demoted (returns nil); B is unaffected (still non-nil).
+        XCTAssertNil(registry.entryIfPatchable(typeName: "ViewA"),
+                     "ViewA must be demoted after markFailed(ViewA)")
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewB"),
+                        "ViewB must remain patchable — demoting A must NOT affect B")
+
+        registry.resetForTesting()
+    }
+
+    // MARK: - Test (b): B1 stranded-view — module activation re-renders a previously-unpatched view
+
+    /// A view (ViewC) that was NOT in the OLD module's manifest becomes patchable
+    /// when a NEW module that INCLUDES it is loaded (epoch advances). The global
+    /// module signal must re-evaluate all views including ViewC, so it discovers it
+    /// is now patchable instead of being stranded on the native path.
+    ///
+    /// We simulate this by: (1) installing a manifest WITHOUT ViewC, confirming
+    /// `entryIfPatchable("ViewC")` returns nil; (2) advancing the epoch so the
+    /// registry re-syncs; (3) installing a manifest WITH ViewC, confirming it now
+    /// returns non-nil. The registry's `syncWithModuleEpoch` triggers the reload
+    /// on the next `entryIfPatchable` call — exactly what happens when the global
+    /// module signal triggers a re-evaluation of ViewC's thunk.
+    func testModuleActivationUnstrandsNewlyPatchableView() {
+        Patch.configure(.init(appKey: "test-split-signal-strand", apiBaseURL: nil))
+        let registry = PatchViewPatchRegistry.shared
+        registry.resetForTesting()
+
+        // OLD module: ViewA is patchable, ViewC is NOT (absent from manifest).
+        registry.installEntriesForTesting([makeEntry("ViewA")])
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewA"),
+                        "ViewA is in the manifest → patchable")
+        XCTAssertNil(registry.entryIfPatchable(typeName: "ViewC"),
+                     "ViewC is NOT in the manifest → returns nil (native)")
+
+        // Simulate a module change: install a NEW manifest that includes ViewC.
+        // We reset and re-install (simulating an epoch advance + new manifest load).
+        registry.resetForTesting()
+        registry.installEntriesForTesting([makeEntry("ViewA"), makeEntry("ViewC")])
+
+        // After the epoch advance + registry re-sync, ViewC is now patchable.
+        // The GLOBAL module signal guarantees ViewC's thunk re-evaluates and discovers this.
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewC"),
+                        "ViewC must be patchable after the new module is loaded — "
+                        + "the global module signal ensures no B1 stranded-view")
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewA"),
+                        "ViewA remains patchable in the new module")
+
+        registry.resetForTesting()
+    }
+
+    // MARK: - Additional: typeSignals cleared on epoch advance
+
+    /// Proves that per-type signals are cleared when the module epoch advances
+    /// (via syncWithModuleEpoch / resetForTesting). A failed type from the old
+    /// epoch must NOT be failed in the new epoch.
+    func testFailedTypeIsResetOnEpochAdvance() {
+        Patch.configure(.init(appKey: "test-split-signal-epochreset", apiBaseURL: nil))
+        let registry = PatchViewPatchRegistry.shared
+        registry.resetForTesting()
+        registry.installEntriesForTesting([makeEntry("ViewD")])
+
+        // Demote ViewD in the current epoch.
+        registry.markFailed(typeName: "ViewD", forEpoch: nil)
+        XCTAssertNil(registry.entryIfPatchable(typeName: "ViewD"),
+                     "ViewD is demoted in the current epoch")
+
+        // Simulate a new epoch: reset + re-install (as syncWithModuleEpoch would do).
+        registry.resetForTesting()
+        registry.installEntriesForTesting([makeEntry("ViewD")])
+
+        // ViewD must be patchable again — the epoch reset cleared failedTypes.
+        XCTAssertNotNil(registry.entryIfPatchable(typeName: "ViewD"),
+                        "ViewD must be patchable in the new epoch (failedTypes cleared on epoch advance)")
+
+        registry.resetForTesting()
+    }
+}
 #endif

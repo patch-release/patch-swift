@@ -141,16 +141,31 @@ enum PatchRuntimeLog {
     }
 }
 
-// MARK: - Invalidation signal (iOS 17+/macOS 14+)
+// MARK: - Invalidation signals (iOS 17+/macOS 14+)
 
 #if canImport(Observation)
-/// An `@Observable` generation counter. Every thunked body evaluation READS
-/// `generation`, which registers an Observation dependency with SwiftUI; bumping
-/// it after a module (de)activation re-evaluates every on-screen thunked view.
+/// Global module-level signal: bumped ONLY when the active module set changes
+/// (activate / deactivate). EVERY thunked body evaluation reads `generation`
+/// FIRST + UNCONDITIONALLY so that a newly-patched view (previously not in the
+/// manifest) always re-renders when a module lands — the B1 stranded-view
+/// guarantee. Bumping this re-evaluates ALL thunked views on-screen.
 @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
 @Observable
 @MainActor
-final class PatchViewInvalidationSignal {
+final class PatchModuleSignal {
+    var generation: UInt64 = 0
+}
+
+/// Per-type signal: bumped ONLY by `markFailed(typeName:)` for that specific
+/// type. A demote re-evaluates ONLY views of the failing type — not all patched
+/// views — eliminating the activation re-render burst (the felt hot-swap
+/// slowness). Every thunked body evaluation reads this SECOND (after the global
+/// module signal) and only when the type is actually patchable, so unpatched
+/// views never register this dependency.
+@available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+@Observable
+@MainActor
+final class PatchTypeSignal {
     var generation: UInt64 = 0
 }
 #endif
@@ -201,16 +216,34 @@ public final class PatchViewPatchRegistry {
     func resetForTesting() {
         self.entries.removeAll()
         self.failedTypes.removeAll()
+        self._typeSignalStorage.removeAll()
         self.loadedEpoch = nil
     }
 
     #if canImport(Observation)
-    private var _signalStorage: AnyObject?
+    // SPLIT-SIGNAL ARCHITECTURE (F5/W2, V7 spec):
+    //   moduleSignal  — read FIRST + UNCONDITIONALLY in entryIfPatchable; bumped
+    //                   only on module activate/deactivate → re-evals ALL views
+    //                   (B1 safety: a newly-patched view is never stranded).
+    //   typeSignals   — read SECOND, only when the type IS patchable; bumped only
+    //                   by markFailed(typeName:) for the failing type → scopes a
+    //                   demote re-eval to that type only, NOT all views.
+    private var _moduleSignalStorage: AnyObject?
     @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
-    private var invalidationSignal: PatchViewInvalidationSignal {
-        if let s = _signalStorage as? PatchViewInvalidationSignal { return s }
-        let s = PatchViewInvalidationSignal()
-        _signalStorage = s
+    private var moduleSignal: PatchModuleSignal {
+        if let s = _moduleSignalStorage as? PatchModuleSignal { return s }
+        let s = PatchModuleSignal()
+        _moduleSignalStorage = s
+        return s
+    }
+
+    // Per-type signal storage: lazily created on the first markFailed for each type.
+    private var _typeSignalStorage: [String: AnyObject] = [:]
+    @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+    private func typeSignal(for typeName: String) -> PatchTypeSignal {
+        if let s = _typeSignalStorage[typeName] as? PatchTypeSignal { return s }
+        let s = PatchTypeSignal()
+        _typeSignalStorage[typeName] = s
         return s
     }
     #endif
@@ -219,13 +252,26 @@ public final class PatchViewPatchRegistry {
 
     /// The thunk fast path: the manifest entry for `typeName` iff the active
     /// module ships a fully-lowered body for it and it has not been demoted.
+    ///
+    /// Signal READ ORDER (B1-safe, V7 spec):
+    ///   1. Global `moduleSignal.generation` — UNCONDITIONAL + FIRST. Registers
+    ///      an Observation dep for ALL views so a module activate/deactivate
+    ///      re-evaluates EVERY thunk. This is the B1 stranded-view guarantee: a
+    ///      view that was never in the manifest (and thus never patched) STILL
+    ///      registers here, so it re-evaluates when a new module lands and finds it.
+    ///   2. Per-type `typeSignal.generation` — AFTER the module signal, ONLY when
+    ///      the type IS patchable. A `markFailed` demote bumps only this view's
+    ///      signal, so ONLY this view type re-evaluates (not all patched views).
     public func entryIfPatchable(typeName: String) -> PatchViewManifest.Entry? {
-        touchInvalidationSignal()
+        // 1. GLOBAL module signal — unconditional, FIRST (B1 safety).
+        touchModuleSignal()
         installChangeHandlerOnce()
         ensureActivationOnce()
         syncWithModuleEpoch()
         guard let entry = entries[typeName], entry.thunkSafe,
               !failedTypes.contains(typeName) else { return nil }
+        // 2. PER-TYPE signal — only for types that ARE patchable.
+        touchTypeSignal(for: typeName)
         return entry
     }
 
@@ -260,6 +306,9 @@ public final class PatchViewPatchRegistry {
     /// `markFailed` would then false-demote a freshly-loaded view that never failed
     /// (bug #72). Re-syncing first + checking the epoch makes the demote no-op across a
     /// swap. `forEpoch == nil` keeps the legacy unconditional behavior.
+    ///
+    /// SPLIT-SIGNAL (F5/W2): bumps the PER-TYPE signal, NOT the global module signal.
+    /// A demote re-evals only the failing view type — not all ~46 patched views.
     public func markFailed(typeName: String, forEpoch: UInt64?) {
         // Re-sync so `loadedEpoch`/`failedTypes` reflect any swap that landed meanwhile.
         syncWithModuleEpoch()
@@ -269,7 +318,8 @@ public final class PatchViewPatchRegistry {
         }
         guard !failedTypes.contains(typeName) else { return }
         failedTypes.insert(typeName)
-        bumpSignal()
+        // Bump ONLY the per-type signal — scopes re-eval to this view, not all views.
+        bumpTypeSignal(for: typeName)
     }
 
     /// Number of patchable view types in the active module (diagnostics).
@@ -280,19 +330,40 @@ public final class PatchViewPatchRegistry {
 
     // MARK: internals
 
-    private func touchInvalidationSignal() {
+    /// Read the GLOBAL module signal (unconditional, registers dep for ALL views).
+    private func touchModuleSignal() {
         #if canImport(Observation)
         if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
-            // The read is the point: it registers the Observation dependency.
-            _ = invalidationSignal.generation
+            _ = moduleSignal.generation
         }
         #endif
     }
 
-    private func bumpSignal() {
+    /// Bump the GLOBAL module signal (re-evaluates ALL thunked views).
+    /// Called ONLY by `installChangeHandlerOnce` on module activate/deactivate.
+    private func bumpModuleSignal() {
         #if canImport(Observation)
         if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
-            invalidationSignal.generation &+= 1
+            moduleSignal.generation &+= 1
+        }
+        #endif
+    }
+
+    /// Read the PER-TYPE signal (registers dep for views of this type only).
+    private func touchTypeSignal(for typeName: String) {
+        #if canImport(Observation)
+        if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            _ = typeSignal(for: typeName).generation
+        }
+        #endif
+    }
+
+    /// Bump the PER-TYPE signal (re-evaluates only views of `typeName`).
+    /// Called ONLY by `markFailed` for the failing type.
+    private func bumpTypeSignal(for typeName: String) {
+        #if canImport(Observation)
+        if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            typeSignal(for: typeName).generation &+= 1
         }
         #endif
     }
@@ -302,8 +373,10 @@ public final class PatchViewPatchRegistry {
         didInstallChangeHandler = true
         Patch.shared.onModuleSetChange { _ in
             // Handlers fire on the main queue; hop into the actor without waiting.
+            // Bump ONLY the MODULE signal — re-evaluates all views (B1 safety: newly-
+            // patched views re-render; unpatched views re-check the manifest).
             Task { @MainActor in
-                PatchViewPatchRegistry.shared.bumpSignal()
+                PatchViewPatchRegistry.shared.bumpModuleSignal()
             }
         }
     }
@@ -322,6 +395,10 @@ public final class PatchViewPatchRegistry {
         guard epoch != loadedEpoch else { return }
         loadedEpoch = epoch
         failedTypes.removeAll()
+        // Clear per-type signals alongside failedTypes: stale signal objects from the
+        // previous module epoch must not be re-used. Views that re-read entryIfPatchable
+        // after a module change will create fresh signals via the lazy accessor.
+        _typeSignalStorage.removeAll()
         entries = Self.loadManifestEntries(overrideJSON: manifestJSONOverrideForTesting?())
     }
 
@@ -330,11 +407,21 @@ public final class PatchViewPatchRegistry {
         if let overrideJSON {
             jsonBytes = Array(overrideJSON.utf8)
         } else {
-            guard Patch.shared.hasFunction(PatchViewManifest.exportName),
-                  let bytes = try? Patch.shared.callPacked(PatchViewManifest.exportName, []) else {
+            // W5b: prefer the pre-warmed manifest bytes cached during activation on
+            // the background activationQueue. This avoids a synchronous WASM call
+            // (callQueue.sync from the main thread) on the FIRST SwiftUI body eval
+            // after activation, eliminating the ~10-30ms manifest-fetch stall.
+            // Fallback: call WASM directly (the prior behavior, exercised only when
+            // activation happens concurrently with or after the first body eval —
+            // a benign data race: either path produces the same bytes).
+            if let cached = Patch.shared.cachedManifestBytes() {
+                jsonBytes = cached
+            } else if Patch.shared.hasFunction(PatchViewManifest.exportName),
+                      let bytes = try? Patch.shared.callPacked(PatchViewManifest.exportName, []) {
+                jsonBytes = bytes
+            } else {
                 return [:]
             }
-            jsonBytes = bytes
         }
         guard let manifest = try? JSONDecoder().decode(PatchViewManifest.self,
                                                        from: Data(jsonBytes)) else {
@@ -660,6 +747,35 @@ final class PatchMarshalCache {
     }
     private var byType: [String: Bucket] = [:]
 
+    // B3-R2: per-(typeName, fieldKey) last-seen array/collection child count. Checked BEFORE
+    // the fingerprint walk; a count change immediately signals "changed" and skips the full
+    // per-element Mirror walk. Conservative = false-render-safe (count-change always re-marshals;
+    // a same-count content change is still caught by the per-element fingerprint walk).
+    private var arrayCountByType: [String: [String: Int]] = [:]
+
+    /// Returns true iff any collection-shaped field in `fields` has a DIFFERENT child count
+    /// than the last recorded count for this typeName. Also updates the stored counts for all
+    /// collection fields (so the next call can compare against today's counts). A return of
+    /// `true` means "changed" — the caller skips fingerprinting and re-marshals.
+    func checkAndUpdateArrayCounts(typeName: String, fields: [PatchInstanceInputs.SelectedField]) -> Bool {
+        var changed = false
+        var counts = arrayCountByType[typeName] ?? [:]
+        for f in fields {
+            let m = Mirror(reflecting: f.value)
+            guard m.displayStyle == .collection || m.displayStyle == .set else { continue }
+            let cnt = m.children.count
+            if let prev = counts[f.key], prev != cnt {
+                changed = true          // count mismatch — signal immediately but keep scanning
+            }
+            counts[f.key] = cnt
+        }
+        arrayCountByType[typeName] = counts
+        return changed
+    }
+
+    /// Test-only: drop everything (includes count cache).
+    func reset() { byType.removeAll(); arrayCountByType.removeAll() }
+
     /// The cached JSON for (typeName, fingerprint), or nil on a miss. A hit refreshes recency.
     func lookup(typeName: String, fingerprint: UInt64) -> String? {
         guard var bucket = byType[typeName], let json = bucket.entries[fingerprint] else { return nil }
@@ -684,9 +800,6 @@ final class PatchMarshalCache {
 
     /// Test-only: number of distinct cached fingerprints for a type.
     func entryCount(typeName: String) -> Int { byType[typeName]?.order.count ?? 0 }
-
-    /// Test-only: drop everything.
-    func reset() { byType.removeAll() }
 }
 
 public enum PatchInstanceInputs {
@@ -778,13 +891,22 @@ public enum PatchInstanceInputs {
             // decision, so a field flipping representable↔unrepresentable changes the
             // fingerprint. `PatchValueFingerprint.feed` returns false on EXACTLY the values
             // `PatchValueEncoder.encode` returns nil for (parallel construction).
-            var sub = Hasher()
-            let representable = PatchValueFingerprint.feed(f.value, into: &sub)
+            //
+            // A14 Win1: feed directly into the main hasher (no per-field sub-Hasher alloc).
+            // This matches what `feedObject` already does for NESTED struct fields — the field
+            // key already separates contributions, so finalize/re-combine is unnecessary.
+            // Correctness: equal field content → same hasher sequence → same final hash;
+            // a change in any field → different sequence → different hash. The fingerprint is
+            // a different numeric value than the old sub-Hasher path, but that is safe — the
+            // entire cache is seeded per-process (Hasher is randomised); the only requirement
+            // is that the fingerprint is CONSISTENT within a process run (it is).
+            let representable = PatchValueFingerprint.feed(f.value, into: &hasher, depth: 0)
             hasher.combine(representable)
-            if representable { hasher.combine(sub.finalize()) }
             // If NOT representable the field is omitted from the JSON — its content can't
-            // change the JSON, so we DON'T fold sub's (partial) content. The representable
-            // flag alone records the omission, which is all the JSON depends on.
+            // change the JSON, so `feed` may have partially combined content, but the
+            // representable flag alone gates the omission. On a false-stable risk analysis:
+            // a field that flips representable→unrepresentable changes the `representable`
+            // bool, which always changes the hash (no false HIT).
         }
         return UInt64(bitPattern: Int64(hasher.finalize()))
     }
@@ -817,12 +939,25 @@ public enum PatchInstanceInputs {
         let fields = selectFields(from: instance)
         // Writebacks are LIVE — always re-collected, never cached.
         let writebacks = fields.compactMap { $0.writeback }
-        let fp = fingerprint(of: fields)
-        if let fp, let cachedJSON = PatchMarshalCache.shared.lookup(typeName: typeName, fingerprint: fp) {
-            return Extraction(json: cachedJSON, writebacks: writebacks)
+        // B3-R2: array-count pre-check. If any collection-shaped field has a DIFFERENT child
+        // count than the last render, skip fingerprinting entirely and re-marshal immediately.
+        // This avoids the per-element Mirror walk on grows/shrinks — the most common invalidation
+        // signal — while remaining conservative (same-count content changes fall through to the
+        // full fingerprint walk). False-render-safe: a count change ALWAYS re-marshals.
+        let countChanged = PatchMarshalCache.shared.checkAndUpdateArrayCounts(typeName: typeName, fields: fields)
+        if !countChanged {
+            let fp = fingerprint(of: fields)
+            if let fp, let cachedJSON = PatchMarshalCache.shared.lookup(typeName: typeName, fingerprint: fp) {
+                return Extraction(json: cachedJSON, writebacks: writebacks)
+            }
+            // Miss (or un-fingerprintable): do the full encode.
+            let json = buildJSON(from: fields)
+            if let fp { PatchMarshalCache.shared.store(typeName: typeName, fingerprint: fp, json: json) }
+            return Extraction(json: json, writebacks: writebacks)
         }
-        // Miss (or un-fingerprintable): do the full encode.
+        // Count changed: re-marshal, cache the new fingerprint.
         let json = buildJSON(from: fields)
+        let fp = fingerprint(of: fields)
         if let fp { PatchMarshalCache.shared.store(typeName: typeName, fingerprint: fp, json: json) }
         return Extraction(json: json, writebacks: writebacks)
     }
@@ -1523,6 +1658,126 @@ final class PatchedBodyStaticTemplateCache {
     var count: Int { cache.count }
 }
 
+// MARK: - Pre-merge render cache (F1)
+
+/// A cheap-key cache that sits IN FRONT of the reconcile + merge work in
+/// `PatchedBodyHost.body`.
+///
+/// Previously: `reconcileGuestOverride` (~17µs) + `PatchFlatJSON.merge` (~56µs) ran
+/// BEFORE the input-hash render cache lookup, paying ~73µs on EVERY body eval even on
+/// a cache hit. This cache probes with an exact-match key over the RAW inputs
+/// (propsJSON + guestState + guestBaseline + epoch + tokenJSON) so the merge and
+/// reconcile are skipped entirely on a steady-state hit.
+///
+/// Correctness:
+///  * Key is an exact-equality Hashable struct covering ALL inputs that determine
+///    `merged`: propsJSON, guestState, guestBaseline (controls reconcile), epoch (WASM
+///    identity), tokenJSON (rides the input JSON via numtok/strtok keys). A change to
+///    any dimension is a cache miss — the full path runs. Hash collisions are harmless:
+///    the `Key` struct compares by full field equality, so two keys with the same
+///    `.hashValue` but different fields will not match.
+///  * Stores ONLY WASM-derived data (`PatchedBodyCacheEntry`) plus the produced
+///    `merged` string (for the geometry-rebuild path) and the parsed `mergedObj` (for
+///    the `.animation(_:value:)` key lookup — W7-S2). Live native closures are never
+///    stored.
+///  * `@MainActor`-isolated: `PatchedBodyHost.body` runs on the MainActor, so all
+///    access is single-threaded with no lock needed.
+///  * Bounded per (typeName, export) via a small LRU (same capacity as the input-hash
+///    render cache). Steady-state holds ~1 distinct key.
+///  * Epoch-scoped: a hot-swap bumps the epoch → all prior entries for that scope miss
+///    → merge+WASM re-runs once to reprime both this cache and the input-hash cache.
+@MainActor
+final class PatchedBodyPreMergeCache {
+    static let shared = PatchedBodyPreMergeCache()
+
+    static let capacityPerScope = 4
+
+    private struct Key: Hashable {
+        let propsJSON: String
+        let guestState: String
+        let guestBaseline: String
+        let epoch: UInt64
+        let tokenJSON: String   // "" when there are no input-riding tokens
+    }
+
+    /// The memoized output of the merge + reconcile + WASM pipeline.
+    ///  - `merged`: the final input string passed to WASM. Needed by the
+    ///    geometry-rebuild closure which re-merges with geo offsets each layout.
+    ///  - `effectiveGuestState`: the result of `reconcileGuestOverride` — cached so the
+    ///    dispatcher closure can capture it on a cache HIT without re-running reconcile.
+    ///  - `entry`: the WASM-derived tree + slotArgs + idSets.
+    ///  - `mergedObj`: the parsed `[String: Any]` of `merged`, cached for the
+    ///    `.animation(_:value:)` key lookup so `PatchFlatJSON.parse` is never
+    ///    called on a cache hit (W7-S2). `nil` when `animationValueKeys` is empty.
+    ///    NOT Sendable — safe because this class is @MainActor.
+    struct CacheValue {
+        let merged: String
+        let effectiveGuestState: String
+        let entry: PatchedBodyCacheEntry
+        let mergedObj: [String: Any]?
+    }
+
+    private struct Bucket {
+        var entries: [Key: CacheValue] = [:]
+        var order: [Key] = []   // LRU recency; front = most recently used
+    }
+
+    private var scopes: [String: Bucket] = [:]
+
+    private func scopeKey(typeName: String, export: String) -> String {
+        typeName + "\u{1}" + export
+    }
+
+    func lookup(typeName: String, export: String,
+                propsJSON: String, guestState: String, guestBaseline: String,
+                epoch: UInt64, tokenJSON: String) -> CacheValue? {
+        let sk = scopeKey(typeName: typeName, export: export)
+        guard var bucket = scopes[sk] else { return nil }
+        let k = Key(propsJSON: propsJSON, guestState: guestState,
+                    guestBaseline: guestBaseline, epoch: epoch, tokenJSON: tokenJSON)
+        guard let value = bucket.entries[k] else { return nil }
+        // Refresh LRU recency.
+        if let idx = bucket.order.firstIndex(of: k) { bucket.order.remove(at: idx) }
+        bucket.order.insert(k, at: 0)
+        scopes[sk] = bucket
+        return value
+    }
+
+    func store(typeName: String, export: String,
+               propsJSON: String, guestState: String, guestBaseline: String,
+               epoch: UInt64, tokenJSON: String, value: CacheValue) {
+        let sk = scopeKey(typeName: typeName, export: export)
+        var bucket = scopes[sk] ?? Bucket()
+
+        // Epoch invalidation: when the epoch changes (hot-swap), the WASM output
+        // for every prior key is stale — drop the whole scope before storing.
+        if let firstKey = bucket.order.first, firstKey.epoch != epoch {
+            bucket = Bucket()
+        }
+
+        let k = Key(propsJSON: propsJSON, guestState: guestState,
+                    guestBaseline: guestBaseline, epoch: epoch, tokenJSON: tokenJSON)
+        bucket.entries[k] = value
+        if let idx = bucket.order.firstIndex(of: k) { bucket.order.remove(at: idx) }
+        bucket.order.insert(k, at: 0)
+
+        // Enforce the LRU bound: evict least-recently-used entries beyond capacity.
+        while bucket.order.count > Self.capacityPerScope {
+            let victim = bucket.order.removeLast()
+            bucket.entries[victim] = nil
+        }
+        scopes[sk] = bucket
+    }
+
+    /// Test-only: drop everything.
+    func reset() { scopes.removeAll() }
+
+    /// Test-only: count of distinct cached keys for a scope.
+    func entryCount(typeName: String, export: String) -> Int {
+        scopes[scopeKey(typeName: typeName, export: export)]?.order.count ?? 0
+    }
+}
+
 // MARK: - The patched-body host view
 
 /// A mutable holder for the last successfully-rendered tree (bug #50). A class (not
@@ -1625,68 +1880,121 @@ public struct PatchedBodyHost: View {
         // it so a demote scheduled here can't false-demote a view freshly loaded by a
         // later hot-swap (bug #72).
         let renderEpoch = Patch.shared.moduleEpoch
-        // RECONCILE dual-owned state (bug #49/#52): drop any guest-owned key whose live
-        // native value has moved away from the baseline captured at the guest's last
-        // write — native code (a parent "Reset", a Timer, `.onReceive`) changed it and
-        // must win, rather than the stale guest value masking it forever.
-        let effectiveGuestState = Self.reconcileGuestOverride(
-            guestState: guestState, baseline: guestBaseline, currentProps: propsJSON)
-        var merged = PatchFlatJSON.merge(base: propsJSON, override: effectiveGuestState)
-        // INPUT-RIDING HOST TOKENS: a `Theme.Radius.lg`-style NUMERIC constant the guest
-        // consumes inside a `.cornerRadius(…)`/`.padding(…)`/`frame` position, and a
-        // host STRING (an enum's computed-String `Text(…)` content like `confidence.label`)
-        // the guest reads as text. The thunk resolved each natively; merge them into the
-        // guest's input JSON under their reserved `__numtok_<id>`/`__strtok_<id>` keys
-        // BEFORE building the tree, exactly like a `__geo_*` input. (Color/font tokens are
-        // applied by the renderer over the tree instead — handled below.)
+
+        // INPUT-RIDING HOST TOKENS (cheap — just dict iteration, no merge yet): build
+        // the token JSON string early so it can participate in the pre-merge cache key.
+        // Color/font tokens are applied by the renderer over the tree instead — handled
+        // below. The key is "" when there are no input-riding tokens (common case).
         let inputTokenJSON = Self.inputTokenJSON(from: tokens)
-        if let inputTokenJSON {
-            merged = PatchFlatJSON.merge(base: merged, override: inputTokenJSON)
-        }
+        let tokenJSONKey = inputTokenJSON ?? ""
+
+        // PRE-MERGE CACHE (F1 perf — ~73µs saved per hit): probe with a cheap exact-
+        // match key over the RAW inputs BEFORE running reconcile+merge. On a steady-state
+        // hit (body re-evaluating with unchanged state — the dominant SwiftUI case) we
+        // skip the full reconcile+merge+WASM pipeline and return the memoized result
+        // directly. The key covers every input dimension that affects `merged`:
+        //   propsJSON      — the live marshalled native props
+        //   guestState     — the guest's accumulated state overrides
+        //   guestBaseline  — the props snapshot at the last guest write (controls reconcile)
+        //   epoch          — the active WASM module; a hot-swap misses
+        //   tokenJSON      — input-riding numeric/string tokens merged into the input JSON
+        // Any change to any dimension is a miss, so this can never return a stale tree.
         let tree: ViewNode
-        // PARAMETERIZED NATIVE SLOTS: the guest's emission carries `slotArgs` (slot id
-        // → lifted string-literal values that ride WASM). A parameterized native slot
-        // is rendered via the thunk's factory applied to THESE values, so an OTA patch
-        // that only edited a string in a slotted custom view shows the new string.
         let slotArgs: [String: [String]]
-        // The six pre-collected id-sets (opaque/token/row/action/effect/button). Computed
-        // once per distinct input and reused on a cache hit, skipping the 6 full-tree walks.
         let idSets: PatchedBodyIDSets
+        let merged: String
+        // `effectiveGuestState` is captured by the dispatcher closure and must be
+        // available in ALL code paths (hit and miss). On a pre-merge cache hit it
+        // comes from the cached value; on a miss it is computed by reconcileGuestOverride.
+        let effectiveGuestState: String
+        // The parsed mergedObj, memoized in the pre-merge cache for W7-S2: the
+        // .animation(_:value:) resolver reuses this instead of re-parsing merged.
+        var cachedMergedObj: [String: Any]? = nil
+
         // STRUCTURALLY-STATIC TEMPLATE CACHE (perf — zero WASM after first render):
         // when the engine proved this view's WASM tree is identical for ALL inputs, we
-        // run WASM ONCE and cache the tree keyed by (typeName, export, epoch) — no input
-        // string needed. Subsequent renders skip WASM entirely. A hot-swap bumps the epoch
-        // → a MISS → WASM runs once to re-prime, then the template is cached again.
-        // SAFETY: only applied when `entry.isStructurallyStatic == true` (engine opt-in;
-        // conservative detection). The input-hash cache below is still checked + populated
-        // for the general case — the static path is strictly a faster route for the views
-        // the engine provably identified as constant-tree.
+        // run WASM ONCE and cache the tree keyed by (typeName, export, epoch). This path
+        // still needs to compute `merged` (for the geometry-rebuild closure), so we
+        // run the pre-merge cache first for static views too — then fold into this path.
         if entry.isStructurallyStatic == true,
            let staticEntry = PatchedBodyStaticTemplateCache.shared.lookup(
                typeName: typeName, export: entry.export, epoch: renderEpoch) {
             // Static cache HIT: tree is a constant — reuse it with zero WASM.
+            // Still need `merged` for the geometry-rebuild closure; check the pre-merge
+            // cache first so we don't pay reconcile+merge even for static views on hits.
+            if let preMerged = PatchedBodyPreMergeCache.shared.lookup(
+                typeName: typeName, export: entry.export,
+                propsJSON: propsJSON, guestState: guestState, guestBaseline: guestBaseline,
+                epoch: renderEpoch, tokenJSON: tokenJSONKey) {
+                merged = preMerged.merged
+                effectiveGuestState = preMerged.effectiveGuestState
+                cachedMergedObj = preMerged.mergedObj
+            } else {
+                let reconciled = Self.reconcileGuestOverride(
+                    guestState: guestState, baseline: guestBaseline, currentProps: propsJSON)
+                effectiveGuestState = reconciled
+                var m = PatchFlatJSON.merge(base: propsJSON, override: reconciled)
+                if let inputTokenJSON { m = PatchFlatJSON.merge(base: m, override: inputTokenJSON) }
+                merged = m
+                // Store into pre-merge cache (entry reused from static cache).
+                PatchedBodyPreMergeCache.shared.store(
+                    typeName: typeName, export: entry.export,
+                    propsJSON: propsJSON, guestState: guestState, guestBaseline: guestBaseline,
+                    epoch: renderEpoch, tokenJSON: tokenJSONKey,
+                    value: PatchedBodyPreMergeCache.CacheValue(
+                        merged: merged, effectiveGuestState: effectiveGuestState,
+                        entry: staticEntry, mergedObj: nil))
+            }
             tree = staticEntry.tree
             slotArgs = staticEntry.slotArgs
             idSets = staticEntry.idSets
         } else {
-        // INPUT-HASH MEMOIZATION (P0 perf): the guest body is a DETERMINISTIC function of
-        // its input string, so a byte-identical `merged` (the common steady-state case in
-        // SwiftUI — body re-evaluates constantly with unchanged state) yields a byte-
-        // identical tree. Reuse the cached WASM-derived {tree, slotArgs, idSets} instead of
-        // re-running the WASM invoke + JSON decode + 6 tree walks. Keyed by the EXACT final
-        // input string (+ typeName/export/moduleEpoch); a hot-swap bumps the epoch and
-        // invalidates. ONLY WASM-derived data is cached — the live native slot closures are
-        // filled below from `self`, exactly as on a miss.
+        // PRE-MERGE CACHE PROBE: before running reconcile+merge, check whether we've
+        // already done this exact combination of inputs for this view in this epoch.
+        // A HIT returns the cached merged string + the WASM-derived entry (tree/slotArgs/
+        // idSets) + the already-parsed mergedObj (for animation, W7-S2).
+        if let preMerged = PatchedBodyPreMergeCache.shared.lookup(
+            typeName: typeName, export: entry.export,
+            propsJSON: propsJSON, guestState: guestState, guestBaseline: guestBaseline,
+            epoch: renderEpoch, tokenJSON: tokenJSONKey) {
+            // PRE-MERGE CACHE HIT: skip reconcile + merge + WASM entirely.
+            merged = preMerged.merged
+            effectiveGuestState = preMerged.effectiveGuestState
+            tree = preMerged.entry.tree
+            slotArgs = preMerged.entry.slotArgs
+            idSets = preMerged.entry.idSets
+            cachedMergedObj = preMerged.mergedObj
+        } else {
+        // PRE-MERGE CACHE MISS: run the full pipeline.
+        // RECONCILE dual-owned state (bug #49/#52): drop any guest-owned key whose live
+        // native value has moved away from the baseline captured at the guest's last
+        // write — native code (a parent "Reset", a Timer, `.onReceive`) changed it and
+        // must win, rather than the stale guest value masking it forever.
+        let reconciledGuestState = Self.reconcileGuestOverride(
+            guestState: guestState, baseline: guestBaseline, currentProps: propsJSON)
+        effectiveGuestState = reconciledGuestState
+        var mergedWork = PatchFlatJSON.merge(base: propsJSON, override: reconciledGuestState)
+        // Merge the input-riding host token values (computed cheaply above).
+        if let inputTokenJSON {
+            mergedWork = PatchFlatJSON.merge(base: mergedWork, override: inputTokenJSON)
+        }
+        merged = mergedWork
+
+        // INPUT-HASH MEMOIZATION (P0 perf): the guest body is a DETERMINISTIC function
+        // of its input string, so a byte-identical `merged` yields a byte-identical tree.
+        // Check the input-hash cache keyed by the exact final input string.
+        let innerCacheEntry: PatchedBodyCacheEntry
         if let cached = PatchedBodyRenderCache.shared.lookup(
             typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch) {
-            tree = cached.tree
-            slotArgs = cached.slotArgs
-            idSets = cached.idSets
+            innerCacheEntry = cached
         } else {
+            // Full WASM invoke + decode.
+            let freshTree: ViewNode
+            let freshSlotArgs: [String: [String]]
             do {
                 let emission = try Patch.shared.viewBodyEmission(state: merged, export: entry.export)
-                tree = emission.root
-                slotArgs = emission.slotArgs ?? [:]
+                freshTree = emission.root
+                freshSlotArgs = emission.slotArgs ?? [:]
             } catch {
                 // Demote OUTSIDE this view-update pass; the next thunk evaluation takes the
                 // native branch (iOS 17+ via the Observation bump). This pass shows the last
@@ -1698,27 +2006,44 @@ public struct PatchedBodyHost: View {
                 }
                 return demoteFallback()
             }
-            // Collect the six id-sets (+ animation keys) ONCE for this fresh tree in a SINGLE
-            // traversal (T2), then cache them with the tree so an identical-input render skips
-            // both the WASM stage AND these walks. `collectAllIDs` is the multiset-identical,
-            // false-render-safe equivalent of the six separate collectors (proven by
-            // RenderHotPathPerfRoundTests) — pure speed, no behavior change — and matters at
-            // real-screen node counts where 6 passes cost ~6× one pass.
-            idSets = Self.collectAllIDs(tree)
-            let cachePayload = PatchedBodyCacheEntry(tree: tree, slotArgs: slotArgs, idSets: idSets)
+            // Collect the six id-sets (+ animation keys) ONCE for this fresh tree in a
+            // SINGLE traversal (T2), then cache them with the tree so an identical-input
+            // render skips both the WASM stage AND these walks.
+            let freshIDSets = Self.collectAllIDs(freshTree)
+            innerCacheEntry = PatchedBodyCacheEntry(
+                tree: freshTree, slotArgs: freshSlotArgs, idSets: freshIDSets)
             PatchedBodyRenderCache.shared.store(
                 typeName: typeName, export: entry.export, input: merged, epoch: renderEpoch,
-                payload: cachePayload)
-            // STRUCTURALLY-STATIC TEMPLATE CACHE PRIME: if this view is static and we just
-            // ran WASM (a static-cache miss, i.e. the first render or post-hot-swap), store
-            // the result as the template for (typeName, export, epoch). Future renders skip
-            // WASM entirely — the tree is identical regardless of input.
+                payload: innerCacheEntry)
+            // STRUCTURALLY-STATIC TEMPLATE CACHE PRIME: if this view is static and we
+            // just ran WASM (first render or post-hot-swap), store the result as the
+            // template so future renders skip WASM entirely.
             if entry.isStructurallyStatic == true {
                 PatchedBodyStaticTemplateCache.shared.store(
                     typeName: typeName, export: entry.export, epoch: renderEpoch,
-                    payload: cachePayload)
+                    payload: innerCacheEntry)
             }
         }
+        tree = innerCacheEntry.tree
+        slotArgs = innerCacheEntry.slotArgs
+        idSets = innerCacheEntry.idSets
+
+        // PRE-MERGE CACHE STORE: memoize the merged string + WASM-derived entry keyed by
+        // the raw inputs so the NEXT identical body eval skips reconcile+merge entirely.
+        // W7-S2: also memoize the parsed mergedObj if there are animation keys (so the
+        // animation lookup below reuses it instead of re-parsing on future hits).
+        let mergedObjForCache: [String: Any]? = idSets.animationValueKeys.isEmpty
+            ? nil
+            : PatchFlatJSON.parse(merged)
+        PatchedBodyPreMergeCache.shared.store(
+            typeName: typeName, export: entry.export,
+            propsJSON: propsJSON, guestState: guestState, guestBaseline: guestBaseline,
+            epoch: renderEpoch, tokenJSON: tokenJSONKey,
+            value: PatchedBodyPreMergeCache.CacheValue(
+                merged: merged, effectiveGuestState: effectiveGuestState,
+                entry: innerCacheEntry, mergedObj: mergedObjForCache))
+        cachedMergedObj = mergedObjForCache
+        } // end pre-merge cache miss
         } // end static-template cache else-branch
 
         // MIXED-VIEW SAFETY NET: every opaque leaf in the tree must have a native
@@ -1837,12 +2162,17 @@ public struct PatchedBodyHost: View {
         // (the SAME `merged` blob the @State was marshalled into) as an `AnyHashable`, so a
         // change to that value across renders fires the implicit animation (native behavior).
         // NOT a demote gate — an unresolvable key is simply absent (the renderer degrades to
-        // a constant trigger, keeping the view patched). Parse `merged` once only if needed.
+        // a constant trigger, keeping the view patched).
+        // W7-S2: reuse the `cachedMergedObj` stored in the pre-merge cache entry on a hit
+        // (skips a `PatchFlatJSON.parse` call — ~5-20µs), else parse `merged` once.
         let animKeys = idSets.animationValueKeys
-        if !animKeys.isEmpty, let mergedObj = PatchFlatJSON.parse(merged) {
-            for key in animKeys {
-                if let v = Self.animationTriggerValue(mergedObj[key]) {
-                    context.animationValues[key] = v
+        if !animKeys.isEmpty {
+            let mergedObj = cachedMergedObj ?? PatchFlatJSON.parse(merged)
+            if let mergedObj {
+                for key in animKeys {
+                    if let v = Self.animationTriggerValue(mergedObj[key]) {
+                        context.animationValues[key] = v
+                    }
                 }
             }
         }
@@ -1974,7 +2304,14 @@ public struct PatchedBodyHost: View {
     /// dispatch has happened) the guest override is empty anyway, so nothing is masked.
     static func reconcileGuestOverride(guestState: String, baseline: String,
                                        currentProps: String) -> String {
+        // F3: fast-path for the two cheapest cases — no parse needed.
+        // (a) No guest state: nothing to reconcile.
         guard !guestState.isEmpty else { return guestState }
+        // (b) Guest state equals the current props byte-for-byte: every key the guest
+        //     would override is already identical to native, so the override is a no-op.
+        //     Returning `guestState` here is safe: the caller merges it on top of
+        //     `propsJSON`, and byte-identical fields produce no net change.
+        if guestState == currentProps { return guestState }
         guard let guestObj = PatchFlatJSON.parse(guestState) else { return guestState }
         // No baseline → nothing native could have changed relative to a guest write.
         guard !baseline.isEmpty, let baseObj = PatchFlatJSON.parse(baseline),
