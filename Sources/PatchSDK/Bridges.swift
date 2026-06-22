@@ -398,7 +398,11 @@ public struct URLSessionBridge: Bridge {
             sem.signal()
         }
         task.resume()
-        _ = sem.wait(timeout: .now() + 30)
+        // Cancel the task on timeout so it doesn't keep running + holding the
+        // call queue after the 30s window expires. Without cancellation the
+        // dataTask could linger indefinitely, preventing subsequent calls from
+        // progressing (the call queue is serial).
+        if sem.wait(timeout: .now() + 30) == .timedOut { task.cancel() }
         return box.get()
     }
 }

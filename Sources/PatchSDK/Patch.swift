@@ -1292,6 +1292,16 @@ public final class Patch: @unchecked Sendable {
             throw UpdateError.check(error)
         }
 
+        // ROLLBACK DIRECTIVE: mirror the checkAndApply() revert path exactly.
+        // A device on the imperative/EAS-style flow must also honor a server
+        // rollback-recall — this is a safety action regardless of autoApply.
+        if response.revert {
+            if let s = lock.read({ _storage }) { deactivate(); s.clearCurrent() }
+            lock.write { self._pendingResponse = nil; self._staged = nil }
+            await setState(.upToDate)
+            return nil
+        }
+
         guard let info = UpdateInfo(response: response) else {
             lock.write { self._pendingResponse = nil; self._staged = nil }
             await setState(.upToDate)
@@ -1410,7 +1420,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.5.16"
+    public static let sdkVersion = "1.5.17"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

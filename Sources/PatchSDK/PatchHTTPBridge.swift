@@ -191,6 +191,13 @@ public final class PatchHTTPBroker: @unchecked Sendable {
             // Write the body into GUEST memory (empty body → (0,0), a valid resume).
             let (ptr, len) = result.body.isEmpty ? (UInt32(0), UInt32(0))
                                                  : try runtime.writeBuffer(result.body)
+            // Free the response buffer after `invoke`. The host allocated this buffer
+            // via `patch_malloc`; the guest's `patch_resolve_http` reads the bytes
+            // during `invoke`, after which the host owns cleanup. If `invoke` throws
+            // (e.g. a guest trap) the defer still frees — preventing a permanent leak
+            // in guest linear memory that repeated trap/retry calls would accumulate.
+            // ptr==0 (empty body) → `runtime.free` no-ops safely.
+            defer { runtime.free(ptr) }
             _ = try runtime.invoke(Self.resolveExport, [
                 .i32(UInt32(bitPattern: req.token)),
                 .i32(ptr), .i32(len),
