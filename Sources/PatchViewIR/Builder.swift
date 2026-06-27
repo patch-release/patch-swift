@@ -183,6 +183,14 @@ public enum N {
         ViewNode(.actionSlotButton(id: id, role: role, label: label))
     }
 
+    /// A CHILD-VIEW CALLBACK SLOT (see `NodeKind.callbackSlot`, IR schema v12): a custom
+    /// child-view call with a dispatchable `() -> Void` closure arg. The full call (with
+    /// a stable forwarder closure) is rendered natively by the thunk's
+    /// `__patchCallbackSlots()` table. `id` is position-keyed; `label` is the callee name.
+    public static func callbackSlot(id: String, label: String) -> ViewNode {
+        ViewNode(.callbackSlot(id: id, label: label))
+    }
+
     /// `Label { title } icon: { icon }` — the general form.
     public static func label(title: [ViewNode], icon: [ViewNode]) -> ViewNode {
         ViewNode(.label(title: title, icon: icon))

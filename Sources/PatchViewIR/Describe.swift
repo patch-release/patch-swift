@@ -85,6 +85,8 @@ extension ViewNode {
             return "Button(action:#\(id),role:\(role?.rawValue ?? "nil"))"
         case .actionSlotButton(let id, let role, _):
             return "ActionSlotButton(slot:#\(id),role:\(role?.rawValue ?? "nil"))"
+        case .callbackSlot(let id, let label):
+            return "CallbackSlot(#\(id),\(label))"
         case .label(let t, let i): return "Label(title:\(t.count),icon:\(i.count))"
         case .toggle(_, let v, let e): return "Toggle(isOn:\(v),event:#\(e.id))"
         case .slider(let v, let lo, let hi, let st, let e):

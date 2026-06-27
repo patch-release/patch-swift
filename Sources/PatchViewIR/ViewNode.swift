@@ -1222,6 +1222,15 @@ public indirect enum NodeKind: Equatable, Sendable {
     /// (the dev's real native view renders). `role` is preserved for alert/swipe styling.
     case actionSlotButton(id: String, role: IRButtonRole?, label: [ViewNode])
 
+    /// A CHILD-VIEW CALLBACK SLOT (IR schema v12): a custom child-view call whose single
+    /// `() -> Void` closure arg is OTA-patchable. The full call (with a stable position-keyed
+    /// forwarder replacing the closure) is rendered natively by the thunk's
+    /// `__patchCallbackSlots()` table. The closure body is lowered as a WASM dispatch sequence
+    /// so editing it is OTA-patchable + fingerprint-stable. `id` is position-keyed; `label`
+    /// is the callee name (for debugging). No IR subtree children (the full child-view
+    /// rendering is handled by the native slot, not the WASM tree).
+    case callbackSlot(id: String, label: String)
+
     /// `Label { title } icon: { icon }` — the GENERAL form: title + icon are lowered
     /// subtrees so custom title/icon closures recurse. The
     /// `Label("Title", systemImage:)` convenience emits `title: [.text]`,
@@ -1461,9 +1470,11 @@ extension ViewNode {
         case .text, .styledText, .dateText, .image, .symbolImage, .bundleImage,
              .asyncImage, .spacer, .divider, .color, .shape, .progressView,
              .opaque, .slider, .textField, .secureField, .textEditor, .path,
-             .editButton, .indexedForEachSlot:
+             .editButton, .indexedForEachSlot, .callbackSlot:
             // `indexedForEachSlot` has NO tree children — its rows are filled
             // natively from the thunk's per-row factory, not from the IR tree.
+            // `callbackSlot` has NO tree children — the full child-view rendering
+            // is handled by the native thunk slot, not the WASM tree.
             return []
         }
     }

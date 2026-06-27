@@ -140,6 +140,21 @@ public final class EffectSlotTable {
     public func apply(for id: String) -> ((AnyView) -> AnyView)? { effects[id] }
 }
 
+/// Maps a callback-slot id to its host-supplied `() -> AnyView` factory (the thunk's
+/// `__patchCallbackSlots()` entry). The factory renders the full child-view call with a
+/// stable forwarding closure replacing the original `() -> Void` arg. Filled by
+/// `PatchedBodyHost` before rendering; read by the renderer when it hits a
+/// `.callbackSlot(id:…)` node. A missing id is demote-handled upstream (PatchedBodyHost
+/// refuses to render a tree whose callback-slot id the thunk didn't cover), so the
+/// renderer's fallback here (EmptyView) is belt-and-suspenders rather than the primary
+/// safety net. (IR schema v12.)
+public final class CallbackSlotTable {
+    private var factories: [String: () -> AnyView] = [:]
+    public init() {}
+    public func set(_ id: String, _ make: @escaping () -> AnyView) { factories[id] = make }
+    public func view(for id: String) -> AnyView? { factories[id].map { $0() } }
+}
+
 /// Maps a token id to its host-supplied `Color`/`Font`. Filled by `PatchedBodyHost`
 /// from the thunk's `__patchTokens()` before rendering, then read by the renderer
 /// when it hits a `.hostToken(id)` color or a `.fontToken(id)` modifier. A missing
@@ -211,6 +226,13 @@ public struct RenderContext {
     /// that applies the real `.task`/`.onAppear`/gesture/etc. modifier to its subtree. Empty
     /// for a view with no native effect slots.
     public var effectSlots: EffectSlotTable
+    /// Host-supplied CHILD-VIEW CALLBACK SLOTS (`.callbackSlot`, IR schema v12): per slot id,
+    /// the `() -> AnyView` factory (the thunk's `__patchCallbackSlots()` entry) that renders
+    /// the full child-view call with a stable forwarding closure replacing the original
+    /// `() -> Void` arg. The closure body rides WASM as a dispatch sequence (OTA-editable);
+    /// the factory renders the native child-view shell faithfully. Empty for a view with no
+    /// callback slots.
+    public var callbackSlots: CallbackSlotTable
     /// Host-supplied `.animation(_:value:)` TRIGGER VALUES, keyed by the watched
     /// `@State`'s `valueKey` (the name SwiftUI watches for a change to fire the
     /// implicit animation — e.g. `"refreshToast"`). `PatchedBodyHost` extracts each
@@ -236,6 +258,7 @@ public struct RenderContext {
                 rowSlots: RowSlotTable = RowSlotTable(),
                 actionSlots: ActionSlotTable = ActionSlotTable(),
                 effectSlots: EffectSlotTable = EffectSlotTable(),
+                callbackSlots: CallbackSlotTable = CallbackSlotTable(),
                 animationValues: [String: AnyHashable] = [:],
                 dispatcher: Dispatcher? = nil,
                 showOpaqueStubs: Bool = true,
@@ -246,6 +269,7 @@ public struct RenderContext {
         self.rowSlots = rowSlots
         self.actionSlots = actionSlots
         self.effectSlots = effectSlots
+        self.callbackSlots = callbackSlots
         self.animationValues = animationValues
         self.dispatcher = dispatcher
         self.showOpaqueStubs = showOpaqueStubs
@@ -1025,6 +1049,22 @@ struct Renderer {
             if context.showOpaqueStubs {
                 return AnyView(
                     Text("native-rows:\(label)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                )
+            }
+            return AnyView(EmptyView())
+
+        case .callbackSlot(let id, let label):
+            // CHILD-VIEW CALLBACK SLOT (IR schema v12): render the full child-view call from
+            // the thunk's `__patchCallbackSlots()` factory (a `() -> AnyView` that closes over
+            // `self` and passes the stable forwarding closure to the child view). The closure
+            // body is dispatched via WASM (OTA-patchable); this factory renders the native shell.
+            // A missing factory is demote-handled upstream — here belt-and-suspenders:
+            if let view = context.callbackSlots.view(for: id) { return view }
+            if context.showOpaqueStubs {
+                return AnyView(
+                    Text("callback-slot:\(label)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 )

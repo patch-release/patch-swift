@@ -162,7 +162,15 @@ public enum PatchViewIRSchema {
     // DEMOTE-SAFE at render time: an unresolvable trigger scalar degrades to a CONSTANT value (the
     // curve still attaches; the view stays patched; it just never re-triggers) — never a wrong render
     // or a crash. Purely additive: a v11 host decodes v1–v10 guests unchanged.
-    public static let version = 11
+    //
+    // v12 = CHILD-VIEW CALLBACK SLOT: `NodeKind.callbackSlot(id:label:)` — a custom child-view
+    // call whose `() -> Void` closure arg is OTA-patchable via WASM dispatch. The full call (with
+    // a stable position-keyed forwarder) is rendered natively from the thunk's
+    // `__patchCallbackSlots()` table keyed by `id`. The closure body rides WASM as a dispatch
+    // sequence (OTA-editable); the `id` is stable across body edits so fingerprint is stable.
+    // An old SDK (v11 host) hits the per-view `minVersion` gate → demotes only this view to native
+    // (the real thunk renders; no crash). Purely additive: a v12 host decodes v1–v11 guests unchanged.
+    public static let version = 12
 
     /// The oldest guest schema version this host's renderer can still decode.
     /// v1/v2 trees use only cases that still exist, so a v3 host renders them.

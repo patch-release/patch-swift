@@ -1479,6 +1479,7 @@ struct PatchedBodyIDSets: Sendable {
     let row: [String]
     let action: [String]
     let effect: [String]
+    let callback: [String]
     let button: [String]
     /// The watched `@State` names of every `.animation(_:value:)` modifier in the tree
     /// (the `valueKey`s). The host resolves each key's CURRENT scalar from the input JSON
@@ -1488,6 +1489,19 @@ struct PatchedBodyIDSets: Sendable {
     /// still attaches; the view stays patched), so an `.animation`-using view never demotes
     /// for an unresolved value.
     let animationValueKeys: [String]
+
+    init(opaque: [String], token: [String], row: [String], action: [String],
+         effect: [String], callback: [String] = [], button: [String],
+         animationValueKeys: [String]) {
+        self.opaque = opaque
+        self.token = token
+        self.row = row
+        self.action = action
+        self.effect = effect
+        self.callback = callback
+        self.button = button
+        self.animationValueKeys = animationValueKeys
+    }
 }
 
 /// The WASM-DERIVED payload memoized per render input. Holds ONLY data the guest body
@@ -1836,6 +1850,12 @@ public struct PatchedBodyHost: View {
     /// thunk's, closing over `self`) that applies the real `.task`/`.onAppear`/gesture/etc.
     /// modifier expression to its rendered subtree. Empty for a view with no native effect slots.
     let effectSlots: [String: (AnyView) -> AnyView]
+    /// CHILD-VIEW CALLBACK SLOTS for this view's `.callbackSlot` nodes (IR schema v12), keyed by
+    /// the shipped tree's slot id. Each is a `() -> AnyView` factory (the thunk's `__patchCallbackSlots()`
+    /// entry) that renders the full child-view call with a stable forwarding closure in place of the
+    /// original `() -> Void` closure arg. The closure body is lowered as a WASM dispatch sequence —
+    /// editing it is OTA-patchable + fingerprint-stable. Empty for a view with no callback slots.
+    let callbackSlots: [String: () -> AnyView]
 
     @State private var guestState: String = ""
     /// The freshly-marshalled native props snapshot captured at the moment the guest
@@ -1863,7 +1883,8 @@ public struct PatchedBodyHost: View {
          tokens: [String: PatchHostToken] = [:],
          rowSlots: [String: PatchRowSlot] = [:],
          actionSlots: [String: () -> Void] = [:],
-         effectSlots: [String: (AnyView) -> AnyView] = [:]) {
+         effectSlots: [String: (AnyView) -> AnyView] = [:],
+         callbackSlots: [String: () -> AnyView] = [:]) {
         self.typeName = typeName
         self.entry = entry
         self.propsJSON = propsJSON
@@ -1873,6 +1894,7 @@ public struct PatchedBodyHost: View {
         self.rowSlots = rowSlots
         self.actionSlots = actionSlots
         self.effectSlots = effectSlots
+        self.callbackSlots = callbackSlots
     }
 
     public var body: some View {
@@ -2125,6 +2147,22 @@ public struct PatchedBodyHost: View {
             return demoteFallback()
         }
 
+        // CHILD-VIEW CALLBACK SLOT SAFETY NET (IR schema v12): every `.callbackSlot(id:…)` node in
+        // the tree must have a `() -> AnyView` factory from the thunk's `__patchCallbackSlots()`. If a
+        // patch introduced a callback-slot id the installed build doesn't supply (it changed native
+        // child-view code that isn't compiled in), we can't render the slot — DEMOTE the whole view
+        // rather than show a blank hole where the child view should be. A patch that only edits the
+        // callback closure body (which rides WASM as a dispatch sequence) keeps the same slot id
+        // (position-keyed), so this never trips for ordinary callback edits.
+        let neededCallbackIDs = idSets.callback
+        let uncoveredCallbacks = neededCallbackIDs.filter { callbackSlots[$0] == nil }
+        if !uncoveredCallbacks.isEmpty {
+            let name = typeName
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
+        }
+
         var context = RenderContext(showOpaqueStubs: false)
         // Fill the renderer's opaque table with the native leaf renderers. A
         // PARAMETERIZED slot's factory is applied to the emission's `slotArgs[id]`
@@ -2156,6 +2194,13 @@ public struct PatchedBodyHost: View {
         // applied to the modified subtree.
         for id in neededEffectIDs {
             if let applyEffect = effectSlots[id] { context.effectSlots.set(id, applyEffect) }
+        }
+        // Fill the renderer's callback-slot table: each is the thunk's `() -> AnyView` (closing over
+        // `self`, so the real native child-view renders faithfully with the stable forwarding closure
+        // in place of the original `() -> Void` arg). The renderer renders the `callbackSlot` node
+        // by calling this factory and wrapping the result.
+        for id in neededCallbackIDs {
+            if let makeView = callbackSlots[id] { context.callbackSlots.set(id, makeView) }
         }
         // Fill the renderer's `.animation(_:value:)` trigger map: for every animation
         // valueKey in the tree, resolve its CURRENT scalar from the marshalled input JSON
@@ -2191,6 +2236,7 @@ public struct PatchedBodyHost: View {
         let coveredRowIDs = Set(rowSlots.keys)
         let coveredActionIDs = Set(actionSlots.keys)
         let coveredEffectIDs = Set(effectSlots.keys)
+        let coveredCallbackIDs = Set(callbackSlots.keys)
         let geoName = typeName
         let geoEpoch = renderEpoch
         context.geometryRebuild = GeometryRebuild { gid, w, h, minX, minY in
@@ -2211,7 +2257,8 @@ public struct PatchedBodyHost: View {
                 let rowOK = Self.collectRowSlotIDs(child).allSatisfy { coveredRowIDs.contains($0) }
                 let actionOK = Self.collectActionSlotIDs(child).allSatisfy { coveredActionIDs.contains($0) }
                 let effectOK = Self.collectEffectSlotIDs(child).allSatisfy { coveredEffectIDs.contains($0) }
-                if !(opaqueOK && tokenOK && rowOK && actionOK && effectOK) {
+                let callbackOK = Self.collectCallbackSlotIDs(child).allSatisfy { coveredCallbackIDs.contains($0) }
+                if !(opaqueOK && tokenOK && rowOK && actionOK && effectOK && callbackOK) {
                     Task { @MainActor in
                         PatchViewPatchRegistry.shared.markFailed(typeName: geoName, forEpoch: geoEpoch)
                     }
@@ -2494,6 +2541,7 @@ public struct PatchedBodyHost: View {
         var row: [String] = []
         var action: [String] = []
         var effect: [String] = []
+        var callback: [String] = []
         var button: [String] = []
         var animation: [String] = []
 
@@ -2520,6 +2568,7 @@ public struct PatchedBodyHost: View {
             case .opaque(let id, _): opaque.append(id)
             case .indexedForEachSlot(let id, _, _): row.append(id)
             case .actionSlotButton(let id, _, _): action.append(id)
+            case .callbackSlot(let id, _): callback.append(id)
             case .button(let actionID, _, _): button.append(actionID)
             default: break
             }
@@ -2540,7 +2589,8 @@ public struct PatchedBodyHost: View {
         }
         walk(node)
         return PatchedBodyIDSets(opaque: opaque, token: token, row: row, action: action,
-                                 effect: effect, button: button, animationValueKeys: animation)
+                                 effect: effect, callback: callback, button: button,
+                                 animationValueKeys: animation)
     }
 
     /// Every `.opaque` node id in the tree — the leaves the thunk must supply a
@@ -2599,6 +2649,21 @@ public struct PatchedBodyHost: View {
                 for child in m.contentNodes { walk(child) }
             }
             for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Every `.callbackSlot(id:…)` node id in the tree — the CHILD-VIEW CALLBACK SLOTS the
+    /// thunk must supply a `() -> AnyView` closure for. Walks `childNodes` AND modifier
+    /// content (a callback slot nested in a sheet/overlay body must still be covered). An
+    /// uncovered id demotes the whole view (like an opaque leaf / action slot / effect slot).
+    nonisolated static func collectCallbackSlotIDs(_ node: ViewNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: ViewNode) {
+            if case .callbackSlot(let id, _) = n.kind { out.append(id) }
+            for child in n.childNodes { walk(child) }
+            for m in n.modifiers { for child in m.contentNodes { walk(child) } }
         }
         walk(node)
         return out
@@ -2797,13 +2862,22 @@ extension Patch {
     /// (which can't be re-run in WASM) comes from this compiled-in `self`-closing closure applied to
     /// the rendered subtree. Like the others, invoked only when routing; defaulted so existing thunks
     /// keep compiling (no effect slots → an effect-using view stays demoted, identical to before).
+    ///
+    /// `callbackSlots` is a provider of CHILD-VIEW CALLBACK SLOTS (`() -> AnyView` factories, closing
+    /// over the view's `self`), keyed by the position-keyed id the tree carries in `.callbackSlot(id:…)`
+    /// (IR schema v12). This is what lets a custom child-view call whose `() -> Void` closure arg is
+    /// OTA-patchable LOWER — the child-view call (with a stable forwarding closure) renders natively
+    /// via this factory while the closure body rides WASM as a dispatch sequence (OTA-editable). Like
+    /// the others, invoked only when routing; defaulted so existing thunks keep compiling (no callback
+    /// slots → a callback-using view simply isn't routable, identical to the pre-change demote behavior).
     @MainActor
     public func thunkBody(typeName: String, baselineHash: String? = nil, instance: Any,
                           slots: () -> [String: ([String]) -> AnyView] = { [:] },
                           tokens: () -> [String: PatchHostToken] = { [:] },
                           rowSlots: () -> [String: PatchRowSlot] = { [:] },
                           actionSlots: () -> [String: () -> Void] = { [:] },
-                          effectSlots: () -> [String: (AnyView) -> AnyView] = { [:] }) -> PatchedBodyHost? {
+                          effectSlots: () -> [String: (AnyView) -> AnyView] = { [:] },
+                          callbackSlots: () -> [String: () -> AnyView] = { [:] }) -> PatchedBodyHost? {
         guard currentConfiguration != nil else { return nil }
         guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName) else {
             return nil
@@ -2836,7 +2910,40 @@ extension Patch {
                                tokens: tokens(),
                                rowSlots: rowSlots(),
                                actionSlots: actionSlots(),
-                               effectSlots: effectSlots())
+                               effectSlots: effectSlots(),
+                               callbackSlots: callbackSlots())
+    }
+
+    /// Routes a CHILD-VIEW CALLBACK fired by a native slot's forwarding closure
+    /// (`{ self.__patchDispatchCallback("<id>") }`, generated by the thunk) into the WASM dispatch
+    /// for `typeName`. The guest's `dispatch(event: callbackId)` applies the mutation rule the engine
+    /// recorded for the callback body, and the resulting scalar state is written back into the live
+    /// instance's `@State`/`@Binding`/`@AppStorage` — which triggers SwiftUI to re-render the parent
+    /// (the SAME `_patchWrite` path a lowered `Button` tap uses, just fired from the child's action).
+    /// The callback BODY thus rides WASM and is OTA-patchable.
+    ///
+    /// SOUNDNESS: only DISPATCHABLE callback bodies reach here — the engine gates callback-slot
+    /// creation on `recordActionMutation` succeeding, so a non-dispatchable body (a native call) stays
+    /// a native slot and never forwards to this. On ANY failure (no patchable entry, no dispatch
+    /// export, a dispatch/decode error) this is a NO-OP, never a crash — the worst case is the callback
+    /// does nothing, never a wrong render. The forwarder only exists on the WASM-routed render path, so
+    /// a natively-rendered view runs its ORIGINAL callback and never calls this. We use only
+    /// `result.state` (the dispatch's rebuilt tree is ignored — the write-back's re-render does a full
+    /// `thunkBody` render with tokens/slots), so no token/slot plumbing is needed here.
+    @MainActor
+    public func dispatchCallback(typeName: String, instance: Any, callbackId: String) {
+        guard currentConfiguration != nil else { return }
+        guard let entry = PatchViewPatchRegistry.shared.entryIfPatchable(typeName: typeName),
+              let dispatchExport = entry.dispatch else { return }
+        let extraction = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+        do {
+            let result = try dispatch(state: extraction.json,
+                                      event: EventID(callbackId), value: .none,
+                                      export: dispatchExport)
+            PatchedBodyHost.applyWritebacks(extraction.writebacks, newStateJSON: result.state)
+        } catch {
+            // Demote-safe: a dispatch failure leaves instance state untouched (no-op callback).
+        }
     }
 }
 #endif

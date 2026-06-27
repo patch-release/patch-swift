@@ -482,6 +482,13 @@ public enum EmbeddedJSON {
                     ob.field("label") { v in v.array { ar in for c in label { ar.element { emitNode(c, into: &$0) } } } }
                 }
             }
+        case .callbackSlot(let id, let label):
+            singleAssoc(&out, "callbackSlot") { o in
+                o.object { ob in
+                    ob.field("id") { $0.string(id) }
+                    ob.field("label") { $0.string(label) }
+                }
+            }
         case .label(let title, let icon):
             singleAssoc(&out, "label") { o in
                 o.object { ob in
