@@ -1,0 +1,90 @@
+---
+title: Apple compliance
+description: Why over-the-air Swift updates are permitted, and the boundaries you must stay inside.
+sidebar:
+  order: 41
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The most common question about Patch is whether Apple allows it. They do, under
+a long-standing provision of the Developer Program License Agreement, and it is
+the same provision Expo/EAS Update and Microsoft CodePush have relied on for
+close to a decade across tens of thousands of App Store apps.
+
+## The provision
+
+Apple's Developer Program License Agreement permits an application to download
+and run **interpreted code**, provided that the downloaded code:
+
+- does not change the **primary purpose** of the application,
+- does not create a **store or storefront** for other code, and
+- does not **bypass** the operating system's sandbox or code-signing protections.
+
+<Aside type="caution" title="Verify the clause yourself">
+This provision has been renumbered across revisions of the agreement — older
+material (including some of our own, now corrected) cites a section number that
+no longer applies. Rather than quote a number that may be stale, we link the
+agreement itself. Read the current text in the
+[Apple Developer Program License Agreement](https://developer.apple.com/support/terms/),
+and check the [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
+alongside it.
+</Aside>
+
+## How Patch meets it
+
+**Your signed binary is never modified.** Patch does not rewrite, re-sign, or
+replace the app you shipped through review. The binary on the device is byte-for-byte
+the one Apple notarised.
+
+**Only interpreted code updates.** A patch is WebAssembly, executed by the
+[WasmKit](https://github.com/swiftwasm/WasmKit) interpreter embedded in your app.
+It is never native machine code, and it is never loaded as an executable.
+
+**The sandbox is intact.** Patched code reaches the system only through host
+functions your binary already exposes. It cannot call a framework you did not
+link, cannot acquire an entitlement you did not declare, and cannot escape the
+app sandbox. This is enforced by the architecture, not by policy — see
+[what Patch can change](/coverage/).
+
+**The primary purpose is unchanged.** Patch is for fixing and iterating on the
+app you shipped. Which leads to the part that is genuinely your responsibility.
+
+## Where the line is
+
+The compliance argument holds for the thing Patch is designed for: fixing bugs,
+correcting copy, adjusting layout, changing business rules, iterating on views.
+
+It does not cover using OTA updates to turn your app into a different product
+after review. That is a real limit, and it is on you rather than on the
+mechanism:
+
+- Do not ship a patch that introduces functionality you concealed during review.
+- Do not use patches to enable features rejected by App Review.
+- Do not build a mechanism for users to obtain or run third-party code.
+
+Patch cannot enforce this — no OTA tool can. It is a term you accepted as a
+developer.
+
+## The precedent
+
+React Native's CodePush, Expo's EAS Update, and Flutter's Shorebird all deliver
+interpreted code updates under the same provision. The practice is well
+established, widely documented, and has been operating at scale for years.
+
+Patch differs in what it interprets — WebAssembly compiled from your Swift,
+rather than JavaScript or Dart — but the compliance position is identical, and
+if anything narrower: the code that ships is a fragment that can only call into
+symbols your reviewed binary already contains.
+
+## If a reviewer asks
+
+Be straightforward. The app downloads interpreted WebAssembly used to update
+covered application logic and UI. The signed binary is unchanged, no new
+capabilities are introduced, and nothing bypasses the sandbox or code signing.
+
+<Aside type="note">
+We are not your lawyers, and this page is not legal advice. If your app is in a
+regulated category, or you are unsure whether a change alters your primary
+purpose, get your own advice.
+</Aside>

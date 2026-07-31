@@ -1,0 +1,130 @@
+---
+title: Set up with AI
+description: Prompts for setting Patch up with an AI assistant.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Already using an AI coding assistant — Claude Code, Cursor, Windsurf, GitHub Copilot, or similar? Hand it the prompt below and it will set Patch up in your app for you. Under the hood it follows the exact same [Quick Start](/quickstart/) flow: install `patchcli`, run `patchcli init` (which registers the app, adds the PatchSDK package, injects `Patch.configure(…)`, and makes your SwiftUI views patchable), then show you how to ship an update with `patchcli release`.
+
+<Aside type="note" title="Open your iOS project first">
+Point your assistant at the directory that contains your `.xcodeproj` / `.xcworkspace` before pasting, so it runs in the right place. `patchcli init` is safe to re-run — it skips any step that's already done.
+</Aside>
+
+## Prompt — assistant with terminal access
+
+Use this if your assistant can run shell commands (Claude Code, Cursor agent mode, Windsurf Cascade, etc.). Copy it, paste it into the chat, and let it run the CLI.
+
+```text title="paste into your AI assistant"
+Please set up Patch (OTA over-the-air code updates for native Swift iOS apps)
+in this project. The official docs are at https://docs.patchrelease.com
+(LLM-readable: https://docs.patchrelease.com/llms.txt and
+https://docs.patchrelease.com/llms-full.txt). Follow the real onboarding flow:
+
+1. Install the CLI with Homebrew:
+       brew install patch-release/tap/patchcli
+   Then install the Swift→WebAssembly toolchain it needs (one command,
+   verifies checksums):
+       patchcli setup
+
+2. From this project's root directory, run:
+       patchcli init
+   This single command will: detect the Xcode project/target/bundle id;
+   register the app via a browser link flow (it opens
+   app.patchrelease.com/cli-connect — I'll sign in and click "Register app",
+   and the CLI receives the app key automatically); add the PatchSDK Swift
+   package (https://github.com/patch-release/patch-swift); propose a diff that
+   inserts Patch.configure(appKey:appID:fingerprint:) plus
+   Patch.shared.start() into my @main App struct (ask me before applying);
+   and make my SwiftUI views patchable (insert `dynamic` + generate the
+   dynamic-replacement thunks). Note: this view-prep step ALSO runs
+   automatically on every "patchcli release" / "push" / "build", so views I
+   add later are picked up with no extra step — I never have to remember to
+   run "patchcli prepare" manually.
+   Useful flags: --yes (accept the code diff automatically), --no-open
+   (don't auto-open the browser), --skip-package / --skip-code (skip a step),
+   --manual (just print the manual steps). Do NOT pass --yes unless I ask.
+
+3. Verify the setup:
+   - The PatchSDK package is added to the Xcode project (and the project
+     still resolves/builds).
+   - "import PatchSDK" and a Patch.configure(...) + Patch.shared.start() call
+     exist in my @main App struct's init().
+   - my view bodies are marked dynamic and the dynamic-replacement thunks were
+     generated. (This re-runs automatically on every "patchcli release" so views
+     I add later are picked up; I can run "patchcli prepare --check" in CI to
+     verify, or pass "--no-prepare" to opt out.)
+   - .Patch.yml exists in the project root with app_key / app_id.
+
+4. After my next App Store build, I should run "patchcli fingerprint register"
+   once to baseline the native shell (pushes are gated on this fingerprint).
+
+Then explain, briefly, how I ship an update: I edit my Swift normally, then run
+   patchcli release --rollout 10 --message "what changed"
+which builds the WASM module, checks the fingerprint gate, uploads, and
+activates it to 10% of devices — no App Store review. The on-device SDK fetches
+and hot-swaps it on next launch. I widen the rollout with the dashboard or CLI,
+and "patchcli rollback" reverts instantly.
+
+If any step can't run (no Homebrew, no network, an unusual project layout, or a
+UIKit AppDelegate app), tell me exactly which step failed and fall back to the
+manual instructions at https://docs.patchrelease.com/quickstart/#manual-setup-the-fallback.
+Don't invent
+flags or steps — only use what's in the docs above.
+```
+
+## Prompt — assistant without terminal access
+
+Use this if your assistant edits files but can't run a shell (e.g. an in-editor chat with no command execution). It will make the in-project code changes and hand you the two commands to run yourself.
+
+```text title="paste into your AI assistant"
+Help me set up Patch (OTA over-the-air code updates for native Swift iOS apps)
+in this project. You can't run shell commands, so do the file edits you can and
+give me the exact commands to run myself. The docs are at
+https://docs.patchrelease.com (LLM-readable:
+https://docs.patchrelease.com/llms.txt). Follow the real flow:
+
+1. Tell me to run these two commands in a terminal myself, in this order:
+       brew install patch-release/tap/patchcli
+       patchcli init
+   Explain that "patchcli init" does most of the setup automatically:
+   registers the app in the browser (app.patchrelease.com/cli-connect), adds the
+   PatchSDK package, proposes the Patch.configure(...) code diff, and makes my
+   SwiftUI views patchable. Tell me this view-prep step also runs automatically
+   on every "patchcli release" (so views I add later need no extra step), that
+   it's safe to re-run, and that it falls back to printing manual steps if
+   anything can't be done automatically.
+
+2. As a fallback (the manual path at
+   https://docs.patchrelease.com/quickstart/#manual-setup-the-fallback),
+   prepare these edits so I'm
+   ready either way:
+   - In Xcode I'll add the Swift package
+     https://github.com/patch-release/patch-swift (product PatchSDK, from 1.0.0)
+     via File → Add Package Dependencies… — or add it to my Package.swift if I
+     have one; show me the Package.swift dependency + target lines.
+   - In my @main App struct, add "import PatchSDK" and, in init(), call:
+         Patch.configure(.init(
+           appKey: "pak_…",        // from .Patch.yml after I run patchcli init
+           appID: "…",             // baked in by patchcli init
+           fingerprint: "…"))      // this build's native shell
+         Task { await Patch.shared.start() }
+     Show me the edit in context against my actual App struct.
+
+3. Tell me that after running "patchcli init" I should confirm a .Patch.yml file
+   appears in the project root with app_key / app_id, and that my SwiftUI view
+   bodies were marked dynamic. (This view-prep re-runs automatically on every
+   "patchcli release", so I never have to remember it when I add new views.)
+
+Then explain how I ship an update: edit Swift normally, then run
+   patchcli release --rollout 10 --message "what changed"
+which compiles the change to WebAssembly and ships it as an OTA patch (no App
+Store review); the SDK hot-swaps it on next launch, and "patchcli rollback"
+reverts instantly. Don't invent flags or steps — only use what's in the docs.
+```
+
+<Aside type="note" title="Tip">
+Whichever variant you use, the assistant is just driving the documented `patchcli` commands — there's nothing AI-specific to install. If you'd rather do it yourself, the [Quick Start](/quickstart/) walks through the same steps by hand, and [Manual setup](/quickstart/#manual-setup-the-fallback) lists the fallback for unusual projects.
+</Aside>

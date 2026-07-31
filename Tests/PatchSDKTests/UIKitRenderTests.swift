@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitRenderTests — the SDK-side tests for the UIKitNode IR + UIKit renderer.
 // =============================================================================
 // Two halves, mirroring how the SwiftUI renderer is tested:

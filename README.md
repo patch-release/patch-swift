@@ -1,310 +1,157 @@
-# Patch Swift SDK
+# Patch
 
-> **Over-the-air (OTA) code updates for native Swift iOS apps** — write normal
-> Swift, ship a fix in minutes, no App Store review, instant rollback.
+**Over-the-air code updates for native Swift iOS apps.**
 
-[![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/platforms-iOS%2016%2B%20%C2%B7%20macOS%2014%2B%20%C2%B7%20tvOS%2016%2B%20%C2%B7%20visionOS%201%2B-blue.svg)](https://developer.apple.com)
-[![SwiftPM compatible](https://img.shields.io/badge/SwiftPM-compatible-brightgreen.svg)](https://swift.org/package-manager)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Write ordinary Swift. Patch works out which parts can run as WebAssembly,
+compiles those, and ships them as a small module that runs on-device in
+[WasmKit](https://github.com/swiftwasm/WasmKit). Your signed App Store binary
+never changes — only the interpreted layer updates. No App Store review, instant
+rollback.
 
-**Patch** ships over-the-air updates to native iOS and macOS apps. You write
-Swift; the Patch CLI compiles the changed code to a tiny WebAssembly module and
-delivers it to devices without an App Store release. This package is the
-**on-device runtime**: it downloads, verifies, caches, and executes those
-modules safely, with an always-correct fallback to your shipped app if anything
-goes wrong.
+```bash
+brew install patch-release/tap/patchcli
+cd MyApp && patchcli init
+```
 
-**Yes — this updates *native* Swift.** It's a common misconception that native
-iOS code can't be updated over the air. CodePush and Expo / EAS Update update a
-React Native **JavaScript** bundle; [Shorebird](https://patchrelease.com/shorebird-alternative)
-updates a Flutter **Dart** bundle — none of them can touch native Swift. Patch
-is built for exactly that: covered Swift logic, async/await, and SwiftUI views
-ship as WebAssembly and run on-device in
-[WasmKit](https://github.com/swiftwasm/WasmKit) — no JavaScript bridge, no Dart,
-no web view, no cross-platform framework. OS-API code stays native
-automatically, with a fallback to your bundled binary so an update can't break
-the app. The model is permitted under Apple's Developer Program License
-Agreement §3.3.2 (downloaded interpreted code — the same provision CodePush and
-Expo rely on), and your signed binary is never modified.
+```
+Swift source ──▶ partition ──▶ WebAssembly ──▶ device (WasmKit)
+                     │
+                     └──▶ anything touching OS APIs stays in your signed binary
+```
 
-- **Website:** [patchrelease.com](https://patchrelease.com)
-- **Docs & API reference:** [docs.patchrelease.com](https://docs.patchrelease.com)
-- **Install the CLI:** `brew install patch-release/tap/patchcli`
+Not React Native. Not a web view. Not a cross-platform runtime. CodePush and
+Expo/EAS Update patch a JavaScript bundle; Shorebird patches Dart. This patches
+**Swift**.
+
+📖 **[docs.patchrelease.com](https://docs.patchrelease.com)** · 🚀 [patchrelease.com](https://patchrelease.com)
 
 ---
+
+## What's in this repo
+
+| Path | What | Licence |
+|---|---|---|
+| `Sources/`, `Tests/` | **PatchSDK** — the on-device runtime: WasmKit, value marshalling, update lifecycle, host bridges, the SwiftUI renderer | MIT |
+| `cli/` | **patchcli** — the engine: partitioning, Swift→WebAssembly compilation, SwiftUI/UIKit lowering, project integration | Apache-2.0 |
+| `docs/` | The documentation site (Astro + Starlight) | MIT |
+| `tools/` | Coverage measurement harness and dev tooling | MIT |
+
+The SDK executes a WebAssembly interpreter **inside your users' app**, so it is
+MIT — maximally permissive and auditable. The engine is Apache-2.0 for its
+**express patent grant**.
+
+The hosted control plane — rollouts, cohorts, targeting, analytics, audit, team
+accounts — is a commercial service and is not in this repo. The **update protocol
+it speaks is documented**, so you can serve patches from your own infrastructure:
+see [Running it yourself](https://docs.patchrelease.com/self-hosting/).
 
 ## Install
 
-Add the package with Swift Package Manager:
+**SDK** — Swift Package Manager:
 
 ```swift
-// Package.swift
 .package(url: "https://github.com/patch-release/patch-swift", from: "1.5.0")
 ```
 
-```swift
-// target dependencies
-.product(name: "PatchSDK",     package: "patch-swift"),   // runtime + loader + bridges
-.product(name: "PatchSwiftUI", package: "patch-swift"),   // optional: live SwiftUI rendering
-```
-
-Or in Xcode: **File ▸ Add Package Dependencies…** and enter the repository URL.
-
-**Requirements:** Swift 6 (Xcode 16+). Platforms: macOS 14+, iOS 16+, tvOS 16+,
-visionOS 1+.
-
-The runtime is pure Swift, built on
-[WasmKit](https://github.com/swiftwasm/WasmKit) and its WASI Preview 1 host. The
-only additional linkages are system frameworks that already ship with the OS
-(CryptoKit, Compression, Security, and libbz2), so the SDK adds **no third-party
-dependencies** and cross-compiles unchanged for the iOS Simulator and device.
-
----
-
-## Quick start
-
-```swift
-import PatchSDK
-
-// Configure once, early in app launch.
-// `apiBaseURL` is optional — it defaults to the production Patch API.
-Patch.configure(PatchConfiguration(
-    appKey: "<your app key>",
-    appID: "<your app id>",
-    fingerprint: "<build fingerprint>",
-    deviceID: "<stable anonymous id>"))
-
-// Optionally ship an in-app module as the bundled fallback.
-Patch.shared.registerBundledModule(version: "1.0.0", bytes: bundledWasmBytes)
-
-// Activate the best cached/bundled module immediately (offline-safe),
-// then poll for an update in the background.
-await Patch.shared.start()
-
-// Call into the active module:
-let total = try Patch.shared.call("calculate_order_total", order, returning: Int.self)
-```
-
-`Patch.configure(_:)` sets up the on-disk cache, the default host bridges, and
-the update checker. `Patch.shared.start()` activates the best available module
-through the fallback chain (so the app always launches, even offline) and then
-checks the backend for a newer one. Point `apiBaseURL` at a self-hosted or
-staging backend if you aren't using the hosted Patch API, or pass `nil` to
-disable remote update checks entirely.
-
-### Imperative updates
-
-If you'd rather control when updates apply, use the report-only API instead of
-`start()`'s auto-apply:
-
-```swift
-if let info = try await Patch.shared.checkForUpdate() {
-    try await Patch.shared.fetchUpdate()   // download + verify, don't apply yet
-    try Patch.shared.reloadAsync()         // hot-swap the new module in now
-}
-```
-
-`Patch.shared.updateState` is a `@MainActor` observable you can bind directly in
-SwiftUI to drive update banners or prompts.
-
----
-
-## How it works
-
-### Safe activation and fallback
-
-`Patch` keeps three module slots: **current** (the active OTA module),
-**previous** (the prior OTA module, for one-step rollback without a network
-call), and **bundled** (a module you ship inside the app, the last rung before
-running no OTA module at all).
-
-On activation, `FallbackManager` walks **current → previous → bundled →
-disabled**. Each rung is validated by actually instantiating it (with an
-optional smoke-test probe), so a module that fails to load or traps on a key
-export is skipped. If nothing activates, Patch lands on **disabled** — your
-native app keeps working and is never crashed by a bad patch.
-
-### Download, verify, decompress
-
-`ModuleLoader` runs the full pipeline: download → (brotli) decompress → SHA-256
-verify against the backend's hash → cache → activate. Verification is over the
-raw, uncompressed bytes; a mismatch is rejected before anything is cached or
-activated. When the backend offers a binary diff, the loader applies a
-client-side **bsdiff4 (BSDIFF40)** patch against the cached previous module and
-re-verifies the result. Any diff problem cleanly falls back to a full download,
-so the diff path is purely a bandwidth optimization — the full download is
-always correct.
-
-### Thread safety
-
-Every host→WASM call funnels through a serial dispatch queue, so the
-single-threaded WASM instance is never re-entered concurrently. A
-`pthread_rwlock` guards the active module: calls hold the read lock for their
-whole duration, while hot-swap builds the new instance off-lock and swaps it in
-under the write lock — so a swap can never free a runtime out from under an
-in-flight call.
-
----
-
-## Calling convention (the Patch ABI)
-
-### Scalars
-
-| Swift type        | WASM value |
-|-------------------|------------|
-| `Bool`, `Int32`   | `i32`      |
-| `Int`, `Int64`    | `i64`      |
-| `Double`          | `f64`      |
-
-(`Int` is 64-bit on all Apple targets, so it marshals as `i64`.)
-
-### Strings, Data, and Codable
-
-Variable-length values cross as a `(ptr: i32, len: i32)` pair into the module's
-exported `memory` (no NUL terminator; the length is explicit). The host reserves
-guest memory through the module's exported allocator (`patch_malloc`), writes
-the bytes, calls the export, then frees with `patch_free`.
-
-- **String** — UTF-8 bytes.
-- **Data** — raw bytes.
-- **Codable** — a MessagePack-encoded blob. Wrap a value in `MessagePackBridge`
-  to marshal it. The codec is a small, vendored, pure-Swift implementation, so
-  the SDK has zero native-only dependencies.
-
-### Optionals
-
-`tag = 0` means `nil` (no value words follow); `tag = 1` means present, followed
-by the wrapped type's own value words.
-
-### Marshalling API
-
-```swift
-let ctx = MarshalContext(runtime: runtime)
-defer { ctx.release() }                  // frees buffers allocated during the call
-let args = try "hello".lower(into: ctx)  // -> [.i32(ptr), .i32(len)]
-var i = 0
-let s = try String.raise(from: results, index: &i, ctx: ctx)
-
-// Codable via MessagePack:
-let blob = MessagePackBridge(myCodableStruct)
-```
-
----
-
-## Host bridges
-
-A bridge exposes a native capability to the guest module as an importable host
-function. PatchSDK ships a broad set of bridges (networking, storage,
-notifications, navigation, Keychain, date/locale, JSON, logging, analytics,
-camera, location, contacts, calendar, haptics, biometrics, and many more), all
-registered under the `patch` / `patch_host` import namespaces.
-
-Variable-length results use a packed convention: a bridge writes bytes into
-guest memory via `patch_malloc` and returns a single `i64` packing
-`(ptr << 32) | len`; the guest unpacks, reads the range, and frees it. `0` means
-nil. `BridgeContext` wraps the call so bridges get bounds-checked
-read/write/alloc against the calling instance's memory.
-
-### Custom bridges
-
-`Patch.shared.bridges` is a `BridgeRegistry`. Register your own before
-`configure`/`start`:
-
-```swift
-// A whole Bridge:
-Patch.shared.bridges.register(MyAnalyticsBridge())
-
-// Or a single raw host function (lowest level):
-Patch.shared.bridges.registerFunction(
-    module: "patch", name: "my_fn",
-    parameters: [.i32, .i32], results: [.i64]
-) { caller, args in
-    let ctx = BridgeContext(caller: caller)
-    let input = try ctx.readString(ptr: args[0].i32, len: args[1].i32)
-    return [try ctx.packedResult(myNativeWork(input))]
-}
-```
-
----
-
-## Live SwiftUI view patching — out of the box (no code changes)
-
-Your SwiftUI views are patchable **with zero changes to the views themselves** —
-no wrapper, no `PatchView`. Run `patchcli prepare` once (it's also part of
-`patchcli init`): it marks each `var body: some View` `dynamic` and generates
-`@_dynamicReplacement(for: body)` thunks (the same mechanism Xcode Previews uses),
-compiled into your app. When you ship an OTA patch, the engine lowers the changed
-view body to a `ViewNode` tree; on device the thunk renders it as **real** SwiftUI
-(`PatchRender` reconstitutes real `Text`, stacks, modifiers, and controls) and runs
-its interaction logic in the sandbox — otherwise it falls through to your original
-compiled `body`. Edit a view's text, a modifier, the layout, or add a subview, then
-`patchcli release` — it appears on devices with no App Store review.
-
-**Mixed views:** a body need not be fully lowerable. The lowered parts ride WASM
-(patchable); non-lowerable leaves (a custom child view, `Color(red:…)`, an
-unsupported modifier) render natively from compiled-in slot closures — so almost
-any view is routable, including interactive `Toggle`/`Stepper`/`TextField` screens.
-
-**Zero overhead on what you didn't patch.** Preparing a view for OTA does *not*
-make it slower in the common case. Each generated thunk bakes in a content hash of
-the body it was built from; on device the SDK compares that against the active
-module's hash for the view. When they match — i.e. no OTA patch has actually
-changed this view — the thunk renders your **original native body with zero WASM
-round-trip** (no marshalling, no interpreter), so an unpatched prepared view costs
-only a cheap registry read and a string compare. Only views a patch genuinely
-changed run in WasmKit. For a patched view whose structure is static, the rendered
-tree is cached after the first frame, so subsequent frames skip the interpreter
-too. This is fail-safe by construction: any case where equality can't be proven
-(an older build, a missing hash) routes through WASM, so a real patch is never
-silently dropped.
-
-`Patch.shared.thunkBody(...)` is the entry the generated thunks call; `PatchViewIR`
-is the shared, dependency-free IR (depend on it alone to build or inspect a
-`ViewNode` tree). For an explicitly module-driven view you can still use
-`Patch.shared.patchView(viewBodyExport:)` directly.
-
----
-
-## Binary size
-
-The realistic, dead-stripped contribution to a shipping iOS app is **~1.1–1.5
-MiB** (≈1.1 MiB of loadable code/data; ~1.5 MiB as a conservative on-disk
-number). PatchSDK links only the three WasmKit runtime products it needs — the
-text-format and component tooling are never pulled in. System frameworks
-(CryptoKit, Compression, Security, libbz2) ship with the OS and add effectively
-nothing.
-
----
-
-## Build & test
-
-Use the standard Apple/Xcode toolchain — this is a normal Swift package:
+**CLI** — Homebrew:
 
 ```bash
-swift build
-swift test
+brew install patch-release/tap/patchcli
 ```
 
-### iOS cross-compile
+Or build it from source (see below).
+
+## What it can and can't update
+
+This is the part worth reading before you invest any time.
+
+Across a **24-app public benchmark** — our own apps and well-known open-source
+ones — **74.6% of SwiftUI view bodies** lower to WebAssembly and ship over the
+air (82.5% measured per element). Per app it ranges from **45% to 98%**.
+
+Three limits are permanent:
+
+- **The binary-symbol wall.** A patch can only call symbols already linked into
+  your signed binary. New frameworks, new entitlements, and new native symbols
+  need an App Store release.
+- **Roughly a quarter of views stay native.** Mostly custom child views the
+  engine can't reconstruct, and unsupported modifiers. They still render — they
+  just render natively, from your binary.
+- **Changing native code invalidates pending patches.** The native shell is
+  fingerprinted; edit it and patches built against the old shell stop applying
+  until you re-register. That's the safety mechanism, and it's what people hit
+  most often.
+
+A view that can't lower is never silently broken, and if a patch fails to run at
+all the SDK falls back to the code you shipped through review. An update cannot
+take your app down.
+
+Full detail: [what Patch can & can't update](https://docs.patchrelease.com/coverage/).
+
+### Reproduce those numbers
+
+They're generated from a committed census, not typed by hand:
 
 ```bash
-# Simulator
-SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-swift build -Xswiftc -sdk -Xswiftc "$SDK" \
-  -Xswiftc -target -Xswiftc arm64-apple-ios16.0-simulator
-
-# Device
-ISDK=$(xcrun --sdk iphoneos --show-sdk-path)
-swift build -Xswiftc -sdk -Xswiftc "$ISDK" \
-  -Xswiftc -target -Xswiftc arm64-apple-ios16.0
+./corpus/fetch.sh                       # 20 open-source apps, pinned commits
+./tools/swiftui-corpus-coverage/run.sh  # the census
 ```
 
-`Examples/PatchSDKDemo` is a minimal SwiftUI app that links the SDK and runs a
-real WebAssembly module on the iOS Simulator; see `Examples/README.md`.
+## Is this allowed by Apple?
 
----
+Yes, under the provision of the Developer Program License Agreement that permits
+an app to download and run **interpreted** code — the same provision Expo/EAS
+Update and CodePush have relied on for close to a decade across tens of thousands
+of App Store apps.
 
-## License
+Your signed binary is never modified, only interpreted WebAssembly updates, and
+patched code can only reach the system through host functions your binary already
+exposes. Read the detail and the caveats:
+[Apple compliance](https://docs.patchrelease.com/apple-compliance/).
 
-[MIT](LICENSE).
+## Building from source
+
+```bash
+git clone https://github.com/patch-release/patch-swift
+cd patch-swift
+
+# SDK
+swift build && swift test
+
+# Engine
+cd cli && swift build -c release
+.build/release/patchcli --help
+```
+
+Compiling *to* WebAssembly additionally needs the **swift.org** toolchain plus
+the WebAssembly SDK — the Apple/Xcode toolchain cannot target WebAssembly.
+
+```bash
+patchcli setup    # installs the pinned toolchain + WASM SDK
+patchcli doctor   # checks your setup
+```
+
+> **PATH order matters.** Building the CLI for your Mac uses the Apple toolchain;
+> compiling patches uses the swift.org one. `setup` and `doctor` handle this — if
+> you're doing it by hand, put `/usr/bin` first for host builds and
+> `~/.swiftly/bin` first for WebAssembly builds.
+
+## Contributing
+
+Issues and pull requests welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Two things make a bug report immediately actionable:
+
+```bash
+patchcli doctor --report   # versions, toolchain, fingerprint state — no source
+```
+
+and, if a view didn't patch when you expected it to, the per-view demote
+diagnostic that `patchcli build` already prints.
+
+Security issues: please don't open a public issue — see [SECURITY.md](SECURITY.md).
+
+## Licence
+
+SDK MIT · engine Apache-2.0 · see [LICENSE](LICENSE), [cli/LICENSE](cli/LICENSE)
+and [NOTICE](NOTICE).

@@ -44,7 +44,14 @@ let package = Package(
         // it calls the guest over the packed-(ptr,len)+JSON ABI, decodes the
         // `UIKitEmission`, renders it via `renderUIKit`, and installs it into a cell's
         // `contentView`. Depends on the runtime (PatchSDK) + IR + the UIKit renderer.
-        .library(name: "PatchUIKit", targets: ["PatchUIKit"])
+        .library(name: "PatchUIKit", targets: ["PatchUIKit"]),
+        // The generalized "call what's already linked" host bridge runtime
+        // (Lever #2, part A): the THREE generic `patch_host.*` imports
+        // (call/release/have), the TLV codec, the handle table, and the symbol
+        // registry + manifest reader. Depends only on WasmKit (no SwiftUI/UIKit),
+        // so it adds no UI weight. The build-time resolver-thunk registers native
+        // thunks into it via its public `register(id:signature:_:)` API.
+        .library(name: "PatchHostBridge", targets: ["PatchHostBridge"])
     ],
     dependencies: [
         // Pinned exactly to 0.2.2 — the version proven in poc/wasmkit-ios.
@@ -102,9 +109,26 @@ let package = Package(
             dependencies: ["PatchViewIR"]
         ),
 
+        // The generalized host-bridge runtime (Lever #2, part A). Foundation +
+        // WasmKit only; the three generic `patch_host.*` imports + TLV codec +
+        // handle table + symbol registry/manifest. PatchSDK depends on it so the
+        // generic dispatch can be layered into the runtime's import set alongside
+        // the curated bridges. Kept a SEPARATE target (not folded into PatchSDK)
+        // so the dispatch core (Foundation-only) is unit-testable in isolation and
+        // the WasmKit-facing glue stays thin. iOS-safe (pure Swift + WasmKit).
+        .target(
+            name: "PatchHostBridge",
+            dependencies: [
+                .product(name: "WasmKit", package: "WasmKit")
+            ]
+        ),
+
         .target(
             name: "PatchSDK",
             dependencies: [
+                // The generalized host-bridge runtime (Lever #2): the three
+                // generic `patch_host.*` imports + TLV/handle/registry core.
+                "PatchHostBridge",
                 // Binary-size note (Track D size pass): PatchSDK links these three
                 // WasmKit products. They transitively pull exactly the runtime —
                 // WasmParser, WasmTypes, SystemExtras, _CWasmKit, SystemPackage —
@@ -170,7 +194,11 @@ let package = Package(
                 "PatchRenderUIKit",
                 "PatchSwiftUI",
                 "PatchUIKit",
-                .product(name: "WasmKit", package: "WasmKit")
+                "PatchHostBridge",
+                .product(name: "WasmKit", package: "WasmKit"),
+                // WASI host shim — the generic-host-bridge tests instantiate the
+                // real Swift-compiled guest fixture, which imports WASI Preview 1.
+                .product(name: "WasmKitWASI", package: "WasmKit")
             ],
             resources: [
                 // Real Swift-compiled .wasm fixtures used by the runtime tests.
@@ -221,7 +249,25 @@ let package = Package(
                 // regex_capture / regex_count / regex_replace). Drives the FoundationBridge
                 // regex round-trip tests for the FusionRewriter's regex leaves (the signed
                 // app's real ICU NSRegularExpression).
-                .copy("Fixtures/RegexFixture.wasm")
+                .copy("Fixtures/RegexFixture.wasm"),
+                // Generalized host-bridge (Lever #2, part A) proof guest: declares
+                // exactly the THREE generic imports (patch_host.call/.release/.have)
+                // and exports the prototype's test functions (scalar free fn, the
+                // handle-proxy round-trip, the demote/error path). Built with the full
+                // WASM SDK from experiments/host-bridge-generalized/guest. Drives the
+                // PatchHostBridge / GenericHostBridge round-trip tests through WasmKit.
+                .copy("Fixtures/GenericHostBridgeGuest.wasm"),
+                // Lever #2 INTEGRATION vertical-slice guest: the body (TLV preamble +
+                // the single `patch_host.call`) is EMITTED by the engine's
+                // HostBridgeABI.emitGuestPreamble() + emitCallSite() (Agent 2). It
+                // routes ONE real call — PricingEngine.discount(subtotal:tier:) — at the
+                // content-addressed symbol id truncate32(SHA256(canonicalSignature)) =
+                // -1509889347, so the SDK registers the (Agent-4-generated) resolver
+                // thunk under the SAME id the engine derived. Drives the end-to-end
+                // proof that engine codegen → SDK GenericHostBridge dispatch → real
+                // native call round-trips correctly. Regenerated + byte-asserted by the
+                // CLI HostBridgeVerticalSliceTests (engine half).
+                .copy("Fixtures/HostBridgeVerticalSliceGuest.wasm")
             ]
         )
     ]

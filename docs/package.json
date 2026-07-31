@@ -1,0 +1,25 @@
+{
+  "name": "patch-docs",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "postbuild": "node scripts/gen-llms.mjs",
+    "preview": "astro preview",
+    "gen": "node scripts/generate.mjs && node scripts/gen-llms.mjs",
+    "gen:llms": "node scripts/gen-llms.mjs",
+    "gen:cli-help": "node scripts/gen-cli-help.mjs",
+    "check": "npm run check:links && npm run check:sources && npm run check:llms",
+    "check:links": "node scripts/check-links.mjs",
+    "check:sources": "node scripts/check-sources.mjs",
+    "check:llms": "node scripts/gen-llms.mjs --check",
+    "check:cli-help": "node scripts/gen-cli-help.mjs --check"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.30.0",
+    "astro": "^5.1.0",
+    "sharp": "^0.33.5"
+  }
+}

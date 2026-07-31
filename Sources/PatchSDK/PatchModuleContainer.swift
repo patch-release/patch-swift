@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 /// The Patch multi-module CONTAINER format (`PMOD`) — the on-device decoder for the

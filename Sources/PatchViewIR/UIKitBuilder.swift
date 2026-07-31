@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitBuilder.swift — an ergonomic node-builder so a *lowered* UIKit body reads
 // close to the imperative UIKit it came from. This is what the engine's lowering
 // emits into the guest, and what a human can hand-write to model a construction.

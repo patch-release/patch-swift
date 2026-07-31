@@ -1,0 +1,50 @@
+# SwiftUI-lowering corpus — the app dirs the census runs over by default.
+# ----------------------------------------------------------------------
+# These paths are LOCAL/gitignored corpora on the dev machine. The census skips
+# any path that doesn't exist (and reports it), so this list is safe to ship even
+# though the corpus itself isn't in git. Lines starting with `#` and blanks are
+# ignored. `~` is expanded.
+#
+# Edit freely — `./run.sh` reads this. Override with COVERAGE_MANIFEST=... or by
+# passing app dirs directly.
+
+# === Closed-source production apps (MOST IMPORTANT — real design systems) ===
+# Shipping App Store apps whose sources are not public. They are the highest-signal
+# entries because they carry real design systems, and they are also the ones a
+# checkout will NOT have — the census skips and reports them. Add your own here:
+# point PATCH_PRIVATE_APPS at a directory of app checkouts, or list paths directly.
+~/patch-corpus/private-apps/AppA
+~/patch-corpus/private-apps/AppB
+~/patch-corpus/private-apps/AppC
+~/patch-corpus/private-apps/AppD
+~/patch-corpus/private-apps/AppE
+~/patch-corpus/private-apps/AppF
+~/patch-corpus/private-apps/AppG
+~/patch-corpus/private-apps/AppH
+~/patch-corpus/private-apps/AppI
+~/patch-corpus/private-apps/AppJ
+~/patch-corpus/private-apps/AppK
+
+# === OSS apps with real SwiftUI views (pure-SwiftUI first, then mixed) ===
+~/patch-corpus/repos/clean-architecture-swiftui
+~/patch-corpus/repos/MovieSwiftUI
+~/patch-corpus/repos/ACHNBrowserUI
+~/patch-corpus/repos/isowords
+~/patch-corpus/repos/IceCubesApp
+~/patch-corpus/repos/SwiftHub
+~/patch-corpus/repos/kiwix-apple
+~/patch-corpus/repos/exyte-Chat
+~/patch-corpus/repos/GoCycling
+~/patch-corpus/repos/Pulse
+~/patch-corpus/repos/WWDC
+~/patch-corpus/repos/NetNewsWire
+~/patch-corpus/repos/Gifski
+~/patch-corpus/repos/WhatsNewKit
+~/patch-corpus/repos/wire-ios
+~/patch-corpus/repos/firefox-ios
+~/patch-corpus/repos/wikipedia-ios
+
+# Single-SwiftUI-view weather/chat samples (mostly UIKit — small SwiftUI surface).
+~/patch-corpus/repos/SwiftWeather
+~/patch-corpus/repos/SwiftLanguageWeather
+~/patch-corpus/repos/tinode-ios

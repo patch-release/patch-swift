@@ -1,0 +1,282 @@
+---
+title: Running it yourself
+description: Serve patches from your own infrastructure — reference architectures for GCP, AWS and Azure.
+sidebar:
+  order: 40
+---
+
+import { Aside, CardGrid, Card, Tabs, TabItem, Steps, LinkCard } from '@astrojs/starlight/components';
+
+The engine and SDK are open source, and the SDK will talk to any base URL — so
+you can serve patches from infrastructure you control.
+
+This page is deliberately honest about what that gets you and what it doesn't.
+
+## Decide what you actually need
+
+<CardGrid>
+  <Card title="Static hosting" icon="document">
+    A bucket and a CDN. **Planned, not shipped** — there is no static-publish
+    command yet. No rollouts, no targeting, no recall even once it lands.
+  </Card>
+  <Card title="Reference server" icon="setting">
+    A small service that decides per request, so percentage rollouts, cohorts and
+    rollback recall all work. You run it and you support it.
+  </Card>
+  <Card title="Patch Cloud" icon="rocket">
+    The hosted control plane — rollouts, targeting, analytics, audit, team
+    accounts, and someone to call.
+  </Card>
+</CardGrid>
+
+Most teams should use the hosted service. The self-host path exists so that
+choosing it isn't a one-way door.
+
+## Static vs a server
+
+Static publishing is **not shipped yet** (see the "Static only" tab). This is
+what the two paths will look like when it is, so you can plan — and because the
+limits are structural, not temporary:
+
+| Capability | Static | Server |
+| --- | --- | --- |
+| Serve the newest patch | Yes | Yes |
+| Fingerprint gating | Yes | Yes |
+| Rollback by republishing | Yes | Yes |
+| **Percentage rollouts** | No | Yes |
+| **Cohort / version targeting** | No | Yes |
+| **Rollback recall** — pull a patch back from devices that already took it | No | Yes |
+| Device-cap enforcement, adoption metrics | No | Yes |
+
+Rollout bucketing is computed per device, per request. A file in a bucket can't
+do that. Recall is worse: it needs to know what each device is currently running,
+which is a query, not an object.
+
+## Pointing the SDK somewhere else
+
+Wherever you host, this is the only client change:
+
+```swift
+Patch.configure(.init(
+    appKey: "pak_…",
+    apiBaseURL: URL(string: "https://patches.example.com/api/v1")))
+```
+
+And the CLI:
+
+```bash
+patchcli release --base-url https://patches.example.com
+# or: export PATCH_API_URL=https://patches.example.com
+```
+
+Setting `apiBaseURL` to `nil` disables remote checks entirely — the app runs
+whatever module is bundled or already cached.
+
+## Reference architectures
+
+The shape is the same everywhere: **object storage** for the module bytes, a
+**CDN** in front of it, a **small stateless service** for the check endpoint, and
+**Postgres** for releases and device state. Nothing here is exotic — it fits in
+the smallest tier of any of these providers.
+
+<Tabs>
+<TabItem label="GCP">
+
+```
+patchcli ──HTTPS──▶ Cloud Run ──▶ Cloud SQL (Postgres)
+                       │             releases · fingerprints · check-ins
+                       └──▶ GCS bucket (module.wasm.br)
+                                 │
+    device ◀── Cloud CDN ◀───────┘
+```
+
+<Steps>
+
+1. **Bucket for modules.**
+
+   ```bash
+   gcloud storage buckets create gs://patch-modules-prod \
+     --location=us-central1 --uniform-bucket-level-access
+   ```
+
+2. **Postgres.** The smallest shared-core tier is plenty — this database holds
+   releases and device check-ins, not user data.
+
+   ```bash
+   gcloud sql instances create patch-db \
+     --database-version=POSTGRES_16 --tier=db-f1-micro --region=us-central1
+   ```
+
+3. **Deploy the check service to Cloud Run**, pointed at both.
+
+   ```bash
+   gcloud run deploy patch-api \
+     --image=<your-image> --region=us-central1 --allow-unauthenticated \
+     --set-env-vars=DATABASE_URL=...,STORAGE_BUCKET=patch-modules-prod
+   ```
+
+4. **Put Cloud CDN in front of the bucket** via a backend bucket on an external
+   HTTPS load balancer. Modules are immutable and content-addressed, so cache
+   them hard.
+
+</Steps>
+
+</TabItem>
+<TabItem label="AWS">
+
+```
+patchcli ──HTTPS──▶ ALB ──▶ ECS Fargate ──▶ RDS Postgres
+                                │
+                                └──▶ S3 bucket (module.wasm.br)
+                                          │
+             device ◀── CloudFront ◀──────┘
+```
+
+<Steps>
+
+1. **Bucket for modules**, with public access blocked — CloudFront reads it
+   through an Origin Access Control and nothing else does.
+
+   ```bash
+   aws s3api create-bucket --bucket patch-modules-prod --region us-east-1
+   aws s3api put-public-access-block --bucket patch-modules-prod \
+     --public-access-block-configuration \
+     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+   ```
+
+2. **Postgres.**
+
+   ```bash
+   aws rds create-db-instance --db-instance-identifier patch-db \
+     --engine postgres --db-instance-class db.t4g.micro --allocated-storage 20
+   ```
+
+3. **Run the check service on ECS Fargate** behind an ALB. App Runner works too
+   and is less to configure; Fargate is the right answer if you already have a
+   VPC and want the service inside it.
+
+4. **CloudFront distribution** over the bucket, using the OAC from step 1.
+
+</Steps>
+
+<Aside type="tip">
+If you'd rather not run a container at all, the check endpoint is small enough to
+be a Lambda behind API Gateway. The tradeoff is a cold start on the update check
+— usually fine, since it happens at launch and is already asynchronous.
+</Aside>
+
+</TabItem>
+<TabItem label="Azure">
+
+```
+patchcli ──HTTPS──▶ Container Apps ──▶ Azure Database for PostgreSQL
+                          │
+                          └──▶ Blob Storage (module.wasm.br)
+                                     │
+       device ◀── Azure Front Door ◀──┘
+```
+
+<Steps>
+
+1. **Storage account and container** for the modules.
+
+   ```bash
+   az storage account create --name patchmodules --sku Standard_LRS \
+     --resource-group patch-rg --location eastus
+   az storage container create --name modules --account-name patchmodules
+   ```
+
+2. **Postgres.**
+
+   ```bash
+   az postgres flexible-server create --name patch-db \
+     --resource-group patch-rg --tier Burstable --sku-name Standard_B1ms
+   ```
+
+3. **Deploy the check service to Container Apps.**
+
+   ```bash
+   az containerapp create --name patch-api --resource-group patch-rg \
+     --image <your-image> --ingress external --target-port 8000 \
+     --env-vars DATABASE_URL=... STORAGE_CONTAINER=modules
+   ```
+
+4. **Azure Front Door** in front of the blob container for edge caching.
+
+</Steps>
+
+</TabItem>
+<TabItem label="Static only">
+
+<Aside type="caution" title="Not available yet">
+A one-command static publish (`patchcli publish --static`) is **planned, not
+shipped**. Today the CLI uploads through the check API; there is no command that
+emits a static manifest. This tab documents the intended shape so you can plan
+for it — don't build against it yet.
+</Aside>
+
+The idea: emit the module plus the JSON manifest the SDK expects, upload both to
+any bucket or static host, and point the SDK at it.
+
+```swift
+Patch.configure(.init(
+    appKey: "pak_…",
+    apiBaseURL: URL(string: "https://cdn.example.com/patch")))
+```
+
+Rolling back would mean republishing the previous manifest.
+
+If you need self-hosting **today**, use the server path in the other tabs — the
+SDK's `apiBaseURL` already points anywhere, so the constraint is that something
+must answer the check endpoint, not that it must be ours.
+
+</TabItem>
+</Tabs>
+
+## Sizing
+
+The check endpoint is a small read — one row lookup plus a hash. It is not the
+expensive part of your infrastructure.
+
+| Fleet | Check service | Postgres | Egress |
+| --- | --- | --- | --- |
+| Up to ~50k devices | One small instance | Smallest tier | Patches are KB, not MB |
+| ~500k devices | Two instances behind a load balancer | Smallest tier plus a read replica | CDN absorbs it |
+| Millions | Autoscale on CPU | Managed, connection-pooled | CDN absorbs it |
+
+Modules are content-addressed and immutable, so CDN hit rates are very high — the
+origin only serves the first request per release per edge.
+
+## Operational notes
+
+**Modules are immutable.** A release is content-addressed by its SHA-256. Never
+overwrite one in place — publish a new version and update the manifest. The SDK
+verifies the hash before activating, so a swapped or corrupted object fails
+closed rather than running.
+
+**Keep the fingerprint contract.** The device reports the fingerprint of the
+build it's running, and your service must only serve modules built against that
+same shell. Getting this wrong is the one way to ship a patch that genuinely
+breaks an app — see [the compatibility fingerprint](/fingerprint/).
+
+**Serve the compressed artifact as-is.** Modules ship brotli-compressed
+(`.wasm.br`). Don't set `Content-Encoding: br` on the object — the SDK fetches the
+compressed bytes and decompresses them itself, so a transport-level re-encode
+breaks the hash check.
+
+**Retention.** Device check-ins accumulate a row per device per app. Add a
+retention job; nothing prunes it for you.
+
+## What you give up
+
+- No rollout dashboard, adoption graphs, or error-spike alerts
+- No team accounts, roles, or audit trail
+- No `patchcli init` browser onboarding — you hand-write `.Patch.yml` and issue
+  your own app keys
+- No support for your deployment
+
+<LinkCard
+  title="Open source"
+  description="What's in each package, how to build from source, and how to reproduce our coverage numbers."
+  href="/open-source/"
+/>

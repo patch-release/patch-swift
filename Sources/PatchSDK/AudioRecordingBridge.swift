@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
 // NOTE (guide Rule 2): AVFoundation is available on macOS too, so the real

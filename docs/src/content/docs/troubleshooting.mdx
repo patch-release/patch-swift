@@ -1,0 +1,48 @@
+---
+title: Troubleshooting & FAQ
+description: Common failures and how to fix them.
+sidebar:
+  order: 17
+---
+
+## `push`/`release` says "FINGERPRINT MISMATCH" — what now?
+
+Your native shell changed since the last App Store release (a native `.swift` file, a bridge toggle, Info.plist, entitlements, a linked framework, the deployment target, or the compiler version), so the OTA module isn't compatible with installed apps. Run `patchcli fingerprint diff` to see exactly what changed. Ship the change through the App Store, then re-baseline with `patchcli fingerprint register` after the new build is live. Pure-logic patches never trip this — only native-shell changes do.
+
+## My function stayed native — why isn't it updatable?
+
+It touches a must-stay-native API (low-level platform rendering, the file system, threads, the ObjC runtime, unsafe pointers, or device/OS APIs) somewhere it depends on, or it relies on a bridge you disabled in `.Patch.yml`. Logic and `async`/`await` code *is* updatable, and SwiftUI view code is updatable when SwiftUI coverage is enabled — run `patchcli build --verbose` (or `patchcli analyze --verbose`) to see the per-function classification and the reason each eligible function wasn't emitted. Factoring the pure logic out of a UI/IO function usually moves it into the WASM bucket.
+
+## Can I OTA-update *this* particular view or feature?
+
+Almost certainly yes, if it's SwiftUI. An OTA patch can author, restyle, reorder, rebind, and re-flow essentially your entire view hierarchy — text, images, layout, styling, navigation, presentation, controls, and view structure. The only things it *can't* reach are the binary-symbol wall: introducing a native capability/framework/entitlement that isn't already compiled and signed into your app (e.g. a camera or HealthKit prompt the app never declared), and rewriting the internals of non-`View.body` native code (a `UIViewRepresentable`'s `makeUIView`, a custom `ButtonStyle`'s `makeBody`, a Core Data fetch predicate). An *existing* `MKMapView`/`WKWebView`/custom view still renders, moves, and reorders over the air — only its native internals are frozen. See [What Patch can & can't update](/coverage/) for the full map.
+
+## "WASM toolchain NOT FOUND" during build
+
+You need the **swift.org** toolchain plus the WebAssembly Swift SDK — the Apple/Xcode toolchain cannot target `wasm32-unknown-wasi`. Install with `swiftly install 6.3.2` and `swift sdk install https://download.swift.org/swift-6.3.2-release/wasm-sdk/swift-6.3.2-RELEASE/swift-6.3.2-RELEASE_wasm.artifactbundle.tar.gz --checksum a61f0584c93283589f8b2f42db05c1f9a182b506c2957271402992655591dd7c`. Without them, `patchcli build` still generates sources and a coverage report (effectively a dry run) but emits no `.wasm`.
+
+## The device isn't picking up my update
+
+Check three things: (1) the app is on the same **channel** you shipped to; (2) the device is inside the current **rollout %** — raise it if you're staging; (3) the app's **fingerprint** matches the release. Devices resolve the active release through the update-check API, so changes apply on the next poll. With `start()` the update applies on the next launch/check; with the imperative API you must call `fetchUpdate()` then `reloadAsync()` yourself.
+
+## How big are updates?
+
+Small. Most modules use the embedded tier (tens of KB), borrowing the native shell's Foundation through host bridges. Even when a module needs the full-Foundation base, that base ships once; every update after is a tiny compressed binary diff against the version already on the device — typically a few hundred bytes to tens of KB.
+
+## Will running in WebAssembly slow my app down?
+
+No — the overhead is **negligible**. Patched code runs in WasmKit at **near-native speed**, and for the kind of code Patch ships (business logic, validation, pricing, formatting, networking glue, view construction) the per-call cost is on the order of microseconds — far below anything a user could perceive, and dwarfed by the time the app already spends on network, disk, and rendering. There's no launch penalty: `start()` activates the cached module instantly (and offline), then checks for updates in the background, and applying an update is a hot-swap rather than a re-launch. Anything genuinely performance-critical — low-level rendering, AVFoundation, heavy compute, tight numeric loops — automatically stays native via the WASM/native split, so your hot paths are always compiled machine code.
+
+## Does this violate App Store rules?
+
+No — it's **explicitly allowed by Apple's own rules**. Apple's **Developer Program License Agreement §3.3.2** expressly permits an app to download and run interpreted code, as long as it doesn't change the app's primary purpose, doesn't create a storefront for other code, and doesn't bypass code signing, the sandbox, or other OS security. Patch satisfies all three: it ships logic as interpreted WebAssembly, your signed App Store binary never changes, and signing and the sandbox are untouched. This is the **exact same provision Expo / EAS Update and Microsoft CodePush have relied on for nearly a decade** to push interpreted code to React Native apps — across tens of thousands of live App Store apps. Use Patch for what it's for — fixing bugs, tuning logic, and adjusting UI within your app's existing purpose, not shipping a fundamentally different app or circumventing review — and you're squarely inside Apple's rules.
+
+## A patch caused errors in production — how do I recover?
+
+Run `patchcli rollback --channel <channel>` to re-activate the previous module; it propagates within ~60s. On-device, the SDK already recovers automatically — if a module fails to verify or activate, it falls back to the previous good module (or the bundled native code) so the app keeps working. Watch the failure rate with `patchcli status`; it warns past 2%.
+
+## Ready to ship your first patch?
+
+Install the CLI, run `patchcli init`, and `patchcli release` a fix this afternoon.
+
+[Start the Quick Start →](/quickstart/)

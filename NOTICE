@@ -1,0 +1,124 @@
+Patch
+Copyright 2025-2026 Patch Release Ltd
+
+This product includes software developed at Patch Release Ltd.
+
+The Patch partitioning and Swift-to-WebAssembly engine (`cli/`, including the
+`patchcli` command-line tool) is licensed under the Apache License, Version 2.0.
+This NOTICE file is provided under section 4(d) of that License. The on-device
+SDK (`sdk/`) is licensed under the MIT License; see LICENSE.
+
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+The `patchcli` binary distributed via Homebrew (and any other binary build of
+this project) statically links the Swift packages below. Their license terms and
+copyright notices are reproduced here as required by Apache License 2.0 §4.
+
+None of these components is copyleft-licensed.
+
+
+--------------------------------------------------------------------------------
+Apache License, Version 2.0
+--------------------------------------------------------------------------------
+
+The following components are licensed under the Apache License, Version 2.0.
+The full text of that license is in `cli/LICENSE` and at
+<http://www.apache.org/licenses/LICENSE-2.0>.
+
+Each of these is a project of the Swift open source project; several carry the
+Swift "Runtime Library Exception" in addition to Apache 2.0, which relaxes the
+§4(a), §4(b) and §4(d) attribution requirements for code embedded into a
+compiled binary. The notices are reproduced regardless.
+
+  swift-syntax
+    https://github.com/swiftlang/swift-syntax
+    Copyright (c) 2014-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+    Used by: the engine's Swift parser, partitioner and code generators.
+
+  swift-argument-parser
+    https://github.com/apple/swift-argument-parser
+    Copyright (c) 2020-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+    Used by: the `patchcli` command-line interface.
+
+  swift-system
+    https://github.com/apple/swift-system
+    Copyright (c) 2020-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+    Used by: WasmKit's system-call layer (transitive).
+
+  swift-nio
+    https://github.com/apple/swift-nio
+    Copyright (c) 2017-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+    swift-nio's own NOTICE.txt records that it contains "sha1.c"/"sha1.h" from
+    FreeBSD, Copyright (C) 1995, 1996, 1997 and 1998 WIDE Project, and further
+    derived works; see that file in the swift-nio distribution.
+
+  swift-atomics
+    https://github.com/apple/swift-atomics
+    Copyright (c) 2020-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+
+  swift-collections
+    https://github.com/apple/swift-collections
+    Copyright (c) 2021-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+
+  swift-log
+    https://github.com/apple/swift-log
+    Copyright (c) 2018-2026 Apple Inc. and the Swift project authors
+    Licensed under Apache License v2.0 with Runtime Library Exception.
+
+
+--------------------------------------------------------------------------------
+MIT License
+--------------------------------------------------------------------------------
+
+  WasmKit
+    https://github.com/swiftwasm/WasmKit
+    Copyright (c) 2020 Akio Yasui
+    Licensed under the MIT License.
+    Used by: the on-device SDK, to execute WebAssembly modules; and by the
+    engine's test suite, to host-run generated modules.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+System libraries
+--------------------------------------------------------------------------------
+
+The SDK links `libbz2` via a system-library shim (`sdk/Sources/CBZ2`) to inflate
+BSDIFF40 patch payloads. `libbz2` ships with the macOS and iOS SDKs and is not
+vendored, redistributed or modified by this project. bzip2 is Copyright (C)
+1996-2019 Julian R Seward, under the BSD-style bzip2 license.
+
+
+--------------------------------------------------------------------------------
+Verifying this list
+--------------------------------------------------------------------------------
+
+The authoritative dependency set is `cli/Package.resolved` and
+`sdk/Package.resolved`. After changing a dependency, re-resolve and update this
+file. Each dependency's own LICENSE file is fetched into `.build/checkouts/`.

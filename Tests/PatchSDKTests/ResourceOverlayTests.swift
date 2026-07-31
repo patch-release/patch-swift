@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import XCTest
 import Foundation
 @testable import PatchSDK

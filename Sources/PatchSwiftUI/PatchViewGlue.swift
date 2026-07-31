@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchViewGlue.swift — wires a LIVE Patch WASM module to the SwiftUI renderer.
 // =============================================================================
 // `PatchView` (in PatchRender) is closure-driven so it has no WasmKit dependency.

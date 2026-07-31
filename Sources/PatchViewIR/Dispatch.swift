@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Dispatch.swift — the INTERACTIVE event loop envelopes (Breakthrough #5).
 // =========================================================================
 // The static breakthrough lowered a body to `view_body(state) -> tree`. The

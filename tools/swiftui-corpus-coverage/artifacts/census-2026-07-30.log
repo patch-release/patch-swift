@@ -1,0 +1,56 @@
+>> building census driver (release) against the local engine ...
+[0/1] Planning build
+[1/1] Compiling plugin GenerateDoccReference
+[2/2] Compiling plugin GenerateManual
+Building for production...
+[2/4] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (4.62s)
+>> using default corpus manifest: /tmp/full.manifest.txt
+================================================================
+ SwiftUI CORPUS COVERAGE
+================================================================
+Apps measured: 28   Views found: 1372
+
+HEADLINE (view-level, OTA auto-route): 1024/1372 = 74.6%
+Element-level coverage:                21034/25503 = 82.5%
+
+---- per-app coverage (worst first) ----
+  kiwix-apple  29/64  (45%)
+  Gifski  13/27  (48%)
+  IceCubesApp  91/160 (57%)
+  NetNewsWire   8/14  (57%)
+  ACHNBrowserUI  75/110 (68%)
+  MovieSwiftUI  35/48  (73%)
+  Pulse  52/71  (73%)
+  exyte-Chat  42/56  (75%)
+  first-party-app-e  18/24  (75%)
+  WWDC  22/29  (76%)
+  wikipedia-ios 114/149 (77%)
+  clean-architecture-swiftui   7/9   (78%)
+  isowords  49/63  (78%)
+  wire-ios 137/172 (80%)
+  GoCycling  31/38  (82%)
+  first-party-app-a  23/28  (82%)
+  firefox-ios  64/76  (84%)
+  first-party-app-c  35/41  (85%)
+  first-party-app-h  24/27  (89%)
+  first-party-app-d  57/63  (90%)
+  first-party-app-g  22/24  (92%)
+  first-party-app-f  34/36  (94%)
+  first-party-app-b  41/42  (98%)
+  tinode-ios   1/1   (100%)
+  SwiftHub   — (no : View structs)
+  SwiftLanguageWeather   — (no : View structs)
+  SwiftWeather   — (no : View structs)
+  WhatsNewKit   — (no : View structs)
+
+---- diagnostic sections omitted ----
+
+The per-app histograms (demote reasons, unsupported modifiers, custom child
+views) are omitted from the published artifact: they enumerate SwiftUI type
+names from every app in the corpus, including the first-party ones anonymised
+above, and they are not needed to verify the headline.
+
+Regenerate the full report locally:
+    ./corpus/fetch.sh
+    ./tools/swiftui-corpus-coverage/run.sh

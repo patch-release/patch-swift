@@ -1,0 +1,70 @@
+---
+title: Plans & billing
+description: Plans, limits, and what is gated.
+sidebar:
+  order: 13
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Patch is free to start. Every workspace carries a billing **plan** that gates a small set of team-scale features; everything core to shipping OTA updates — unlimited apps, unlimited 100% production releases, instant rollback, the CLI, CI/CD, and the ship-safety checks — is available on the free tier.
+
+## Tiers
+
+The pricing tiers on [patchrelease.com](https://patchrelease.com/#pricing) map to the plan stored on your workspace:
+
+| Marketing tier | Workspace plan | Who it's for |
+| --- | --- | --- |
+| Hobby (Free) | hobby | Individual workspace — one member, full 100% production releases, up to 100 distinct devices. |
+| Startup | pro | Teams that need collaboration, staged rollouts, A/B, and channels. Serves up to 10,000 devices. |
+| Enterprise | team | Larger orgs; everything in Startup, plus the audit log & activity feed, support/SLA, and an unlimited device fleet. |
+
+A new workspace defaults to `hobby`. Startup and Enterprise differ commercially (usage limits, support) and on one capability — the **audit log & activity feed** is an **Enterprise (Team) plan** feature.
+
+## What's paid vs. free
+
+A small set of features are paid-only, gated consistently across the CLI, API, and console:
+
+- **Team collaboration** — inviting members. Hobby is an individual workspace capped at one member; a second invite is a paid feature.
+- **Staged rollouts & A/B** — any non-100% `rollout_pct`. Hobby ships full 100% releases only; shipping to a percentage of devices (a phased rollout / A/B cohort) is paid.
+- **Non-production channels** — Hobby ships to `production` only; canary, beta, staging and other channels are paid.
+- **Device fleet size** — Hobby serves patches to at most **100 distinct devices** (counted over the recent active window). Pro raises the cap to **10,000** devices and Team is **unlimited**. Once a Hobby workspace is at the cap, a *new* device's update check simply returns "no update" — devices already in the counted set keep updating, so the existing fleet is never cut off.
+
+| Feature | Hobby (free) | Pro / Team (paid) |
+| --- | --- | --- |
+| Apps | Unlimited | Unlimited |
+| OTA releases (100% production) | Unlimited | Unlimited |
+| Instant rollback | ✓ | ✓ |
+| Usage analytics | ✓ | ✓ |
+| Distinct devices served | Up to 100 | Pro: 10,000 · Team: unlimited |
+| Team members | 1 (individual) | Unlimited |
+| Staged / A-B rollouts (non-100%) | — | ✓ |
+| Release channels (beyond production) | — | ✓ |
+| Audit log & activity feed | — | Enterprise (Team) only |
+
+## How gating works
+
+When a Hobby workspace attempts a paid action, you receive a **`402 Payment Required`** response with a plain-language upgrade message. The console surfaces that message as an upgrade prompt. The affected operations:
+
+- Inviting a second member (`POST /workspaces/{id}/members`).
+- Pushing a non-100% rollout or a non-production channel (`POST /modules`).
+- Adjusting rollout % from the console on a Hobby plan.
+
+The **device-fleet cap** works differently: once a Hobby workspace reaches its 100-device cap, new devices are simply served "no update" at their next check — devices already in the active set keep receiving updates, so the existing fleet is never cut off. Upgrading lifts the cap immediately.
+
+## Changing the plan
+
+The plan lives on the workspace and is changed by the **owner** from the console's **Settings & Billing** page, which calls:
+
+```bash title="PATCH the workspace plan"
+$ curl -X PATCH https://api.patchrelease.com/api/v1/workspaces/$WS/plan \
+    -H "Authorization: Bearer $ID_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"plan":"pro"}'
+```
+
+Only the workspace owner may call it; valid plans are `hobby`, `pro`, and `team`. The change is recorded in the audit log as `plan.change`.
+
+<Aside type="note" title="Downgrading">
+Switching back to Hobby re-applies the free-tier limits going forward — new invites and non-100% rollouts are gated again. Existing data isn't deleted; the gate simply applies the next time you attempt a paid action.
+</Aside>

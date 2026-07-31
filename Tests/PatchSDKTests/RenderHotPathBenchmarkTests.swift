@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import XCTest
 @testable import PatchSDK
 import PatchViewIR
@@ -754,7 +756,7 @@ final class RenderHotPathBenchmarkTests: XCTestCase {
     // MARK: - report sink
 
     private func writeReport(_ text: String, marker: String) {
-        let dir = "/Users/appstudio/patch-campaign-log/overnight-rigor-run"
+        let dir = BenchmarkOutput.directory("overnight-rigor-run")
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = "\(dir)/perf-raw-\(marker).txt"
         try? text.write(toFile: path, atomically: true, encoding: .utf8)

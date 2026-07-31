@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitJSONEmit.swift — a Foundation-FREE JSON serializer for the UIKitNode tree.
 // ==============================================================================
 // The UIKit analogue of `JSONEmit.swift` (the SwiftUI IR emitter). `JSONEncoder`

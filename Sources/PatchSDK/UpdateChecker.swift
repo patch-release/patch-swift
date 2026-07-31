@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 // MARK: - Wire protocol (matches backend/app/schemas/module.py + event.py EXACTLY)

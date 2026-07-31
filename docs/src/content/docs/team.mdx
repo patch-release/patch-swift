@@ -1,0 +1,73 @@
+---
+title: Team accounts & roles
+description: Members, roles, and permissions.
+sidebar:
+  order: 12
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Patch organizes everything under a **workspace**. A workspace owns apps, releases, channels, and members. When you first sign in to the dashboard, Patch creates a personal workspace for you with the `owner` role; you can then invite teammates and provision more apps. **Team collaboration (inviting a second member) is a paid feature** — see [Plans & billing](/billing/).
+
+## Roles (RBAC)
+
+Every member holds exactly one role in their workspace. The roles are ranked **`owner` > `admin` > `member`**, and that rank drives who can manage whom.
+
+Owner
+Full control: manage the billing plan, apps, channels, and members. Can invite, remove, and change roles for anyone — and is the only role that can grant the `owner` role. A workspace must always keep at least one owner.
+
+Admin
+Manage apps, ship releases, adjust rollouts, roll back, and invite, remove, or re-role members — but only `admin`/`member` roles. An admin can never grant `owner`, nor manage (re-role/remove) an existing owner.
+
+Member
+Day-to-day access: view apps, releases, and rollout status, and ship within the team's apps. Can view the member list, but cannot invite, remove, or re-role anyone, change the plan, or manage workspace settings.
+
+## Who can do what
+
+Two invariants govern every action: the **rank rule** (you can only assign or manage a role at or below your own rank) and the **last-owner protection** (the workspace can never drop to zero owners).
+
+| Action | Owner | Admin | Member |
+| --- | --- | --- | --- |
+| View the member list | ✓ | ✓ | ✓ |
+| Invite an admin / member | ✓ | ✓ | — |
+| Invite / grant the owner role | ✓ | — | — |
+| Change an admin / member role | ✓ | ✓ | — |
+| Change (re-role) an existing owner | ✓ | — | — |
+| Remove an admin / member | ✓ | ✓ | — |
+| Remove an owner | ✓ | — | — |
+| Remove / demote the last owner | — | — | — |
+| Change the billing plan | ✓ | — | — |
+
+A **deactivated** member loses access to all role-gated actions regardless of their assigned role. Requests to a workspace you don't belong to are rejected.
+
+## Member endpoints
+
+These workspace-scoped routes back the dashboard's **Team** page. You must be a member of the workspace; mutating actions additionally require `owner` or `admin`.
+
+| Endpoint | What it does | Who |
+| --- | --- | --- |
+| POST /workspaces/`{id}`/members | Invite a member by email (creates a pending member until they sign in). Audited as member.invite. | owner / admin |
+| GET /workspaces/`{id}`/members | List all members (active and pending) of the workspace. | any member |
+| PATCH /workspaces/`{id}`/members/`{user_id}` | Change a member's role. Blocks demoting the last owner. Audited as member.role_change. | owner / admin |
+| DELETE /workspaces/`{id}`/members/`{user_id}` | Remove a member (revokes access immediately). Blocks removing the last owner. Audited as member.remove. | owner / admin |
+
+## Inviting members
+
+Owners and admins invite by email from the dashboard's **Team** page. An invite creates a *pending* member; when that person signs in with the same email, their account links automatically and they take the assigned role. Removing a member revokes access immediately (you can't remove the last owner). Trying to invite a second member on the free Hobby plan returns `402 Payment Required` with an upgrade message — see [Plans & billing](/billing/).
+
+<Aside type="note" title="Auth model">
+The CLI and SDK authenticate with the per-app API key (`X-API-Key: pak_…`). The dashboard uses Firebase Auth (Google + email/password): the web app obtains an ID token and sends it as `Authorization: Bearer <idToken>`. The two surfaces are independent — humans use the dashboard, machines use the app key.
+</Aside>
+
+## The dashboard
+
+The dashboard is the team's web app for everything that isn't a CLI command:
+
+- **Apps overview** — every app in the workspace; pick one to drill in.
+- **Rollouts** — the main per-app view: recent releases across channels, newest first, with version, channel, status (active / superseded / rolled back), targeted %, received % (a progress bar), the mandatory flag, and when it was pushed. Click a release for stats (received vs targeted, download / activation / error counts) and actions to adjust the rollout % or roll back.
+- **Channels** — the active module per channel and its rollout/mandatory state.
+- **Usage** — per-app release-health analytics: active devices, adoption, error rate, and trends over the window — plus devices checked in from the base build before your first release ships (see [Usage & analytics](/usage/)).
+- **Team** — list, invite, re-role, and remove members.
+- **Activity** — the workspace audit trail of who did what, on the **Enterprise plan** (see [Audit log](/audit/)).
+- **Settings & Billing** — the current plan, the plan comparison matrix, and the owner-only upgrade/downgrade control (see [Plans & billing](/billing/)).
+- **Quickstart** — for a workspace that hasn't deployed yet, a guided setup with your app's API key prefilled and the same `patchcli init` / `patchcli release` snippets shown here.

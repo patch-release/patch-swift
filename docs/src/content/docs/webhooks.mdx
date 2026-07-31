@@ -1,0 +1,93 @@
+---
+title: Webhooks & error-spike alerts
+description: Events and error-spike alerts.
+sidebar:
+  order: 16
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Webhooks push workspace events to your own systems in real time — post a release to Slack, page on-call when error rates spike, or kick off a downstream job. Patch sends a signed `POST` to every HTTPS endpoint you register that's subscribed to the event. They're managed by a workspace **owner** or **admin**, in the console under **Settings → Webhooks** or over the API.
+
+## Events
+
+Pick any combination of the four event types per endpoint:
+
+| Event | Fires when |
+| --- | --- |
+| release.pushed | A new OTA release is shipped (patchcli release / push). Payload includes the app, module & version, channel, rollout %, mandatory, sha256, and release notes. |
+| rollout.changed | A release's rollout % is raised or lowered. |
+| rollback | A release is rolled back to the previous module. |
+| error_spike | An app's active production version crosses the error-rate threshold (see below). Payload includes the app, version, error_rate, errors, activations, sample, window_minutes, and threshold. |
+
+## Register an endpoint
+
+In the console, open **Settings → Webhooks**, paste an HTTPS URL, tick the events you want, and save. Patch reveals a one-time **signing secret** at creation — copy it then; it's the key you use to verify deliveries. Each row has a **Test** button that sends a sample `ping` delivery so you can confirm connectivity and your signature check before relying on it, and a **Delete** that stops delivery immediately.
+
+The same operations are available over the API (owner/admin, scoped to the workspace): `POST` / `GET` / `DELETE /api/v1/workspaces/{workspace_id}/webhooks` and `POST …/{webhook_id}/test`.
+
+```bash title="Create a webhook"
+# register an endpoint subscribed to releases + error spikes
+$ curl -X POST https://api.patchrelease.com/api/v1/workspaces/$WORKSPACE_ID/webhooks \
+    -H "Authorization: Bearer $ID_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"url":"https://hooks.example.com/patch","events":["release.pushed","error_spike"]}'
+
+# the response includes the signing secret — store it now, you'll need it to verify
+# { "id": "...", "url": "...", "secret": "whsec_…", "events": [...], "is_active": true }
+
+# send a sample `ping` delivery to confirm the endpoint + signature setup
+$ curl -X POST https://api.patchrelease.com/api/v1/workspaces/$WORKSPACE_ID/webhooks/$WEBHOOK_ID/test \
+    -H "Authorization: Bearer $ID_TOKEN"
+```
+
+## Delivery format
+
+Every delivery is an HTTP `POST` with a compact-JSON body — the envelope `{event, workspace_id, data, timestamp}`, where `data` is the event-specific payload — and an `X-Patch-Signature` header:
+
+```json title="POST body (error_spike)"
+{
+  "event": "error_spike",
+  "workspace_id": "a1b2c3d4-…",
+  "data": {
+    "app_id": "…", "app_name": "Acme", "version": "1.4.2",
+    "error_rate": 0.18, "errors": 9, "activations": 41,
+    "sample": 50, "window_minutes": 15, "threshold": 0.1
+  },
+  "timestamp": "2026-06-04T12:00:00Z"
+}
+```
+
+## Verify the signature
+
+The `X-Patch-Signature` header is `sha256=<hex HMAC-SHA256(body, secret)>`, computed over the **raw request bytes** with your endpoint's signing secret. Recompute the HMAC on your side and compare with a constant-time check before trusting a delivery:
+
+```python title="verify_signature.py"
+# Flask receiver — reject any delivery whose signature doesn't match.
+import hmac, hashlib
+
+SECRET = "whsec_…"  # the signing secret shown once when the webhook was created
+
+def verify(raw_body: bytes, header: str) -> bool:
+    expected = "sha256=" + hmac.new(
+        SECRET.encode(), raw_body, hashlib.sha256
+    ).hexdigest()
+    # constant-time compare — never use ==
+    return hmac.compare_digest(expected, header or "")
+
+# in your handler: hash the *raw* body, not a re-serialized dict
+# if not verify(request.get_data(), request.headers.get("X-Patch-Signature")):
+#     abort(401)
+```
+
+## Error-spike alerts
+
+Patch watches the error rate of each app's **active production version** from the device events it ingests, and fires `error_spike` when something goes wrong in the field — without you polling a dashboard.
+
+<Aside type="note" title="Error-spike threshold">
+The alert fires when the error rate exceeds **10%** over a rolling **15-minute** window, with a minimum sample of **10** events (activations + errors) so a single early error can't trip a false 100% rate. It's debounced per app + version: once fired, the same version won't alert again for 15 minutes, so a burst sends at most one notification.
+</Aside>
+
+<Aside type="note" title="Deliveries are best-effort">
+Webhook delivery is fire-and-forget with a short timeout — a slow or failing receiver is logged and skipped, never retried, and never blocks the action (a release or rollback still succeeds even if your endpoint is down). Own your endpoint's availability: keep it fast, return `2xx` quickly, and treat events as best-effort rather than guaranteed-once.
+</Aside>

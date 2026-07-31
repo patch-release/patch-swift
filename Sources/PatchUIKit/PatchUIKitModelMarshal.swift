@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchUIKitModelMarshal.swift — marshal a cell's MODEL value to the flat inputs
 // JSON the lowered guest construction scans.
 // =============================================================================

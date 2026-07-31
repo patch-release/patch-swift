@@ -1,0 +1,47 @@
+---
+title: Audit log
+description: The activity trail.
+sidebar:
+  order: 15
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note" title="Enterprise plan">
+The audit log & activity feed is an **Enterprise (Team) plan** feature. The events below are recorded for every workspace, but the **Activity** page and the audit API are available on the Enterprise plan — see [Plans & billing](/billing/).
+</Aside>
+
+Every meaningful action in a workspace is recorded to an immutable audit trail — useful for security review, compliance, and answering "who changed this, and when?". The console surfaces it on the **Activity** page; you can also read it over the API.
+
+## What's recorded
+
+Each entry captures the actor (a user's email, or `api-key` for CLI/SDK-driven actions), the workspace, the app when relevant, the action, a structured `details` payload (old → new values), and a timestamp. The recorded actions:
+
+| Action | When |
+| --- | --- |
+| login / account.create | A user signs in; a brand-new account + personal workspace is created on first sign-in. |
+| app.create / fingerprint.register | An app is provisioned; a native-shell fingerprint is registered. |
+| module.push | A module is pushed (via patchcli release / push). |
+| rollout.change | A release's rollout % is adjusted. |
+| module.rollback | A release is rolled back. |
+| member.invite / member.role_change / member.remove | A teammate is invited, re-roled, or removed. |
+| plan.change | The workspace billing plan changes (old → new). |
+
+## Reading the trail
+
+The **Activity** page reads `GET /api/v1/audit`. It's always scoped to your own workspace (a cross-workspace read is impossible), newest first, with pagination and optional filters.
+
+```bash title="Read the audit trail"
+# newest 50 events for your workspace
+$ curl https://api.patchrelease.com/api/v1/audit \
+    -H "Authorization: Bearer $ID_TOKEN"
+
+# filter by action and/or app, with pagination
+$ curl "https://api.patchrelease.com/api/v1/audit?action=module.rollback&limit=20&offset=0" \
+    -H "Authorization: Bearer $ID_TOKEN"
+
+$ curl "https://api.patchrelease.com/api/v1/audit?app_id=$APP_ID" \
+    -H "Authorization: Bearer $ID_TOKEN"
+```
+
+Query params: `action` (an exact action string), `app_id` (must belong to your workspace, else `403`), `limit` (1–200, default 50), and `offset`.

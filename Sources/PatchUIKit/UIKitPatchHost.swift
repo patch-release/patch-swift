@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitPatchHost.swift — the OUT-OF-THE-BOX UIKit cell-patching runtime.
 // =============================================================================
 // This is the SDK half of automatic UIKit cell patching — the analogue of

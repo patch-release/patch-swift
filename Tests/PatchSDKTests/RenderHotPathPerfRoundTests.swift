@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import XCTest
 @testable import PatchSDK
 import PatchViewIR
@@ -38,7 +40,7 @@ final class RenderHotPathPerfRoundTests: XCTestCase {
         #endif
     }
     private func writeReport(_ text: String, marker: String) {
-        let dir = "/Users/appstudio/patch-campaign-log/overnight-rigor-run"
+        let dir = BenchmarkOutput.directory("overnight-rigor-run")
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         try? text.write(toFile: "\(dir)/perf-raw-\(marker).txt", atomically: true, encoding: .utf8)
     }
@@ -277,7 +279,7 @@ final class RenderHotPathPerfRoundTests: XCTestCase {
     /// A realistic large screen: a NavigationStack → ScrollView → header + a ForEach of ~N
     /// rows, each row an HStack with an icon, a VStack of two Texts, a Spacer, and a trailing
     /// Button — every node carrying a few modifiers (font/foreground/padding/frame). This is
-    /// the hundreds-of-nodes shape a real whentopost list screen lowers to, the scale at which
+    /// the hundreds-of-nodes shape a real production list screen lowers to, the scale at which
     /// the 6-walks-vs-1 and reconstitution costs actually matter.
     static func largeRealisticTree(rows: Int) -> ViewNode {
         func row(_ i: Int) -> ViewNode {

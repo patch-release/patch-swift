@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // BodyEmission.swift — the wire envelope the guest emits (Foundation-FREE).
 //
 // Kept separate from ABI.swift (which pulls in Foundation for `JSONEncoder`) so

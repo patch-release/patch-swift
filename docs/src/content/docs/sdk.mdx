@@ -1,0 +1,129 @@
+---
+title: SDK reference
+description: Configuring PatchSDK and the update lifecycle.
+sidebar:
+  order: 6
+---
+
+The `PatchSDK` Swift package loads, verifies, hot-swaps, and runs OTA modules on-device, with native fallback and telemetry. It's pure Swift on top of WasmKit — no extra runtime to bundle beyond the package.
+
+## Install with Swift Package Manager
+
+`patchcli init` adds this package to your Xcode project (or `Package.swift`) automatically — the steps here are the manual path (and what `init` prints if it can't edit your project safely). In Xcode: **File → Add Package Dependencies…** and paste the URL. Or add it to your `Package.swift`:
+
+```swift title="Package.swift"
+dependencies: [
+  .package(url: "https://github.com/patch-release/patch-swift", from: "1.0.0"),
+],
+targets: [
+  .target(name: "MyApp", dependencies: [
+    .product(name: "PatchSDK", package: "patch-swift"),
+  ]),
+]
+```
+
+## Configure: PatchConfiguration
+
+Configure the SDK once, early in launch. `configure` sets up the on-disk cache, installs the default host bridges, and prepares the update checker when an `apiBaseURL` is set. It does no network I/O — that happens in `start()` / the imperative API.
+
+```swift title="PatchConfiguration"
+Patch.configure(.init(
+  appKey: "pak_live_…",                 // per-app key from the dashboard
+  appID: "3f2b…-uuid",                  // backend app_id for the update check
+  apiBaseURL: URL(string: "https://api.patchrelease.com/api/v1"),
+  fingerprint: "3f2b…",                    // native-shell fingerprint of THIS build (see note)
+  deviceID: nil,                          // optional — the SDK auto-generates a stable anonymous id
+  channel: .production,                  // PatchChannel; .staging/.development or .custom("beta-eu")
+  autoApply: true,                       // start() may apply updates automatically
+  nativeFallbackEnabled: true))         // fall back to baked-in code if needed
+```
+
+Only `appKey` is required — the backend resolves the key server-side (SDK ≥ 1.0.3), so the one-liner `Patch.configure(.init(appKey: "pak_…"))` is a complete integration. `patchcli init` bakes in `appID` (keeps older SDKs polling) and the current native-shell `fingerprint` (exact update gating; a device that reports none is served best-effort). `deviceID` needs no value — the SDK generates a stable anonymous per-install id on first launch and persists it, so staged rollouts bucket correctly out of the box. Supply your own only if you already have an install identity scheme. If your app has extensions (widget, share, notification), set `appGroupIdentifier` in every target so they share one identity — otherwise each extension counts as a separate device and can land in a different rollout bucket.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| appKey | String | Per-app identifier issued by Patch. |
+| appID | String? | Backend app UUID, sent as app_id in the update check. Optional — when nil the SDK sends app_key and the backend resolves it (SDK ≥ 1.0.3; older SDKs require it for remote checks). |
+| apiBaseURL | URL? | API root. When nil, the SDK runs purely from the cached/bundled module (no remote check). |
+| fingerprint | String? | This build's native-shell fingerprint (patchcli init bakes it in). When reported, the backend serves only modules built for the matching shell; a device that reports none is served best-effort. |
+| deviceID | String? | Stable anonymous device id, used for deterministic rollout bucketing + telemetry. Optional — when nil the SDK mints a random UUID on first launch and persists it: no identifierForVendor, no advertising identifier, no tracking prompt. (It is still a persistent pseudonymous identifier, so treat it as personal data under GDPR.) Set it only to plug in your own install identity. Note: earlier SDKs sent a fixed placeholder here, which put every device in the same rollout bucket. |
+| channel | PatchChannel | Update channel to subscribe to. Presets .production, .staging, .development, or .custom("…") for any backend channel string. (A channelName: string overload also exists.) |
+| autoApply | Bool | Whether start() may download + activate an available update automatically. Default true. |
+| nativeFallbackEnabled | Bool | Fall back to the baked-in native code if no/invalid module. Default true. |
+
+## Startup updates with start()
+
+The simplest integration: call `start()` once. It activates the best already-cached module immediately (so the app runs OTA code instantly, even offline), then — if an `apiBaseURL` is set and `autoApply` is true — checks for an update and applies it in the background, with download/activation telemetry. Any failure leaves the active module untouched and falls back down the chain.
+
+```swift title="App launch"
+ContentView().task {
+  let outcome = await Patch.shared.start()
+  switch outcome {
+  case .activated(let v): print("Running OTA module \(v)")
+  case .fallback(let s): print("Native fallback: \(s)")
+  case .noModule:      print("No module — fully native")
+  }
+}
+```
+
+## Imperative flow: check → fetch → reload
+
+For full control over *when* an update applies — for example to show an "Update available → Download now" prompt — use the imperative API (EAS / Expo-Updates style). `checkForUpdate()` reports availability **without applying**; `fetchUpdate()` downloads + verifies + stages it; `reloadAsync()` activates the staged module with a hot-swap.
+
+```swift title="Imperative update API"
+public struct UpdateInfo: Sendable {
+  public let version: String
+  public let releaseNotes: String?
+  public let isMandatory: Bool      // from the release's `mandatory` flag
+  public let sizeBytes: Int
+}
+
+// 1 · is there a newer module for our channel + fingerprint?  (does NOT apply)
+if let update = try await Patch.shared.checkForUpdate() {
+  showBanner("Update \(update.version) available")
+
+  // 2 · download + verify + stage it on disk
+  let staged = try await Patch.shared.fetchUpdate()
+
+  // 3 · activate now via hot-swap (next calls hit the new module)
+  if staged { try await Patch.shared.reloadAsync() }
+}
+```
+
+## Observable state for SwiftUI
+
+The SDK exposes a `@MainActor` observable update state you can drive UI off directly — render a banner, a progress bar, and a "Download now" button without managing your own flags.
+
+```swift title="UpdateBanner.swift"
+// PatchUpdateState: .idle | .checking | .available(UpdateInfo)
+//   | .downloading(Double) | .readyToReload | .upToDate | .failed(String)
+struct UpdateBanner: View {
+  // The observable is Patch.shared.updateState (a PatchUpdateStateObservable).
+  @ObservedObject var updates = Patch.shared.updateState
+
+  var body: some View {
+    switch updates.state {
+    case .available(let info):
+      Button("Download update \(info.version)") {
+        Task { try await Patch.shared.fetchUpdate(); try await Patch.shared.reloadAsync() }
+      }
+    case .downloading(let p): ProgressView(value: p)
+    case .readyToReload:    Button("Restart to apply") { Task { try await Patch.shared.reloadAsync() } }
+    default: EmptyView()
+    }
+  }
+}
+```
+
+## Force / mandatory updates
+
+When a release is marked `--mandatory`, `UpdateInfo.isMandatory` is `true`. You decide whether to block UI; the SDK also offers a convenience that fetches + reloads any mandatory update automatically. See [Force updates](/force-updates/) for the full pattern.
+
+```swift title="Mandatory enforcement"
+// Auto fetch+reload if the available update is mandatory; otherwise no-op.
+await Patch.shared.enforceMandatoryUpdates()
+```
+
+## Telemetry
+
+The SDK fires download, activation, error, and fallback events to the backend automatically (gated by your config). These power the dashboard's adoption and failure-rate numbers, the `patchcli status` telemetry, and the received-% on staged rollouts. No extra wiring is required.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 /// The Patch RESOURCE-OVERLAY chunk decoder — the on-device counterpart of the CLI's

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // ABI.swift — the wire envelope + packed-(ptr,len) helpers shared by guest+host.
 //
 // The guest's lowered body export has the engine's canonical signature

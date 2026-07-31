@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 /// Downloads, decompresses, verifies, caches, and activates OTA modules.

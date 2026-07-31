@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
 // NOTE (guide Rule 2): this bridge is largely pure / cross-platform — CoreImage's

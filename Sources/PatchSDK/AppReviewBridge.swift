@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
 // NOTE: StoreKit / UIKit are imported ONLY on real device platforms (iOS / tvOS).

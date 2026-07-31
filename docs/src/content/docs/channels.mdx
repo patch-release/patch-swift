@@ -1,0 +1,42 @@
+---
+title: Deployment channels
+description: Separate release streams.
+sidebar:
+  order: 7
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A **channel** is a named update stream — `production`, `staging`, `beta`, or any string you like. The same app build (same fingerprint) can subscribe to a channel and receive only the releases pushed to it. Channels let you run an internal beta and production in parallel from one codebase.
+
+## Subscribe a build to a channel
+
+Set the channel on the SDK at init. It can be any string; the `PatchChannel` presets are just conveniences.
+
+```swift title="Choosing a channel"
+// a preset…
+Patch.configure(.init(appKey: "pak_live_…", channel: .staging))
+
+// …or an arbitrary channel string (e.g. a per-tester or per-tenant stream)
+Patch.configure(.init(appKey: "pak_live_…", channel: "beta-eu"))
+```
+
+## Release to a channel
+
+Pass `--channel` on `release`/`push`. A device only ever receives modules pushed to the channel it's subscribed to. `status` and `rollback` are also channel-scoped.
+
+```bash title="~/MyApp — zsh"
+# release a build to the staging channel for internal testers
+$ patchcli release --channel staging --message "Try the new checkout flow"
+
+# promote the same logic to production once it looks good
+$ patchcli release --channel production --rollout 25
+
+# inspect / roll back a single channel
+$ patchcli status   --channel staging
+$ patchcli rollback --channel staging
+```
+
+<Aside type="note" title="Channels vs fingerprints">
+Channels are independent of the compatibility fingerprint. A module pushed to any channel still has to match the installed app's native-shell fingerprint to be served — channels segment *who* gets a release, the fingerprint guarantees it's *safe* for that build.
+</Aside>

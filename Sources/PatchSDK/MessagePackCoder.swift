@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 // Codable Encoder/Decoder that bridge Swift values to/from the `MPValue` tree,

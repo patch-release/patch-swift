@@ -1,0 +1,173 @@
+{
+  "generatedFrom": "../tools/swiftui-corpus-coverage/artifacts/census-2026-07-30.log",
+  "minViewsForRanking": 10,
+  "viewLevel": {
+    "lowered": 1024,
+    "total": 1372,
+    "pct": 74.6
+  },
+  "elementLevel": {
+    "lowered": 21034,
+    "total": 25503,
+    "pct": 82.5
+  },
+  "appCount": 24,
+  "best": {
+    "name": "first-party-app-b",
+    "lowered": 41,
+    "total": 42,
+    "pct": 98
+  },
+  "worst": {
+    "name": "kiwix-apple",
+    "lowered": 29,
+    "total": 64,
+    "pct": 45
+  },
+  "apps": [
+    {
+      "name": "tinode-ios",
+      "lowered": 1,
+      "total": 1,
+      "pct": 100
+    },
+    {
+      "name": "first-party-app-b",
+      "lowered": 41,
+      "total": 42,
+      "pct": 98
+    },
+    {
+      "name": "first-party-app-f",
+      "lowered": 34,
+      "total": 36,
+      "pct": 94
+    },
+    {
+      "name": "first-party-app-g",
+      "lowered": 22,
+      "total": 24,
+      "pct": 92
+    },
+    {
+      "name": "first-party-app-d",
+      "lowered": 57,
+      "total": 63,
+      "pct": 90
+    },
+    {
+      "name": "first-party-app-h",
+      "lowered": 24,
+      "total": 27,
+      "pct": 89
+    },
+    {
+      "name": "first-party-app-c",
+      "lowered": 35,
+      "total": 41,
+      "pct": 85
+    },
+    {
+      "name": "firefox-ios",
+      "lowered": 64,
+      "total": 76,
+      "pct": 84
+    },
+    {
+      "name": "GoCycling",
+      "lowered": 31,
+      "total": 38,
+      "pct": 82
+    },
+    {
+      "name": "first-party-app-a",
+      "lowered": 23,
+      "total": 28,
+      "pct": 82
+    },
+    {
+      "name": "wire-ios",
+      "lowered": 137,
+      "total": 172,
+      "pct": 80
+    },
+    {
+      "name": "clean-architecture-swiftui",
+      "lowered": 7,
+      "total": 9,
+      "pct": 78
+    },
+    {
+      "name": "isowords",
+      "lowered": 49,
+      "total": 63,
+      "pct": 78
+    },
+    {
+      "name": "wikipedia-ios",
+      "lowered": 114,
+      "total": 149,
+      "pct": 77
+    },
+    {
+      "name": "WWDC",
+      "lowered": 22,
+      "total": 29,
+      "pct": 76
+    },
+    {
+      "name": "exyte-Chat",
+      "lowered": 42,
+      "total": 56,
+      "pct": 75
+    },
+    {
+      "name": "first-party-app-e",
+      "lowered": 18,
+      "total": 24,
+      "pct": 75
+    },
+    {
+      "name": "MovieSwiftUI",
+      "lowered": 35,
+      "total": 48,
+      "pct": 73
+    },
+    {
+      "name": "Pulse",
+      "lowered": 52,
+      "total": 71,
+      "pct": 73
+    },
+    {
+      "name": "ACHNBrowserUI",
+      "lowered": 75,
+      "total": 110,
+      "pct": 68
+    },
+    {
+      "name": "IceCubesApp",
+      "lowered": 91,
+      "total": 160,
+      "pct": 57
+    },
+    {
+      "name": "NetNewsWire",
+      "lowered": 8,
+      "total": 14,
+      "pct": 57
+    },
+    {
+      "name": "Gifski",
+      "lowered": 13,
+      "total": 27,
+      "pct": 48
+    },
+    {
+      "name": "kiwix-apple",
+      "lowered": 29,
+      "total": 64,
+      "pct": 45
+    }
+  ]
+}

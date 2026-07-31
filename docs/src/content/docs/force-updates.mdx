@@ -1,0 +1,56 @@
+---
+title: Force updates
+description: Require a patch before the app continues.
+sidebar:
+  order: 10
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Some fixes can't wait for the next natural launch — a critical tax bug, a broken eligibility rule. Mark a release **mandatory** and the SDK surfaces an `isMandatory` flag so you can require the update before the user continues. The pattern mirrors EAS / Expo-Updates' "Update available → Download now."
+
+## Mark a release mandatory
+
+```bash title="~/MyApp — zsh"
+# push the fix to everyone and flag it mandatory
+$ patchcli release --rollout 100 --mandatory --message "Critical: VAT rounding fix"
+```
+
+The `mandatory` flag rides through the update-check response. On the device, `checkForUpdate()` returns an `UpdateInfo` with `isMandatory == true`.
+
+## The "Download now" pattern
+
+You stay in control of UI. The recommended flow: check on launch, and if a mandatory update exists, present a blocking sheet that downloads and reloads before letting the user proceed.
+
+```swift title="Mandatory gate"
+func gateOnMandatoryUpdate() async throws {
+  guard let info = try await Patch.shared.checkForUpdate() else { return }
+
+  if info.isMandatory {
+    // Block the UI: "A required update is available."
+    presentBlockingSheet(version: info.version, notes: info.releaseNotes)
+
+    // Download → verify → stage → hot-swap, then dismiss the gate.
+    if try await Patch.shared.fetchUpdate() {
+      try await Patch.shared.reloadAsync()
+      dismissBlockingSheet()
+    }
+  } else {
+    // Optional update — show a dismissible banner instead.
+    showDismissibleBanner(info)
+  }
+}
+```
+
+Prefer it fully automatic? Call the convenience, which fetches + reloads any mandatory update and no-ops otherwise:
+
+```swift title="Auto-enforce"
+ContentView().task {
+  await Patch.shared.start()                  // normal startup updates
+  await Patch.shared.enforceMandatoryUpdates()  // force any mandatory release
+}
+```
+
+<Aside type="caution" title="Scope">
+Force updates apply to the OTA module only — they hot-swap WASM logic, not native code. A change to the native shell still requires an App Store release (the fingerprint gate enforces this). Keep mandatory updates within Apple's Developer Program License Agreement and Review Guidelines.
+</Aside>

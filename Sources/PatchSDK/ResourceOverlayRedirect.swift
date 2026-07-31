@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 #if canImport(ObjectiveC)
 import ObjectiveC

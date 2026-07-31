@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // ViewPatching.swift — the OUT-OF-THE-BOX SwiftUI body patching runtime.
 // ======================================================================
 // This is the SDK half of automatic view patching. The CLI (`patchcli prepare`,

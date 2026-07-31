@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 /// The graceful-degradation chain: **current → previous → bundled → disabled**.

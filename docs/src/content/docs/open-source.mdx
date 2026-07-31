@@ -1,0 +1,175 @@
+---
+title: Open source
+description: What's open, under which licence, and how to build it yourself.
+sidebar:
+  order: 38
+---
+
+import { Aside, CardGrid, LinkCard, Tabs, TabItem, Steps, FileTree } from '@astrojs/starlight/components';
+
+Patch edits your Xcode project and injects code into your `@main` App struct. You
+shouldn't have to take that on trust, so the engine that does it and the runtime
+that ships inside your binary are both public.
+
+## One repository, two packages
+
+Both live in **[`patch-release/patch-swift`](https://github.com/patch-release/patch-swift)**.
+The SDK is the SwiftPM package at the repository root — which is why the package
+URL you add in Xcode is just the repository URL — and the engine is a second,
+independent SwiftPM package nested at `cli/`.
+
+<FileTree>
+- patch-swift/
+  - Package.swift **the SDK** — MIT, the package SwiftPM resolves
+  - Sources/ the SDK's targets
+  - cli/ **the engine** — Apache-2.0, its own SwiftPM package
+    - Package.swift
+    - Sources/ the engine's targets
+</FileTree>
+
+<CardGrid>
+  <LinkCard
+    title="The SDK — repository root"
+    description="MIT · Swift 6 · runs inside your app. WasmKit runtime, value marshalling, update lifecycle, host bridges, the SwiftUI renderer."
+    href="https://github.com/patch-release/patch-swift"
+  />
+  <LinkCard
+    title="The engine — cli/ in the same repo"
+    description="Apache-2.0 · Swift 6 · runs on your machine or in CI. Partitioning, Swift→WebAssembly compilation, SwiftUI/UIKit lowering, project integration."
+    href="https://github.com/patch-release/patch-swift"
+  />
+</CardGrid>
+
+### Why two licences
+
+The SDK executes a WebAssembly interpreter **inside your users' app**, so it has
+to be maximally auditable and maximally permissive — MIT, no conditions worth
+arguing about.
+
+The engine is Apache-2.0 rather than MIT for one reason: Apache-2.0 carries an
+**express patent grant**. Patch's partitioning and lowering approach is novel
+enough that a licence which says nothing about patents is a worse answer for you,
+not just for us.
+
+<Aside type="note" title="What is not open">
+The hosted control plane — rollouts, cohorts, device targeting, analytics, audit,
+team accounts — is a commercial service and its source is not published. The SDK will talk to **any** base URL, so you are not tied to our
+infrastructure. See
+[Running it yourself](/self-hosting/).
+</Aside>
+
+## What's in the engine
+
+<FileTree>
+- cli/
+  - Sources/
+    - **PartitioningEngine/** decides, per function, what can ship OTA
+    - **CodeGenerator/** SwiftUI + UIKit lowering to the view IR
+    - **Compiler/** Swift→WebAssembly pipeline, fingerprinting, upload
+    - **ViewNodeIR/** the wire format the SDK renders
+    - PatchCLI/ the `patchcli` command surface
+  - Tests/ ~1,700 tests
+</FileTree>
+
+The interesting part is `PartitioningEngine` + `CodeGenerator`. Everything else
+is plumbing. If you want to understand how a SwiftUI view body becomes
+WebAssembly, start at `CodeGenerator/SwiftUIClassifier.swift` and follow it into
+`SwiftUIEmitter.swift`.
+
+## What's in the SDK
+
+<FileTree>
+- (repository root)
+  - Sources/
+    - **PatchSDK/** runtime, loader, fallback chain, update checker, host bridges
+    - **PatchSwiftUI/** the thunk entry point every generated view calls
+    - **PatchRender/** reconstitutes the view IR into real SwiftUI
+    - PatchViewIR/ the SDK's copy of the wire format
+    - PatchUIKit/ the UIKit equivalent
+  - Tests/ ~1,000 tests
+</FileTree>
+
+<Aside type="caution" title="One invariant worth knowing">
+`cli/Sources/ViewNodeIR` and `Sources/PatchViewIR` are the **same wire format**,
+vendored into both packages. If you change one you must change the other, or a
+guest module will emit a tree the host cannot decode. The packages carry guard
+tests for this, and it has drifted before.
+</Aside>
+
+## Building from source
+
+<Steps>
+
+1. **Clone the repository and build the SDK.** One clone gets you both packages.
+   Nothing exotic — the SDK is a normal SwiftPM package at the root.
+
+   ```bash
+   git clone https://github.com/patch-release/patch-swift
+   cd patch-swift
+   swift build && swift test
+   ```
+
+2. **Build the engine**, the separate package in `cli/`.
+
+   ```bash
+   cd cli
+   swift build -c release
+   .build/release/patchcli --help
+   ```
+
+3. **Add the WebAssembly toolchain** — only needed to actually compile patches.
+
+   ```bash
+   patchcli setup
+   ```
+
+   This installs the pinned swift.org toolchain and the WebAssembly SDK. The
+   Apple/Xcode toolchain **cannot** target WebAssembly, which is why a second
+   toolchain is required at all.
+
+4. **Check the setup.**
+
+   ```bash
+   patchcli doctor
+   ```
+
+</Steps>
+
+<Aside type="caution" title="PATH order matters">
+Building the CLI for your Mac uses the Apple toolchain; compiling patches uses
+the swift.org one. If swiftly is first on your `PATH` you'll build the CLI with
+the wrong compiler. `patchcli setup` and `doctor` handle this for you — if you're
+doing it by hand, put `/usr/bin` first for host builds and `~/.swiftly/bin` first
+for WebAssembly builds.
+</Aside>
+
+## Reproducing our coverage numbers
+
+Every coverage figure on this site is generated from a committed measurement, not
+written by hand. You can re-run that measurement:
+
+```bash
+./corpus/fetch.sh                       # the corpus apps, at pinned commits
+./tools/swiftui-corpus-coverage/run.sh  # the census
+```
+
+`corpus/fetch.sh` clones each app at the exact commit recorded in
+`corpus/manifest.yml`, so the corpus is reproducible rather than a snapshot we
+happen to have on a laptop. See [what Patch can and can't update](/coverage/) for
+the current results.
+
+## Contributing
+
+Issues and pull requests for both packages go to the same repository,
+[`patch-release/patch-swift`](https://github.com/patch-release/patch-swift). Two
+things that make a bug report actionable immediately:
+
+```bash
+patchcli doctor --json
+```
+
+That prints your setup as JSON — versions, toolchain, and whether the app's
+fingerprint is registered. Attach it.
+
+If you're reporting that a view didn't patch when you expected it to, the build
+output already names the blocking reads per view; paste that too.

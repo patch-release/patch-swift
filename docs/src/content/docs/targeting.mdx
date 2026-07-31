@@ -1,0 +1,49 @@
+---
+title: Release targeting
+description: Target releases by version, cohort, and device.
+sidebar:
+  order: 9
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A release can be limited to a **device cohort** by app version and OS version. Targeting answers "*which* devices are even eligible for this release" — and it composes **with** the rollout %: a device must satisfy the targeting constraints **and** fall inside the rollout bucket before it's served the module. Use it to ship a fix only where it applies — for example, a fix that depends on an API added in app 2.1 on iOS 16.
+
+## Set targeting at push time
+
+Targeting is set when you ship a release, from the CLI (or CI), with four flags on `push`/`release`. Any flag you omit is left unconstrained. The constraints are stored on the release and shown in the console and in `patchcli status`.
+
+```bash title="~/MyApp — zsh"
+# release a fix only to app ≥ 2.1.0 running on iOS ≥ 16.0
+$ patchcli release --min-app-version 2.1.0 --min-os-version 16.0 \
+           --message "Fix that needs the 2.1 checkout API"
+
+# bound it on both ends — only the 2.x line, excluding 3.0+
+$ patchcli release --min-app-version 2.0.0 --max-app-version 2.9.99
+
+# targeting composes with the rollout % — eligible devices, then 10% of them
+$ patchcli release --min-app-version 2.1.0 --rollout 10
+
+# tag the release with a cohort label (shown in the console / status)
+$ patchcli release --target-cohort beta-eu
+```
+
+The same four flags are available on `patchcli push`. When any are set, the preflight (and `patchcli release --dry-run`) prints a one-line `Targeting:` summary, e.g. `app ≥ 2.1.0, iOS ≥ 16.0`, so you can confirm the cohort before uploading.
+
+## In the console
+
+Rollout rows whose release carries any constraint show a **Targeted** chip; the release drawer has a **Targeting** section that lists the active constraints (app ≥ / ≤, iOS ≥, cohort). `patchcli status` surfaces the same summary on its `Targeting:` line.
+
+## How it's evaluated
+
+On every update check the backend evaluates the active release's constraints against the device, then applies the rollout-% bucket. **Both** must pass for the device to receive the module.
+
+- **Unset = no constraint.** A field left `NULL` (flag omitted) targets everyone; a release with no targeting behaves exactly as before.
+- **Semver is numeric, not lexicographic.** Versions compare segment-by-segment as integers, so `1.10 > 1.9` and `1.2` equals `1.2.0`. Pre-release / build / OS-build suffixes are ignored (`16.4 (20E247)` → `16.4`, `2.1.0-beta.3` → `2.1.0`).
+- **Bounds.** `--min-app-version` requires the device app version `≥` the value; `--max-app-version` requires `≤`; `--min-os-version` requires the device OS version `≥` the value.
+- **Fail-open per version constraint.** If a device reports an absent or unparseable version, that version constraint is skipped rather than blocking the device — the rollout-% gate still applies. (Cohort matching is the exception — see below — it is exact-match.)
+- **Cohort filtering.** `--target-cohort <name>` now *gates* eligibility: the release is served only to devices that report the matching cohort. The SDK reports an app-assigned cohort (`PatchConfiguration.cohort`, e.g. "beta"/"internal"); when the app sets none, the backend derives a stable hash-bucket cohort from the device id (so percentage-style cohort slices still work). Cohort matching is exact and fail-*closed*: a device that reports no cohort is excluded from a release that targets a named cohort. Composes (logical AND) with the app/OS-version constraints and the rollout-% bucket.
+
+<Aside type="note" title="Targeting vs. channels vs. rollout %">
+These three controls are independent and stack. **Targeting** decides *which devices are eligible* (by app / OS version). A **channel** decides *which track* a device follows (`production`, `staging`, a per-tenant stream). The **rollout %** decides *what fraction of the eligible devices* get the release in this staged step. An update is served only to a device that is on the release's channel, satisfies its targeting, and lands inside the rollout bucket.
+</Aside>

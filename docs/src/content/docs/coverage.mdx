@@ -1,0 +1,119 @@
+---
+title: What Patch can & can't update
+description: What an OTA patch can and cannot change.
+sidebar:
+  order: 4
+---
+
+import coverage from '../../data/coverage.json';
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note" title="These numbers are generated, not written">
+Everything below is imported from `src/data/coverage.json`, which is derived from
+a committed census artifact by `npm run gen`. No coverage figure on this site is
+typed by hand. Reproduce it yourself with `./corpus/fetch.sh` and
+`./tools/swiftui-corpus-coverage/run.sh`.
+</Aside>
+
+The honest, developer-facing map of what an OTA patch can reach in a SwiftUI app — and the small set of things it genuinely can't. The short version: **SwiftUI structure is never the wall.** An OTA patch can author, restyle, reorder, rebind, and re-flow essentially your entire view hierarchy. The only true ceiling is the App Store's own boundary — a native capability, framework symbol, or privacy entitlement that **isn't already compiled and signed into your shipped binary**.
+
+## Measured coverage
+
+Across **{coverage.appCount} real apps** — ours and well-known open-source ones —
+**{coverage.viewLevel.pct}%** of SwiftUI view bodies lower to WebAssembly and
+ship over the air.
+
+<div class="patch-stat-row">
+  <div class="patch-stat">
+    <b>{coverage.viewLevel.pct}%</b>
+    <span>view-level — {coverage.viewLevel.lowered.toLocaleString()} / {coverage.viewLevel.total.toLocaleString()}</span>
+  </div>
+  <div class="patch-stat">
+    <b>{coverage.elementLevel.pct}%</b>
+    <span>element-level — {coverage.elementLevel.lowered.toLocaleString()} / {coverage.elementLevel.total.toLocaleString()}</span>
+  </div>
+  <div class="patch-stat">
+    <b>{coverage.best.pct}%</b>
+    <span>best app — {coverage.best.name}</span>
+  </div>
+  <div class="patch-stat">
+    <b>{coverage.worst.pct}%</b>
+    <span>worst app — {coverage.worst.name}</span>
+  </div>
+</div>
+
+Per-app results vary widely, so the average matters less than the spread. The
+twenty named apps are public repositories measured at pinned commits, so you can
+verify those yourself; the eight `first-party-app-*` rows are our own apps,
+included because dogfooding is the point but not named:
+
+<table>
+  <thead>
+    <tr><th>App</th><th>Views lowered</th><th>Coverage</th></tr>
+  </thead>
+  <tbody>
+    {coverage.apps.map((a) => (
+      <tr key={a.name}>
+        <td>{a.name}</td>
+        <td>{a.lowered} / {a.total}</td>
+        <td>{a.pct}%</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+The remainder is mostly custom child views the engine cannot reconstruct, and
+unsupported modifiers. A view that cannot lower is never silently broken — it
+renders natively from your signed binary.
+
+<Aside type="tip" title="The headline">
+Nearly all of the SwiftUI surface that real iOS apps actually use is OTA-reachable. The measured share of view bodies Patch lowers to WebAssembly today is in the table above — and the views that stay native still render and move via OTA (only their internals are frozen). The gap between "reachable" and "lowered today" is engineering backlog, not a fundamental wall.
+</Aside>
+
+## What you can update over the air
+
+Within your app's already-linked frameworks and declared entitlements, OTA patches reach virtually the entire SwiftUI surface:
+
+| Area | What an OTA patch can do |
+| --- | --- |
+| View structure | Add, remove, reorder, and restyle views; change the whole hierarchy. Structure is fully authorable over the air. |
+| Text & images | Text (literals, interpolation, computed strings), Label, Image(systemName:) and bundle assets, AsyncImage. |
+| Layout | Stacks, grids, List, Form, Section, ScrollView, Spacer/Divider, ViewThatFits, and the layout modifiers — frame, padding, offset, position, safe-area insets. |
+| Styling, colors & fonts | Foreground/background/tint, borders, shadows, corner radius, fonts and weights, plus design-system tokens — a custom Theme.Colors.ink / Theme.Font.body(…) / Theme.Radius.lg in a modifier value position lowers and rides the patch (resolved natively, fed to the view). |
+| Controls & state | Button, Toggle, Slider, Stepper, Picker, TextField/SecureField, Link/ShareLink, Gauge/ProgressView, bound to @State / @Binding / @AppStorage / @FocusState. |
+| Navigation & presentation | NavigationStack / navigationDestination, sheets, full-screen covers, popovers, alerts, confirmation dialogs, toolbars, context menus, and searchable. |
+| Modifiers & control flow | The vast majority of standard modifiers, plus if / if let / switch control flow inside a view body, gestures (onTapGesture & the gesture algebra), onAppear/onChange/task, and full async/await logic. |
+
+For the exhaustive symbol-by-symbol breakdown, see [What's updatable](/how-it-works/#whats-updatable) and the per-function coverage you get from `patchcli build --verbose`.
+
+## What you can't update — the binary-symbol wall
+
+There is essentially **one** true wall, with two faces. Both reduce to the same thing: an OTA patch can never introduce a native symbol, framework, or entitlement that **isn't already in your shipped, code-signed app**, and can never rewrite the compiled machine code of native functions that aren't a patchable `View.body`. This is not "hard, just not yet" — it's a physical boundary, and it's exactly the line the App Store draws.
+
+<Aside type="caution" title="1 · A native capability, framework, or entitlement that isn't in the signed binary">
+An OTA patch can't *introduce* a privacy-gated capability your app never declared, or call into a framework the app never linked. The OS reads your *signed* Info.plist and entitlements at launch; WebAssembly can't synthesize a permission key or link a new framework. Examples:
+
+- Presenting a **camera or photo-library picker** in an app with no `NSCameraUsageDescription` / `NSPhotoLibraryUsageDescription` and no PhotosUI/AVFoundation linked.
+- **HealthKit, Contacts, Location, Microphone, Bluetooth, Apple Pay / Wallet** presenters when the matching usage string or entitlement was never declared.
+- A `UIViewRepresentable` wrapping `MKMapView` / `WKWebView` / `MTKView` / `ARView` in an app that **never linked** MapKit / WebKit / MetalKit / RealityKit.
+- A custom Metal `Shader` (`.colorEffect` / `.layerEffect`) whose `.metal` function was never compiled into the app's `.metallib`.
+</Aside>
+
+<Aside type="caution" title="2 · The internals of non-View.body native code">
+Patch hot-swaps `View.body` getters (via dynamic replacement, like Xcode Previews) and data-drives the renderer. It has no mechanism to rewrite arbitrary compiled native functions. So an OTA patch can't change the *body* of:
+
+- A `UIViewRepresentable`'s `makeUIView` / `updateUIView`.
+- A custom `ButtonStyle` / `ViewModifier`'s `makeBody` / `body(content:)`.
+- A `@FetchRequest` / `@Query` predicate or sort declaration (you can restyle, reorder, and relabel the resulting rows — you just can't rewrite the predicate to reference an attribute the model lacks).
+- A custom `Shape.path(in:)`, custom `Layout` geometry, or any private native helper that isn't a thunked `View.body`.
+</Aside>
+
+<Aside type="tip" title={'Important: "frozen internals" ≠ "can\'t touch it"'}>
+Be precise here, because it's the most common misconception. An **existing** `MKMapView`, `WKWebView`, custom view, custom style, or `Canvas` in your app is fully reachable by an OTA patch — it still **renders, gets placed, reordered, resized, shown, and hidden** over the air. What's frozen is only its native *internals* (the `makeUIView` body, the Metal kernel, the predicate). Likewise, a design-system color/font/number constant patches fine — unless it references a `private` or body-local member, in which case the view stays native (still rendered, never broken). And things people assume are off-limits — `.drawingGroup()` (SwiftUI's own Metal), `AsyncImage`, `ShareLink`, haptics, built-in format styles, `GeometryReader` — are all patchable, because they live in the SwiftUI/Foundation runtime your app already links.
+</Aside>
+
+## The one-line rule
+
+If a change lives entirely inside your app's **existing** linked frameworks, declared entitlements, and SwiftUI view bodies, an OTA patch can ship it. If it requires a **new** native symbol, framework, or privacy entitlement that isn't in the signed binary — or it rewrites compiled native code that isn't a `View.body` — it needs an App Store release. That second set is tiny, and it's the same boundary Apple's review process draws. When Patch isn't sure a change is safe, it keeps the code native and renders the bundled fallback, so an update can **never** break your app.
+
+New here? Start with the [Quick Start](/quickstart/) or have an AI assistant [set Patch up for you](/ai-setup/).

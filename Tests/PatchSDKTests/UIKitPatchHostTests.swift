@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitPatchHostTests — the SDK-side tests for the UIKit cell-patching host.
 // =============================================================================
 // Two halves, mirroring how the SwiftUI host is tested:

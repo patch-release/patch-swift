@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Render.swift — the native SDK renderer: ViewNode IR -> REAL SwiftUI.
 // =====================================================================
 // This is the host half of Breakthrough #3. The WASM guest builds a `ViewNode`

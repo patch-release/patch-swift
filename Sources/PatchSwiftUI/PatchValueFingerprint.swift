@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchValueFingerprint.swift — a CHEAP, COMPLETE change-detector for the marshalling
 // hot path (P0 perf).
 // =====================================================================================

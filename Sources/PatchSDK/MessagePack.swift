@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 
 // A small, dependency-free MessagePack implementation used to marshal arbitrary

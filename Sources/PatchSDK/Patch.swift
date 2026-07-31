@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
+import PatchHostBridge
 // (No UIKit import: the only former UIKit use here — `UIDevice.current.systemVersion`
 // for `os_version` — was replaced by the nonisolated `ProcessInfo` equivalent to
 // satisfy Swift 6 strict concurrency. See `osVersion` below.)
@@ -66,7 +69,18 @@ public struct PatchConfiguration: Sendable {
     /// Native-shell fingerprint sent in the update check.
     public var fingerprint: String?
     /// Stable anonymous device id sent in the update check + telemetry.
+    /// Optional — when nil the SDK mints and persists one (`PatchDeviceIDStore`).
     public var deviceID: String?
+    /// App-group identifier (e.g. `"group.com.example.app"`) used to SHARE the
+    /// auto-generated `deviceID` between the host app and its extensions.
+    ///
+    /// An extension has its own `UserDefaults` domain, so without this each
+    /// widget/share/notification extension mints a separate id — counting one
+    /// user as several devices against the plan cap and against billing, and
+    /// splitting the rollout bucket so an extension can run a different patch
+    /// version than its host. Set the same value in every target that calls
+    /// `Patch.configure`. Ignored when `deviceID` is set explicitly.
+    public var appGroupIdentifier: String?
     /// Update channel to subscribe to.
     public var channel: PatchChannel
     /// Optional app-assigned cohort label (e.g. "beta", "internal") reported on
@@ -88,6 +102,7 @@ public struct PatchConfiguration: Sendable {
         apiBaseURL: URL? = PatchConfiguration.defaultAPIBaseURL,
         fingerprint: String? = nil,
         deviceID: String? = nil,
+        appGroupIdentifier: String? = nil,
         channel: PatchChannel = .production,
         cohort: String? = nil,
         autoApply: Bool = true,
@@ -99,6 +114,7 @@ public struct PatchConfiguration: Sendable {
         self.apiBaseURL = apiBaseURL
         self.fingerprint = fingerprint
         self.deviceID = deviceID
+        self.appGroupIdentifier = appGroupIdentifier
         self.channel = channel
         self.cohort = cohort
         self.autoApply = autoApply
@@ -116,6 +132,7 @@ public struct PatchConfiguration: Sendable {
         apiBaseURL: URL? = PatchConfiguration.defaultAPIBaseURL,
         fingerprint: String? = nil,
         deviceID: String? = nil,
+        appGroupIdentifier: String? = nil,
         channelName: String,
         cohort: String? = nil,
         autoApply: Bool = true,
@@ -125,6 +142,7 @@ public struct PatchConfiguration: Sendable {
         self.init(
             appKey: appKey, appID: appID, apiBaseURL: apiBaseURL,
             fingerprint: fingerprint, deviceID: deviceID,
+            appGroupIdentifier: appGroupIdentifier,
             channel: PatchChannel(channelName), cohort: cohort,
             autoApply: autoApply, nativeFallbackEnabled: nativeFallbackEnabled,
             wasiConfig: wasiConfig)
@@ -185,6 +203,17 @@ public final class Patch: @unchecked Sendable {
     /// re-entered concurrently. `call` dispatches synchronously onto it.
     private let callQueue = DispatchQueue(label: "com.patch.sdk.runtime", qos: .userInitiated)
 
+    /// Serial queue that makes a whole `activate()` (instantiate + swap + host-bridge
+    /// refresh + notify) ATOMIC against another concurrent `activate()` (bug R2-#135).
+    /// Two unguarded activations — e.g. `start()` Phase 2's `checkAndApply` and a user
+    /// 'reload' button's `activateOffMain` — each swap `active` atomically under `lock`,
+    /// but then call `refreshHostBridgeForActiveModuleSet()` OFF the lock; without this
+    /// serialization their handle-removeAll / manifest-load / registrar steps interleave,
+    /// leaving the host-bridge manifest bound to a DIFFERENT module than `active`. It is
+    /// deliberately NOT `callQueue`: the refresh re-enters `callQueue` (via
+    /// `hasFunction`/`callPacked`), so running it on `callQueue` would deadlock.
+    private let activationQueue = DispatchQueue(label: "com.patch.sdk.activation", qos: .userInitiated)
+
     /// Guards `active` so hot-swap is safe while calls are in flight.
     private let lock = ReadWriteLock()
 
@@ -226,6 +255,101 @@ public final class Patch: @unchecked Sendable {
     /// Guarded by `lock`.
     private var _localActivationAttempted = false
 
+    /// TEST-ONLY: fired at the start of `instantiateModuleSet` (the CPU-heavy module
+    /// decode/instantiate) so a test can assert on which thread the activation runs —
+    /// the regression guard that `start()`'s Phase-1 activation does NOT block the
+    /// calling (main) thread for a large module (adversarial review #17). Never set in
+    /// production.
+    var _onInstantiateForTesting: (@Sendable () -> Void)?
+
+    // MARK: - Cold-start pre-warm (W5a/W5b)
+    //
+    // The SDK pre-warms two things immediately after a module activates on the
+    // `activationQueue` background queue (before the main-queue notification fires):
+    //
+    //   W5b — manifest cache: the `patch_view_manifest` WASM export is called ONCE
+    //         here and its JSON bytes are cached under `_cachedManifestBytes`.
+    //         `PatchViewPatchRegistry.syncWithModuleEpoch` reads the cache instead of
+    //         calling `callPacked` from inside a SwiftUI body eval (main thread), so
+    //         the first-body-eval WASM call for the manifest disappears.
+    //
+    //   W5a — view-body handle warmup: every `view_body__*` export in the manifest
+    //         is invoked once with a minimal `{}` input (result discarded). WasmKit
+    //         memoizes export-handle lookups after the first resolve, so the first
+    //         real per-view SwiftUI body eval (which used to pay 10-30ms the first
+    //         time it asked for the export handle) sees a warm cache. Both W5a and
+    //         W5b run on the already-background `activationQueue` before `notify`
+    //         fires, so the SwiftUI tree never experiences them on the main thread.
+    //
+    // Safety: the pre-warm invocation uses `{}` as input; the WASM body may return
+    // an error-shaped emission or a trivial tree — that's fine, the result is
+    // discarded. The real body is always called again with live inputs. A pre-warm
+    // failure (trap / missing export) is silently ignored so an unrecognized module
+    // shape never crashes launch. The cached manifest bytes are cleared alongside the
+    // epoch on every module-set change (activate / hotSwap / deactivate).
+
+    /// W5b — the cached `patch_view_manifest` bytes from the most recently activated
+    /// module. Nil when no module is active or the manifest export is absent.
+    /// Populated on the activationQueue in `activate()`/`hotSwap()` BEFORE
+    /// `notifyModuleSetChanged` fires on main, so the first SwiftUI body eval's
+    /// `syncWithModuleEpoch` → `loadManifestEntries` reads the pre-loaded bytes
+    /// instead of making a blocking `callPacked` from the main thread. Guarded by
+    /// `lock`.
+    private var _cachedManifestBytes: [UInt8]?
+
+    /// Read the cached manifest bytes (W5b). Returns nil when not yet loaded or
+    /// no module is active. Call from any thread (guarded by `lock`).
+    /// Used by `PatchSwiftUI.PatchViewPatchRegistry.loadManifestEntries` to avoid
+    /// a synchronous WASM call on the first SwiftUI body eval (main thread).
+    public func cachedManifestBytes() -> [UInt8]? {
+        lock.read { _cachedManifestBytes }
+    }
+
+    /// Minimal Decodable mirror of `PatchViewManifest` (defined in `PatchSwiftUI`)
+    /// used ONLY by the pre-warm path in `PatchSDK`. We need just enough to
+    /// enumerate the `thunkSafe` view body export names without importing `PatchSwiftUI`
+    /// (which would create a circular dependency or require a separate target split).
+    private struct _ManifestForPrewarm: Decodable {
+        struct Entry: Decodable {
+            let export: String
+            let thunkSafe: Bool
+        }
+        let views: [Entry]
+    }
+
+    /// The well-known WASM export name for the view manifest (mirrors
+    /// `PatchViewManifest.exportName` in `PatchSwiftUI` — kept in sync by
+    /// the split-repo resync step).
+    private static let _viewManifestExportName = "patch_view_manifest"
+
+    /// W5a + W5b implementation: load the view manifest and pre-warm each
+    /// `view_body__*` export. Called on the `activationQueue` (background) in both
+    /// `activate()` and the hotSwap commit path, BEFORE `notifyModuleSetChanged`
+    /// fires on main. Errors/traps from pre-warm invocations are silently discarded
+    /// (the real body call will surface any real failure via the demote path).
+    private func prewarmViewBodyExports() {
+        // W5b: load and cache the manifest bytes.
+        let manifestBytes: [UInt8]?
+        if hasFunction(Self._viewManifestExportName),
+           let bytes = try? callPacked(Self._viewManifestExportName, []) {
+            manifestBytes = bytes
+        } else {
+            manifestBytes = nil
+        }
+        lock.write { _cachedManifestBytes = manifestBytes }
+
+        // W5a: decode the manifest to get export names, then warm each export.
+        guard let mb = manifestBytes,
+              let manifest = try? JSONDecoder().decode(_ManifestForPrewarm.self,
+                                                       from: Data(mb)) else { return }
+        let emptyInput = [UInt8]("{}".utf8)
+        for entry in manifest.views where entry.thunkSafe {
+            // Invoke once and discard. WasmKit caches the export handle after this
+            // first resolution so the real body eval won't pay the lookup cost.
+            _ = try? callPacked(entry.export, emptyInput)
+        }
+    }
+
     /// The current module-set epoch (see `_moduleEpoch`). 0 ⇒ nothing was ever
     /// activated or deactivated in this process.
     public var moduleEpoch: UInt64 { lock.read { _moduleEpoch } }
@@ -257,6 +381,34 @@ public final class Patch: @unchecked Sendable {
     /// D3 bridges exposed to loaded modules. Apps add custom bridges here before
     /// `configure`/`start`; the defaults are installed by `configure`.
     public let bridges = BridgeRegistry()
+
+    /// LEVER #2 — the SHARED generalized-host-bridge controller. The registry of
+    /// build-time resolver thunks (the app's compiled-in `__patchRegisterHostBridges`
+    /// dispatch table) + the handle table + the routed-symbol manifest for the active
+    /// module set. Process-lifetime owned; its PER-EPOCH state (handles + manifest) is
+    /// reset on every module-set change by `refreshHostBridgeForActiveModuleSet()`,
+    /// torn down fully on `deactivate`. The three generic `patch_host.*` imports
+    /// (call/release/have) are wired onto every instantiated module via
+    /// `composedHostImports()` (see `HostBridgeActivation.swift`). A module that ships
+    /// no generic-bridge sub-module just leaves these imports defined-but-unused —
+    /// additive, demote-safe.
+    public let hostBridge = PatchHostBridge()
+    /// The app's generated host-bridge registration closure, installed once via
+    /// `onRegisterHostBridges(_:)` and re-run after each module-set change. Guarded
+    /// by `lock`. Nil when the app registered no routed symbols (the common case for
+    /// apps that don't use Lever #2 — the registry stays empty, every routed `have()`
+    /// is 0, every routed call demotes).
+    private var _hostBridgeRegistrar: (@Sendable (PatchHostBridge) -> Void)?
+
+    /// Set the app's host-bridge registrar under the lock (called by
+    /// `onRegisterHostBridges`).
+    func setHostBridgeRegistrar(_ register: @escaping @Sendable (PatchHostBridge) -> Void) {
+        lock.write { _hostBridgeRegistrar = register }
+    }
+    /// Read the installed app registrar under the lock (called per-epoch refresh).
+    func currentHostBridgeRegistrar() -> (@Sendable (PatchHostBridge) -> Void)? {
+        lock.read { _hostBridgeRegistrar }
+    }
 
     /// Host side of the guest↔host async round-trip. Records the tokens a guest
     /// suspends on (via the `patch_host.async_request` import) so the async pump
@@ -415,35 +567,49 @@ public final class Patch: @unchecked Sendable {
     /// loader will call this internally after download+verify; exposed now so the
     /// runtime/marshalling core is testable and bridges can drive it.
     public func activate(bytes: [UInt8]) throws {
-        // Build the new runtime(s) OUTSIDE the write lock (instantiation is slow);
-        // swap in under the exclusive lock so in-flight reads see a consistent module.
-        // Calls already dispatched to callQueue serialize against each other; the lock
-        // protects the active-pointer swap itself.
-        let built = try instantiateModuleSet(bytes: bytes)
-        let epoch = lock.write {
-            self.active?.teardown()
-            self.additional.forEach { $0.teardown() }
-            self.active = built.primary
-            self.additional = built.additional
-            // PHASE 1b: swap the active resource overlay in lock-step with the module
-            // set, so the named-lookup redirection (colors/strings/images) reflects the
-            // newly-active artifact (nil overlay ⇒ no overrides, falls through to bundle).
-            self._activeOverlay = built.overlay
-            // Drop the per-pass value cache INSIDE the swap critical section (BUG-9):
-            // clearing it after releasing the lock races a concurrent value reader that
-            // observed the freshly-swapped `active` but still hits a STALE cache entry
-            // keyed against the OLD module, returning the wrong value.
-            valueCache.clear()
-            return bumpModuleEpochLocked()
+        // BUG R2-#135: serialize the WHOLE activation (instantiate → swap → host-bridge
+        // refresh → notify) so two concurrent `activate()` calls can't interleave their
+        // off-lock `refreshHostBridgeForActiveModuleSet()` steps and leave the host-bridge
+        // manifest bound to a different module than `active`. The refresh re-enters
+        // `callQueue`, so this MUST be a separate serial queue (`activationQueue`).
+        try activationQueue.sync {
+            // Build the new runtime(s) OUTSIDE the write lock (instantiation is slow);
+            // swap in under the exclusive lock so in-flight reads see a consistent module.
+            // Calls already dispatched to callQueue serialize against each other; the lock
+            // protects the active-pointer swap itself.
+            let built = try instantiateModuleSet(bytes: bytes)
+            let epoch = lock.write {
+                self.active?.teardown()
+                self.additional.forEach { $0.teardown() }
+                self.active = built.primary
+                self.additional = built.additional
+                // PHASE 1b: swap the active resource overlay in lock-step with the module
+                // set, so the named-lookup redirection (colors/strings/images) reflects the
+                // newly-active artifact (nil overlay ⇒ no overrides, falls through to bundle).
+                self._activeOverlay = built.overlay
+                // Drop the per-pass value cache INSIDE the swap critical section (BUG-9):
+                // clearing it after releasing the lock races a concurrent value reader that
+                // observed the freshly-swapped `active` but still hits a STALE cache entry
+                // keyed against the OLD module, returning the wrong value.
+                valueCache.clear()
+                return bumpModuleEpochLocked()
+            }
+            // Push the overlay to the process-wide redirection AFTER releasing the lock
+            // (installing the swizzles touches the ObjC runtime; keep it off the lock).
+            ResourceOverlayRedirect.shared.setActiveOverlay(built.overlay)
+            // LEVER #2: reset the shared host bridge for the new module set — drop the
+            // prior epoch's handles, reload this module's `patch_host_symbols` manifest,
+            // and re-run the app's resolver-thunk registrar. Off the lock (it reads the
+            // live runtime). No-op-cheap for a module with no routed symbols. Serialized
+            // with the swap above so it always reflects THIS activation's module set.
+            refreshHostBridgeForActiveModuleSet()
+            // W5a/W5b: load the view manifest + pre-warm every view_body__* export
+            // handle HERE on the activationQueue (background) so the first SwiftUI body
+            // eval on main never makes a synchronous WASM call for either the manifest
+            // or the per-view export handle.
+            prewarmViewBodyExports()
+            notifyModuleSetChanged(epoch)
         }
-        // Push the overlay to the process-wide redirection AFTER releasing the lock
-        // (installing the swizzles touches the ObjC runtime; keep it off the lock).
-        ResourceOverlayRedirect.shared.setActiveOverlay(built.overlay)
-        // W5a/W5b: cache the manifest + pre-warm view-body export handles before the
-        // next SwiftUI body eval, so it pays neither the manifest WASM call nor the
-        // first per-export handle resolution.
-        prewarmViewBodyExports()
-        notifyModuleSetChanged(epoch)
     }
 
     /// Instantiate the module-set from raw `bytes`: a single `WASMRuntime` for a legacy
@@ -457,16 +623,16 @@ public final class Patch: @unchecked Sendable {
     /// FIRST — it returns the decoded overlay table (nil when absent / malformed) and
     /// instantiates the modules from the INNER bytes, so the WASM path is unchanged. A
     /// raw `.wasm`/`PMOD` blob (no `POVR` magic) is handled exactly as before.
-    /// Test-only hook fired at the top of module instantiation (review #17 — lets a test
-    /// assert instantiation runs on the expected thread). Host-bridge-free; lock-guarded.
-    var _onInstantiateForTesting: (@Sendable () -> Void)?
-
     private func instantiateModuleSet(bytes: [UInt8]) throws
         -> (primary: WASMRuntime, additional: [WASMRuntime], overlay: PatchResourceOverlay.Table?) {
         lock.read { _onInstantiateForTesting }?()
         let cfg = lock.read { configuration }
         let wasi = cfg?.wasiConfig ?? .default
-        let hostImports = bridges.hostImports()
+        // LEVER #2: layer the three generic `patch_host.*` imports (call/release/have),
+        // backed by the shared `hostBridge`, on top of the curated bridges so a module
+        // that routes native calls through the generalized bridge resolves them. A
+        // module that doesn't just leaves them defined-but-unused (demote-safe).
+        let hostImports = composedHostImports()
 
         // Strip the resource-overlay wrapper (if present) before any WASM decoding.
         // (The overlay CHUNK is persisted separately by `ModuleStorage.installCurrent`,
@@ -535,6 +701,19 @@ public final class Patch: @unchecked Sendable {
     /// On success the previous runtime is torn down and the per-pass value cache
     /// is dropped (the new module may carry different lifted values).
     public func hotSwap(bytes: [UInt8]) throws {
+        // BUG R3: run the WHOLE swap + its off-callQueue bridge tail on `activationQueue`
+        // so a concurrent `activate()`/`deactivate()` can't interleave their off-lock
+        // `refreshHostBridgeForActiveModuleSet()`/teardown steps with this one (same
+        // R2-#135 invariant). `activationQueue.sync` is NOT re-entrant here: `hotSwap()`
+        // is a public API never invoked from inside `activate()`/`activationQueue`. The
+        // inner `refreshHostBridgeForActiveModuleSet()` must stay OUTSIDE `callQueue`
+        // (it re-enters via `callPacked`) but INSIDE `activationQueue`.
+        try activationQueue.sync {
+            try hotSwapBody(bytes: bytes)
+        }
+    }
+
+    private func hotSwapBody(bytes: [UInt8]) throws {
         // Drain in-flight calls: by running the whole swap as a `callQueue` item,
         // any guest call already on the queue completes first, and no new call
         // can interleave until the swap returns.
@@ -600,82 +779,62 @@ public final class Patch: @unchecked Sendable {
                 return bumpModuleEpochLocked()
             }
         }
-        // W5a/W5b: pre-warm the new module's export handles + cache its manifest.
+        // LEVER #2: reset the shared host bridge against the now-active NEW set —
+        // OUTSIDE the `callQueue.sync` block above, because the refresh reads the live
+        // module's `patch_host_symbols` export via `callPacked`, which itself funnels
+        // onto `callQueue` (re-entering it from inside would deadlock). This runs only
+        // on the COMMIT path: a probe-failure rollback throws out of `callQueue.sync`
+        // above and never reaches here — which is correct, since a rollback restores
+        // the PRIOR module whose bridge state (registry/manifest) is already loaded and
+        // the failed new set never ran a call (no handles to drop).
+        refreshHostBridgeForActiveModuleSet()
+        // W5a/W5b: pre-warm view-body export handles + cache the manifest here (on
+        // activationQueue, background) so the next SwiftUI body eval on main pays
+        // neither the manifest WASM call nor the first per-export handle resolution.
         prewarmViewBodyExports()
         notifyModuleSetChanged(epoch)
     }
 
-    // MARK: - Cold-start pre-warm (W5a/W5b)
-    //
-    // After a module activates, pre-warm two things: W5b caches the
-    // `patch_view_manifest` bytes (so the first SwiftUI body eval's registry sync
-    // reads the cache instead of making a synchronous WASM call), and W5a invokes
-    // every `view_body__*` export once with `{}` (discarded) so WasmKit memoizes the
-    // export-handle lookup before the first real body eval pays it. Pre-warm failures
-    // are silently ignored so an unrecognized module shape never crashes launch.
-
-    /// W5b — cached `patch_view_manifest` bytes from the most recently activated
-    /// module (nil when none). Read via `cachedManifestBytes()`; cleared on every
-    /// module-set change. Guarded by `lock`.
-    private var _cachedManifestBytes: [UInt8]?
-
-    /// Read the cached manifest bytes (W5b); nil when not loaded / no module active.
-    /// Used by `PatchViewPatchRegistry.loadManifestEntries` to avoid a synchronous
-    /// WASM call on the first SwiftUI body eval.
-    public func cachedManifestBytes() -> [UInt8]? {
-        lock.read { _cachedManifestBytes }
-    }
-
-    /// Minimal Decodable mirror of the view manifest used only by the pre-warm path
-    /// (avoids importing PatchSwiftUI). Kept in sync by the split-repo resync step.
-    private struct _ManifestForPrewarm: Decodable {
-        struct Entry: Decodable {
-            let export: String
-            let thunkSafe: Bool
-        }
-        let views: [Entry]
-    }
-
-    private static let _viewManifestExportName = "patch_view_manifest"
-
-    /// W5a + W5b: cache the manifest + pre-warm each `view_body__*` export handle.
-    /// Errors/traps from pre-warm invocations are silently discarded.
-    private func prewarmViewBodyExports() {
-        let manifestBytes: [UInt8]?
-        if hasFunction(Self._viewManifestExportName),
-           let bytes = try? callPacked(Self._viewManifestExportName, []) {
-            manifestBytes = bytes
-        } else {
-            manifestBytes = nil
-        }
-        lock.write { _cachedManifestBytes = manifestBytes }
-
-        guard let mb = manifestBytes,
-              let manifest = try? JSONDecoder().decode(_ManifestForPrewarm.self,
-                                                       from: Data(mb)) else { return }
-        let emptyInput = [UInt8]("{}".utf8)
-        for entry in manifest.views where entry.thunkSafe {
-            _ = try? callPacked(entry.export, emptyInput)
-        }
-    }
-
     /// Drop the active module set (e.g. on rollback).
     public func deactivate() {
-        let epoch = lock.write { () -> UInt64 in
-            self.active?.teardown()
-            self.additional.forEach { $0.teardown() }
-            self.active = nil
-            self.additional = []
-            // PHASE 1b: clear the resource overlay too, so the named-lookup
-            // redirection falls all the way through to the bundle (native behavior).
-            self._activeOverlay = nil
-            // W5b: clear the manifest cache so a subsequent activation's registry
-            // sync never reads stale bytes from the previous epoch.
-            self._cachedManifestBytes = nil
-            return bumpModuleEpochLocked()
+        // CODE-REVIEW H1: serialize the ENTIRE deactivation (active-set teardown →
+        // swap-to-nil → overlay clear → host-bridge teardown → notify) on
+        // `activationQueue`, EXACTLY as `activate()`/`hotSwap()` do. Previously only the
+        // post-lock bridge tail was on the queue while the `lock.write` teardown ran
+        // OUTSIDE it — so deactivate()'s active-set mutation was NOT serialized against a
+        // concurrent activate()/hotSwap() swap. Bad interleave: activate() commits
+        // `active = newModule` then releases the rwlock; deactivate() (not yet on the
+        // queue) immediately tears down + nils that freshly-activated module, leaving
+        // `active == nil` while activate()'s off-lock refresh/notify runs against the
+        // torn-down runtime (and `_activeOverlay`/the live redirection diverge → wrong
+        // overlay colors/strings). Wrapping the whole body closes it. Reachable now from
+        // BOTH FallbackManager's `.disabled` path AND the rollback revert directive
+        // (`checkAndApply()` deactivates a recalled module) running concurrently with a
+        // Phase-2 activate/hotSwap. `activationQueue.sync` stays NON-re-entrant: every
+        // deactivate() caller (FallbackManager closure, checkAndApply revert) invokes it
+        // from OUTSIDE the queue, never from inside `activate()`/`activationQueue`.
+        activationQueue.sync {
+            let epoch = lock.write { () -> UInt64 in
+                self.active?.teardown()
+                self.additional.forEach { $0.teardown() }
+                self.active = nil
+                self.additional = []
+                // PHASE 1b: clear the resource overlay too, so the named-lookup
+                // redirection falls all the way through to the bundle (native behavior).
+                self._activeOverlay = nil
+                // W5b: clear the manifest cache so a subsequent activation's registry
+                // sync never reads stale bytes from the previous epoch.
+                self._cachedManifestBytes = nil
+                return bumpModuleEpochLocked()
+            }
+            ResourceOverlayRedirect.shared.setActiveOverlay(nil)
+            // LEVER #2: no module is active anymore — fully tear down the shared host
+            // bridge (drop every live handle + the manifest + the registry). The app's
+            // registrar is preserved, so a subsequent activation re-primes the registry
+            // from the same compiled-in thunks via `refreshHostBridgeForActiveModuleSet()`.
+            teardownHostBridge()
+            notifyModuleSetChanged(epoch)
         }
-        ResourceOverlayRedirect.shared.setActiveOverlay(nil)
-        notifyModuleSetChanged(epoch)
     }
 
     // MARK: - Resource overlay (Phase 1b) — public lookup + manual activation
@@ -1056,8 +1215,30 @@ public final class Patch: @unchecked Sendable {
     ///    telemetry. Any failure leaves the already-active module untouched.
     @discardableResult
     public func start() async -> StartOutcome {
-        // Phase 1 — local fallback chain (synchronous, offline-safe).
-        let local = activateBestLocal()
+        // Phase 1 — local fallback chain (offline-safe). Instantiating the cached
+        // module (`activate(bytes:)` → `instantiateModuleSet`) is CPU-heavy and
+        // SYNCHRONOUS: a large full-Foundation module (the real-app case — tens of
+        // MB, tens of thousands of functions + WASM data segments) takes SECONDS to
+        // decode + instantiate in WasmKit. `start()` is typically awaited from a
+        // `@MainActor` SwiftUI `.task {}`, so running Phase 1 INLINE would block the
+        // main thread for that whole time → a multi-second launch freeze (adversarial
+        // review #17). Hop the heavy work onto a background queue and suspend the
+        // awaiting Task until it finishes. The main thread stays free; the first frame
+        // paints native and the patched render swaps in once the module is live (the
+        // small-module first-frame path is unaffected — that stays the synchronous,
+        // size-gated `ensureLocalActivationOnce`, whose `8 MiB` cap is unchanged; this
+        // only moves the LARGE-module activation off the caller's main thread).
+        //
+        // It MUST be a DIFFERENT queue from `callQueue`: `activate()` →
+        // `refreshHostBridgeForActiveModuleSet()` → `hasFunction()` does `callQueue.sync`,
+        // so running this on `callQueue` would dispatch_sync onto the queue we're already
+        // on → deadlock (SIGTRAP). A user-initiated GLOBAL queue runs the activation
+        // off-main while leaving those inner `callQueue.sync` calls free to proceed.
+        let local = await withCheckedContinuation { (cont: CheckedContinuation<StartOutcome, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: self.activateBestLocal())
+            }
+        }
 
         // Phase 2 — remote update check + auto-apply (best-effort). Startup
         // behavior is unchanged: this is the same auto-apply path that used to
@@ -1081,25 +1262,51 @@ public final class Patch: @unchecked Sendable {
     /// async `start()` so a huge full-Foundation module can't stall the first
     /// frame; SwiftUI patch modules are typically tens of KiB.
     public func ensureLocalActivationOnce(maxSyncBytes: Int = 8 << 20) {
+        guard lock.read({ configuration != nil }), let storage = storage else { return }
+        // BUG R2-#38: the size gate MUST be checked BEFORE claiming the one-shot
+        // `_localActivationAttempted` flag. The old order test-and-SET the flag first,
+        // then hit the size gate and RETURNED WITHOUT activating for a large (>8 MiB)
+        // module — but `start()`'s background `activateBestLocal(markAttempted: true)`
+        // then saw the flag already claimed and DEFERRED, so the large module NEVER
+        // activated. By gating first, a size-gated early-return leaves the flag UNCLAIMED,
+        // so `start()`'s background path still performs the (slow, off-main) activation.
+        if let current = storage.manifest().current, current.size > maxSyncBytes { return }
+        // Now atomically claim the one-shot attempt — only when we WILL activate.
         let shouldRun: Bool = lock.write {
-            guard !_localActivationAttempted, configuration != nil else { return false }
+            guard !_localActivationAttempted else { return false }
             _localActivationAttempted = true
             return true
         }
         guard shouldRun else { return }
-        guard let storage = storage else { return }
-        // Size gate: only the CURRENT entry's recorded size is consulted (previous/
-        // bundled rungs only run when current is broken — rare enough to accept).
-        if let current = storage.manifest().current, current.size > maxSyncBytes { return }
         _ = activateBestLocal(markAttempted: false)
     }
 
     /// Activate the best locally-available module using the fallback chain. Safe
     /// to call offline. Returns the outcome.
+    ///
+    /// BUG #45 — concurrent double-activation race. `start()` hops Phase 1 onto a
+    /// background queue calling this with `markAttempted: true`, while the first
+    /// patched-view body evaluation calls `ensureLocalActivationOnce` (main thread)
+    /// which test-and-sets the SAME `_localActivationAttempted` flag and calls this
+    /// with `markAttempted: false`. Previously `markAttempted: true` only SET the flag
+    /// (never read it) and ran `activate()` unconditionally — so both paths could run
+    /// `activate()` nearly simultaneously on two threads. Now the `markAttempted: true`
+    /// path ALSO does an atomic test-and-set: if the attempt was ALREADY claimed (by
+    /// `ensureLocalActivationOnce` or a prior call), it does NOT re-activate — it just
+    /// reports the current activation state. So exactly one path performs the activation.
     @discardableResult
     public func activateBestLocal(markAttempted: Bool = true) -> StartOutcome {
         if markAttempted {
-            lock.write { _localActivationAttempted = true }
+            // Atomically claim the one-shot attempt. If someone else already claimed it
+            // (the lazy first-frame path), skip activation — they are (or already did)
+            // bring the module up; just report the current state. Avoids two concurrent
+            // `activate()` calls racing on two threads.
+            let claimed: Bool = lock.write {
+                if _localActivationAttempted { return false }
+                _localActivationAttempted = true
+                return true
+            }
+            if !claimed { return currentLocalOutcome() }
         }
         guard let storage = storage else { return .noModule }
         let fb = FallbackManager(
@@ -1112,6 +1319,29 @@ public final class Patch: @unchecked Sendable {
             return .activated(version: v)
         case .disabled:
             return .fallback(.disabled)
+        }
+    }
+
+    /// The current local outcome WITHOUT (re-)activating — used when the one-shot
+    /// activation attempt was already claimed by another path (bug #45). Reports the
+    /// active module's version if one is up, else `.noModule`.
+    private func currentLocalOutcome() -> StartOutcome {
+        if let v = storage?.currentVersion { return .activated(version: v) }
+        return .noModule
+    }
+
+    /// Run the synchronous, CPU-heavy `activate(bytes:)` on a background queue and
+    /// suspend the awaiting Task until it finishes — so a large-module instantiate
+    /// never freezes the resuming executor (the main actor for an imperative reload
+    /// button). Rethrows any activation error to the caller (bug #69). It MUST be a
+    /// queue OTHER than `callQueue` (whose inner `callQueue.sync`s in `activate()` →
+    /// `refreshHostBridgeForActiveModuleSet()` would deadlock if re-entered).
+    private func activateOffMain(bytes: [UInt8]) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try self.activate(bytes: bytes); cont.resume() }
+                catch { cont.resume(throwing: error) }
+            }
         }
     }
 
@@ -1134,7 +1364,7 @@ public final class Patch: @unchecked Sendable {
               let checker = updateChecker,
               let storage = storage else { return .noModule }
 
-        let device = cfg.deviceID ?? "anon"
+        let device = cfg.resolvedDeviceID
         let req = UpdateCheckRequest(
             current_version: storage.currentVersion ?? "0.0.0",
             fingerprint: cfg.fingerprint ?? "",
@@ -1154,6 +1384,7 @@ public final class Patch: @unchecked Sendable {
                 type: .error, errorMessage: "\(error)"))
             return .noModule
         }
+
         // ROLLBACK DIRECTIVE (P0). The backend sets `revert: true` when this
         // device's cached `current_version` was ROLLED BACK and there is no
         // active replacement to move to. Without acting on it, the device would
@@ -1190,14 +1421,19 @@ public final class Patch: @unchecked Sendable {
             await checker.reportEvent(Self.event(cfg, device: device,
                 type: .error, moduleVersion: response.version,
                 errorMessage: "\(error)"))
+            // The STAGED module threw inside `loader.acquireAndActivate` BEFORE
+            // `installCurrent` ran (ModuleLoader.swift activates, then caches), so the
+            // on-disk `current` slot still holds the GOOD prior module. Re-activate the
+            // best available local module (current → previous → bundled → disabled) IN
+            // PLACE — exactly as the reloadAsync path does. Using `recoverFromBadCurrent()`
+            // here would be wrong: it promotes previous→current (deleting the good
+            // current's bytes) and needlessly downgrades the device one version even
+            // though the current was never bad. Reserve `recoverFromBadCurrent()` for a
+            // module that was actually installed-as-current and later proved bad.
             let fb = FallbackManager(
                 storage: storage,
                 activate: { [weak self] bytes in try self?.activate(bytes: bytes) },
                 deactivate: { [weak self] in self?.deactivate() })
-            // R4 #1263: the staged module threw inside activate BEFORE installCurrent ran,
-            // so the on-disk `current` slot still holds the GOOD prior module → re-activate
-            // it in place (activateBest) rather than recoverFromBadCurrent(), which would
-            // delete the good current's bytes and needlessly downgrade the device a version.
             let state = fb.activateBest()
             await checker.reportEvent(Self.event(cfg, device: device,
                 type: .fallback, moduleVersion: storage.currentVersion))
@@ -1253,7 +1489,7 @@ public final class Patch: @unchecked Sendable {
         guard let cfg = currentConfiguration,
               let checker = updateChecker,
               let storage = storage else { return nil }
-        let device = cfg.deviceID ?? "anon"
+        let device = cfg.resolvedDeviceID
         let req = UpdateCheckRequest(
             current_version: storage.currentVersion ?? "0.0.0",
             fingerprint: cfg.fingerprint ?? "",
@@ -1322,7 +1558,7 @@ public final class Patch: @unchecked Sendable {
         guard let cfg = currentConfiguration,
               let checker = updateChecker,
               let storage = storage else { throw UpdateError.notConfigured }
-        let device = cfg.deviceID ?? "anon"
+        let device = cfg.resolvedDeviceID
 
         // Use the remembered response, or check now if none.
         var response = lock.read { _pendingResponse }
@@ -1359,13 +1595,32 @@ public final class Patch: @unchecked Sendable {
     /// keeps working, and rethrows. Drives `updateState`.
     public func reloadAsync() async throws {
         guard let storage = storage else { throw UpdateError.notConfigured }
-        guard let staged = lock.read({ _staged }) else { throw UpdateError.nothingStaged }
+        // BUG R2-#136: ATOMICALLY CLAIM `_staged` (read-and-nil under one lock.write) so
+        // two concurrent `reloadAsync()` calls (e.g. a 'Reload now' button +
+        // `enforceMandatoryUpdates`) can't both read the same staged bytes and activate
+        // them TWICE — which double-instantiated the module, double-bumped the epoch,
+        // double-notified module-set change, and emitted duplicate 'activation' telemetry
+        // (the second activation needlessly tearing down + re-instantiating the just-
+        // activated module). The loser now sees nil and throws `.nothingStaged`. `_staged`
+        // is left nil on every path (success AND failure), matching the prior semantics
+        // (the original cleared it in both branches).
+        guard let staged = (lock.write { () -> ModuleLoader.AcquiredModule? in
+            let s = _staged; _staged = nil; return s
+        }) else { throw UpdateError.nothingStaged }
         let cfg = currentConfiguration
-        let device = cfg?.deviceID ?? "anon"
+        let device = cfg?.resolvedDeviceID ?? PatchDeviceIDStore.resolve(appGroupIdentifier: nil)
         let checker = updateChecker
 
         do {
-            try activate(bytes: staged.bytes)
+            // BUG #69: a large full-Foundation module takes SECONDS to decode +
+            // instantiate in WasmKit, and the synchronous `activate(bytes:)` would run
+            // it on whatever executor resumes this async call (the main actor for a
+            // SwiftUI button tap) → a multi-second UI freeze, exactly the freeze the
+            // review-#17 fix removed from `start()`. Offload the heavy instantiate onto a
+            // background queue and suspend until it finishes, mirroring `start()`. (Must
+            // be a queue OTHER than `callQueue`, whose inner `callQueue.sync`s must stay
+            // free — a global user-initiated queue runs off-main without re-entering it.)
+            try await activateOffMain(bytes: staged.bytes)
         } catch {
             if let cfg, let checker {
                 await checker.reportEvent(Self.event(cfg, device: device,
@@ -1394,8 +1649,29 @@ public final class Patch: @unchecked Sendable {
             throw UpdateError.activation(error)
         }
         // Activation succeeded — persist as the new current and clear staging.
-        try? storage.installCurrent(version: staged.version, sha256: staged.sha256, bytes: staged.bytes)
-        lock.write { self._staged = nil; self._pendingResponse = nil }
+        // Do NOT swallow an installCurrent failure: the new module is LIVE in memory,
+        // but if persistence throws (disk full / replaceItemAt failure) the on-disk
+        // `current` still names the OLD module, so the next-launch activateBestLocal
+        // would silently regress one version. Surface a warning event and KEEP
+        // `_pendingResponse` so a subsequent reload re-persists; only clear the staged
+        // bytes (they are already activated and we will not re-activate them).
+        var persistError: Error?
+        do {
+            try storage.installCurrent(version: staged.version, sha256: staged.sha256, bytes: staged.bytes)
+        } catch {
+            persistError = error
+        }
+        if let persistError {
+            // Keep _pendingResponse so the next reload re-persists; drop only _staged.
+            lock.write { self._staged = nil }
+            if let cfg, let checker {
+                await checker.reportEvent(Self.event(cfg, device: device,
+                    type: .error, moduleVersion: staged.version,
+                    errorMessage: "activation persisted-in-memory but installCurrent failed: \(persistError)"))
+            }
+        } else {
+            lock.write { self._staged = nil; self._pendingResponse = nil }
+        }
         if let cfg, let checker {
             await checker.reportEvent(Self.event(cfg, device: device,
                 type: .activation, moduleVersion: staged.version))

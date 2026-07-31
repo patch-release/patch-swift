@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // AsyncPump.swift — the on-device async/await EXECUTOR PUMP for Patch modules.
 // ============================================================================
 // WasmKit is single-threaded and has no event loop, so a guest `Task {...}` body

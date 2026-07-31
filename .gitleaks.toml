@@ -1,0 +1,31 @@
+# Patch — secret-scanning rules.
+#
+# Default gitleaks rules do NOT know about `pak_` app keys, so a live key sat
+# tracked in demo/ and would have passed a "gitleaks is clean" check. This adds
+# the project's own credential shapes.
+title = "Patch secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "patch-app-key"
+description = "Patch per-app key (grants push/release on that app)"
+regex = '''pak_(live_)?[0-9a-f]{16,}'''
+tags = ["patch", "credential"]
+
+[[rules]]
+id = "patch-api-key"
+description = "Patch API key"
+regex = '''pk_(live|test)_[0-9a-zA-Z]{16,}'''
+tags = ["patch", "credential"]
+
+[allowlist]
+description = "Obvious placeholders"
+regexes = [
+  '''pak_replace_me''',
+  '''pak_abc123''',
+  '''pak_live_a3f8''',
+  '''pak_…''',
+  '''pak_test''',
+]

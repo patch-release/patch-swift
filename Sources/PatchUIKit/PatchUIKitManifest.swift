@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchUIKitManifest.swift — the engine-emitted UIKit cell manifest + its decode.
 // =============================================================================
 // Kept UIKit-FREE (pure Foundation) and OUTSIDE any `#if canImport(UIKit)` so it

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // JSONEmit.swift — a Foundation-FREE JSON serializer for the ViewNode tree.
 // =========================================================================
 // `JSONEncoder` needs Foundation, which the T0 *Embedded* Swift wasm tier does

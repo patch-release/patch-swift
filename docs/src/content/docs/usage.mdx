@@ -1,0 +1,34 @@
+---
+title: Usage & analytics
+description: Device and adoption metrics.
+sidebar:
+  order: 14
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The SDK reports download, activation, and error events for every device (see [Telemetry](/sdk/)). The console's **Usage** page rolls those events into release-health analytics so you can answer "is this release healthy and adopted?" at a glance. Everything is a read-only aggregate over device events — no extra wiring beyond the SDK, and every query is scoped to your own workspace.
+
+## Endpoints
+
+Both endpoints are Firebase-authed and take an optional `?days=N` window (default 30, 1–365). They power the console; you can also call them directly for your own dashboards.
+
+| Endpoint | What it returns |
+| --- | --- |
+| GET /apps/`{id}`/usage?days=30 | App-level summary: active devices, adoption %, error rate, distinct releases, plus a daily time series and breakdowns by version, by channel, and by OS. |
+| GET /workspaces/`{id}`/usage?days=30 | Workspace rollup: one row per app (active devices, error rate, latest released version) and workspace-wide totals for the window. |
+
+## What each metric means
+
+- **Active devices** — distinct devices (by `device_id`) that sent any event in the window.
+- **Adoption %** — of those active devices, the share currently running the app's *active production version*. This is the number that should climb toward 100% as a rollout widens.
+- **Error rate** — `errors / (activations + errors)` over the window; `0` when there's no activity. The same definition the CLI's `patchcli status` uses.
+- **Releases** — count of distinct module versions ever pushed for the app.
+- **Daily time series** — one zero-filled point per calendar day (UTC) in the window — downloads, activations, errors, and active devices — so the series length always equals `days`.
+- **By version** — downloads / activations / errors / active devices per module version.
+- **By channel** — the same counts folded per channel, with the channel's currently-active version.
+- **By OS** — the top OS versions by distinct devices (active devices + event count each), to spot OS-specific regressions.
+
+<Aside type="note" title="Scoping">
+Usage is strictly workspace-scoped: you can only query apps in your own workspace, and the workspace rollup only ever covers your own data.
+</Aside>

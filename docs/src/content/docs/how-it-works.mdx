@@ -1,0 +1,53 @@
+---
+title: How it works
+description: The Swift-to-WebAssembly pipeline and on-device runtime.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Patch turns one Swift codebase into two cooperating halves: a **WASM module** with the safe, updatable code, and a **native shell** that holds everything else and calls into it. You write ordinary Swift — the build engine decides what's safe to ship over the air. At a glance:
+
+| Stage | What happens |
+| --- | --- |
+| **Swift source** | Your ordinary `.swift` files. No annotations. |
+| **Partition** | Patch sorts safe, updatable code from must-stay-native code. |
+| **WASM module** | Safe code compiled to a real `.wasm`, kept as small as possible. |
+| **Device** | WasmKit runs the module; the SDK hot-swaps updates. |
+
+## What's updatable
+
+Patch updates **logic, and your SwiftUI views** (structure, state, and interaction). Full `async`/`await` concurrency runs in the WASM module, and the SwiftUI lowering covers the declarative view body, state, and user interaction; only the lowest-level platform rendering and must-stay-native APIs remain in the shell. Every function lands in one of four buckets, in safety order:
+
+| Bucket | Meaning |
+| --- | --- |
+| **WASM** | pure logic → runs OTA |
+| **BRIDGED** | uses a host bridge → runs OTA |
+| **SPLIT** | mixed → safe part lifted to WASM |
+| **NATIVE** | stays in the App Store binary |
+
+- **WASM-eligible** — pure logic plus WASM-safe Foundation value types (`Decimal`, `Date`, `UUID`, `JSONEncoder`/`Codable`, formatters, `URL`, regex). Ships as WASM.
+- **Bridged** — touches only APIs Patch has a host bridge for: networking, `UserDefaults`, notifications, navigation, keychain, date/locale, logging, analytics, file storage, connectivity, biometrics, in-app review, pasteboard, haptics, device info, share sheet, open-URL, location, calendar, contacts, app badge, mail compose, in-app purchase, speech synthesis, document picker, system sound, photo picker, secure random, app-group storage, screen control, audio playback/recording, motion, maps, network/remote images, Spotlight, background tasks, file download, accessibility, app shortcuts, Handoff, Watch connectivity, NFC, process info, video playback, speech recognition, now-playing, image filters, PDF/QR generation, and camera — **51 bridges** in all. Runs OTA, calling the native shell for the host part.
+- **Mixed** — part native, part safe. Patch lifts the safe parts over the air and keeps the rest in the shell, wiring the two together automatically.
+- **Native** — touches a must-stay-native API (low-level UIKit/AppKit rendering, AVFoundation, CoreLocation, HealthKit, Core Data, file system, threads/locks, ObjC runtime, unsafe pointers). Stays in the App Store binary.
+
+When in doubt, Patch keeps code native — so coverage is the only thing that's ever at stake, never safety. For measured, per-app coverage on a real validation corpus, see [What Patch can & can't update](/coverage/).
+
+<Aside type="tip" title="Safety first">
+Updates can only ever swap out logic Patch already proved is safe to run as WASM. If a generated module fails to compile, the offending code is auto-demoted to native and the build retries — a broken module is never produced. On-device, if a module is missing, corrupt, or fails to activate, the app runs the native fallback baked into the App Store binary. Updates never break the app.
+</Aside>
+
+## Compatibility fingerprint & packaging tiers
+
+Patch computes a deterministic SHA-256 **native-shell fingerprint** over everything that fixes the binary's layout — SDK + WasmKit version, bridge definitions, native `.swift` files, Info.plist, entitlements, linked frameworks, deployment target, and compiler version. If any of these change, the OTA module is incompatible with installed apps: `push`/`release` refuse and tell you to ship through the App Store and re-register. The OTA-updatable code is deliberately excluded from the fingerprint, so a pure-logic patch is always compatible.
+
+Patch also picks the smallest viable **packaging tier** per module, so OTA patches stay tiny while keeping full Foundation semantics by borrowing the native shell's real Foundation:
+
+| Tier | Size | When it's used |
+| --- | --- | --- |
+| **T0 · Embedded Swift** | tens of KB | The default. No Foundation/ICU in the module — Foundation values (Decimal, JSON, Date) are satisfied by host bridges into the shell's real Foundation. |
+| **T1 · Stdlib only** | ~1.1 MB | For code Embedded rejects but that needs no Foundation (e.g. `any P` existentials). Standard library, no `import Foundation`. |
+| **T2 · Full Foundation** | ~11.7 MB | The fallback when a module needs in-module Foundation no bridge covers (`Mirror`, in-module `Codable` synthesis, `NSRegularExpression`, formatters). |
+
+Patch uses the lightest tier a module can run on, only stepping up when the code genuinely needs more. Any heavier base ships once; every update after that is a tiny compressed **binary diff** against the version already on the device — typically a few hundred bytes to tens of KB.

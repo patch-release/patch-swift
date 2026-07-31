@@ -1,0 +1,188 @@
+---
+title: The compatibility fingerprint
+description: Why a patch stops applying after you change native code, and how to fix a mismatch.
+sidebar:
+  order: 5
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+If you hit one problem with Patch, it will almost certainly be this one. It is
+worth ten minutes now.
+
+## What it is
+
+Every Patch release is built against a specific version of your app's **native
+shell** — the compiled Swift that ships inside your signed App Store binary. The
+CLI hashes that shell into a short string called the **fingerprint**, and records
+it alongside the release.
+
+When a device checks for updates it reports the fingerprint of the build it is
+running. The backend serves a patch only if the fingerprints match.
+
+## Why it exists
+
+A patch is not a whole app. It is a fragment of WebAssembly that calls into
+symbols already linked in your binary — your types, your functions, your
+frameworks. If the shell changes underneath it, those calls no longer line up,
+and the patch would either behave incorrectly or fail to run at all.
+
+The fingerprint is what makes an OTA update safe by construction rather than by
+hope. A mismatch is Patch refusing to ship something it cannot prove is
+compatible.
+
+<Aside type="tip" title="A mismatch is not a bug">
+It means the shell your patch was built against is not the shell running on the
+device. That is nearly always correct behaviour. The question is *why* they
+differ.
+</Aside>
+
+## What moves the fingerprint
+
+**Changing native code.** Anything that stays in the signed binary — a function
+the engine classified as native, a new stored property, a changed method
+signature, a new dependency.
+
+**Changing your toolchain.** The Swift compiler version participates in the
+hash, because different compiler versions can produce different native symbols.
+Upgrading Xcode moves your fingerprint.
+
+**Adding or removing a file** that contributes native code.
+
+## What does *not* move it
+
+**Editing a view body that already ships over the air.** Patchable bodies are
+subtracted from the hash at per-function granularity, so editing the SwiftUI
+you are patching is fingerprint-stable — that is the entire point.
+
+**Editing string literals inside a slotted view.** Since CLI 1.6.28 string
+literals are lifted out of native slot source and ride the patch instead.
+
+**Comments, whitespace, and formatting** in patchable code.
+
+## Diagnosing a mismatch
+
+<Steps>
+
+1. **See what changed.**
+
+   ```bash
+   patchcli fingerprint diff --explain
+   ```
+
+   This lists which functions are native and why, and shows what moved since the
+   registered fingerprint. Start here — it usually names the culprit directly.
+
+2. **Decide whether the change was intentional.**
+
+   If you meant to change native code, the fingerprint *should* have moved. You
+   need a new App Store build, and then to register its fingerprint.
+
+   If you did not change native code, something else moved the hash — most often
+   a toolchain upgrade.
+
+3. **Register the current shell.**
+
+   ```bash
+   patchcli fingerprint register
+   ```
+
+   This records the fingerprint of the build you are about to ship. Run it from
+   the same shell and toolchain you build releases with.
+
+4. **Confirm.**
+
+   ```bash
+   patchcli fingerprint diff
+   ```
+
+   Clean output means the next `patchcli release` will be accepted.
+
+</Steps>
+
+## Common causes, in order of likelihood
+
+### You upgraded Xcode
+
+The Swift compiler version is part of the hash. Registering in one shell and
+releasing from another can also flip it, because the Apple and swift.org
+toolchains report different version strings. Register and release from the same
+environment, then re-register after any toolchain change.
+
+### You changed native code without noticing
+
+A helper that looks trivial may be classified native — anything touching an OS
+API, a file handle, or an unsupported type. `patchcli build` prints the
+per-view demote diagnostic explaining what stayed native and why.
+
+### Your app already had a baked fingerprint literal
+
+Apps set up before CLI 1.6.47 baked a `fingerprint:` literal into the
+`Patch.configure(...)` call, and that literal was itself part of the hash — so
+re-baking it moved the hash it was supposed to describe. The value is now
+excluded from the native-shell hash. Affected apps re-register once:
+
+```bash
+patchcli fingerprint register
+```
+
+Apps with no baked fingerprint are unaffected.
+
+### You ran `patchcli init` and released immediately
+
+Fixed in CLI 1.6.47. `init` used to snapshot the shell *before* preparing views
+and injecting `Patch.configure`, so the registered hash described a source state
+that `release` never sees. Upgrade the CLI, then re-register.
+
+## Shipping a patch alongside a native change
+
+If you genuinely need both, the order matters:
+
+<Steps>
+
+1. Ship the new native build to the App Store and wait for it to be live.
+
+2. Register the new shell's fingerprint.
+
+3. Release patches against it.
+
+</Steps>
+
+Patches built against the old shell keep serving old builds, which is what you
+want — devices on the previous version are not stranded.
+
+## Partial patches
+
+If you understand the risk and need to ship against a drifted shell, the CLI
+supports it explicitly:
+
+```bash
+patchcli release --allow-native-drift
+```
+
+This ships only the view bodies that are provably unaffected by the drift, and
+strips anything whose safety cannot be established. It is deliberately
+conservative and is not a way to bypass the check.
+
+<Aside type="caution">
+Prefer registering a new fingerprint. `--allow-native-drift` exists for
+incident response, not routine releases.
+</Aside>
+
+## Reporting a fingerprint problem
+
+If a mismatch looks wrong, the diagnostic bundle is what makes it actionable:
+
+```bash
+patchcli doctor --json
+```
+
+Attach the output to a GitHub issue, along with the fingerprint diff:
+
+```bash
+patchcli fingerprint diff --explain
+```
+
+Between them these give the versions, the toolchain, and exactly which functions
+are native and why — which is usually enough to identify the cause without
+anyone needing your source.

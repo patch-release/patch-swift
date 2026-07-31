@@ -1,0 +1,52 @@
+---
+title: Staged rollouts & A/B (%)
+description: Percentage rollouts and A/B.
+sidebar:
+  order: 8
+---
+
+Every release carries a rollout percentage. Ship to a slice of devices first, watch the failure rate, then widen to 100%. Because bucketing is deterministic, a device that's "in" the rollout stays in as you raise the percentage — adoption only ever grows, devices never flip-flop.
+
+## Release a staged rollout with `--rollout`
+
+```bash title="~/MyApp — zsh"
+# start at 10% of eligible devices on production
+$ patchcli release --rollout 10 --message "New pricing engine"
+
+# widen the SAME release — devices already in the bucket stay in
+$ patchcli release --rollout 50
+$ patchcli release --rollout 100
+```
+
+## Deterministic bucketing
+
+The backend buckets each device by hashing its stable `device_id` together with the release into a value in `0–99`. A device receives the release when `bucket < rollout_pct`. Because the hash is stable per device + release:
+
+- The same device always lands in the same bucket for a given release — no flapping between launches.
+- Raising `rollout_pct` only ever **adds** devices; it never removes a device already serving the release.
+- A `rollout_pct` below 100 is, in effect, a percentage-based A/B test: the in-bucket cohort runs the new logic, everyone else stays on the previous module.
+
+## Watch & adjust
+
+The dashboard shows **targeted %** (the release's `rollout_pct`) and **received %** (activations over estimated-eligible devices). From the CLI, `patchcli status` surfaces adoption and a failure rate, with a hint to roll back if failures climb past 2%.
+
+```bash title="~/MyApp — zsh"
+$ patchcli status --channel production
+Active version:   2026.06.03.142210
+Rollout:          10%
+  Downloads:      1,204
+  Activations:    1,160
+  Adoption:       96.4% (activations / downloads)
+  Failure rate:   0.2% (errors / (activations+errors))
+```
+
+## Rollback
+
+If a staged release misbehaves, roll back. The previous module re-activates and propagates to devices on their next update check.
+
+```bash title="~/MyApp — zsh"
+$ patchcli rollback --channel production
+Rolled back:   2026.06.03.142210  (now inactive)
+Now active:    2026.05.30.090112  (rollout 100%)
+Takes effect on each device's next update check.
+```

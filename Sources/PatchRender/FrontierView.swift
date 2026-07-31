@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // FrontierView.swift — the SwiftUI wrapper that hosts a WASM-driven body.
 //
 // A `FrontierView` holds a `provider` that, given the current inputs (JSON),

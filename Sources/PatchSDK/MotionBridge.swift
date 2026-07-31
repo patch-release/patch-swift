@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
 // CoreMotion's `CMMotionManager` is `@available(macOS, unavailable)` even though

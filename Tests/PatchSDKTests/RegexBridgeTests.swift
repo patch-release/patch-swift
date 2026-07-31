@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import XCTest
 @testable import PatchSDK
 import WasmKit

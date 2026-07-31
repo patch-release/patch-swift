@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchValueEncoder.swift — recursive value → JSON marshalling for the lowered
 // guest body's inputs.
 // ======================================================================

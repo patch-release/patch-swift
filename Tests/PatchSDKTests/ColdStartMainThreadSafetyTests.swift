@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import XCTest
 @testable import PatchSDK
 import PatchViewIR
@@ -12,7 +14,7 @@ import PatchViewIR
 //
 //   (1) NO-MODULE ZERO-WORK: when no module is active, configure() + start()
 //       (hopped bg via withCheckedContinuation) do ZERO synchronous WASM or
-//       blocking network on the calling (main) thread. This is the whentopost
+//       blocking network on the calling (main) thread. This is the AppA
 //       user's case — they feel slowness with no active module.
 //
 //   (2) W5b MANIFEST CACHE: after activate(), cachedManifestBytes() is non-nil

@@ -1,0 +1,235 @@
+---
+title: CLI reference
+description: Every patchcli command.
+sidebar:
+  order: 5
+---
+
+import cliHelp from '../../data/cli-help.json';
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note" title="Generated from the real CLI">
+The command list below is captured from `patchcli --help` by `npm run gen:cli-help`
+— it is not written by hand, so it cannot drift from the binary. Prose on this
+page explains behaviour; the flags and usage are the CLI's own output.
+Captured from **patchcli {cliHelp.version}**.
+</Aside>
+
+## Every command
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    {cliHelp.commands
+      .filter((c) => c.name !== 'patchcli')
+      .map((c) => (
+        <tr key={c.path.join('-')}>
+          <td><code>patchcli {c.path.join(' ')}</code></td>
+          <td>{c.overview || '—'}</td>
+        </tr>
+      ))}
+  </tbody>
+</table>
+
+## Usage
+
+{cliHelp.commands.filter((c) => c.name !== 'patchcli').map((c) => (
+  <div key={c.path.join('-')}>
+    <h3 id={`cmd-${c.path.join('-')}`}><code>patchcli {c.path.join(' ')}</code></h3>
+    {c.overview ? <p>{c.overview}</p> : null}
+    <pre><code>{c.help}</code></pre>
+  </div>
+))}
+
+
+
+The full command surface of the `patchcli` CLI. `build` and `compile` drive the real engine and the real WASM toolchain; `push`, `release`, `status`, `rollback`, and `fingerprint` talk to the backend over HTTP. Run `patchcli <command> --help` for full details on any command.
+
+**Which command compiles vs. uploads?** `patchcli build` compiles your Swift to a real `.wasm` at `.Patch/build/module.wasm` but never talks to the backend. `patchcli push` does **not** build — it only uploads an already-built `.wasm` (the one `build` wrote, or the path you pass with `--module`), gated on the fingerprint check. `patchcli release` is the everyday command: it runs the *same* build pipeline as `build`, then the *same* fingerprint-gated upload as `push` — i.e. `release` = `build` + `push`.
+
+| Command | What it does | Key flags |
+| --- | --- | --- |
+| `patchcli init [path]` | One-command app setup: detect the Xcode project/target/bundle id, register the app via the browser (`app.patchrelease.com/cli-connect` — the CLI receives the app key automatically and writes `app_key`/`app_id`/`workspace_id` into `.Patch.yml`), add the `PatchSDK` package to the project (backup at `project.pbxproj.patch-backup`), and propose the startup-code diff, applied after you confirm. Skips anything already done — safe to re-run. Anything it can't do safely falls back to printed manual steps. | `--manual` · `--no-open` · `--yes` · `--skip-package` · `--skip-code` · `--force` · `--target <name>` · `--base-url <url>` |
+| `patchcli doctor [path]` (new) | Read-only setup/health preflight — answers "is my app set up correctly for OTA patches?" Runs five checks (each ✓/⚠/✗ with a one-line fix hint), **never mutates the project**, and exits non-zero on any blocking ✗ so it's CI-usable. Run it after `init` or whenever a patch isn't behaving. See [the doctor section](#check-your-setup-patchcli-doctor). | `--json` · `--offline` · `--base-url <url>` |
+| `patchcli prepare [path]` | Make your SwiftUI views patchable: mark each `var body: some View` `dynamic` and generate the `@_dynamicReplacement(for: body)` thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with no `PatchView` wrapping. Idempotent. **You normally never run this yourself** — it runs automatically on every `build` / `push` / `release`. This standalone command stays for CI (`--check`) and debugging. | `--check` |
+| `patchcli build [path]` | Parse → classify → split → compile to a real `.wasm` module at `.Patch/build/module.wasm`. Does not upload. Auto-runs `prepare` first (insert `dynamic` + thunks for any new views) unless `--no-prepare`. | `--verbose` · `--dry-run` · `--report <path>` · `--optimization size\|speed` · `--output <path>` · `--no-prepare` |
+| `patchcli push` | Upload an **already-built** `.wasm` to the backend, gated on a fingerprint-compatibility check. Does **not** build — run `build` first (or use `release`). | `--channel <name>` · `--rollout 0-100` · `--message <text>` · `--version <ver>` · `--module <path>` · `--mandatory` · `--min-app-version <ver>` · `--max-app-version <ver>` · `--min-os-version <ver>` · `--target-cohort <name>` · `--allow-native-drift` · `--base-url <url>` · `--dry-run` · `--no-prepare` |
+| `patchcli release [path]` (new) | Build then push in one command — the everyday deploy. Runs the same build pipeline as `build`, then the same fingerprint-gated upload as `push`; accepts both flag sets (no `--module`, since it builds the module itself). Auto-runs `prepare` first so views you add are always patchable (skip with `--no-prepare`). | `--channel <name>` · `--rollout 0-100` · `--message <text>` · `--version <ver>` · `--mandatory` · `--min-app-version <ver>` · `--max-app-version <ver>` · `--min-os-version <ver>` · `--target-cohort <name>` · `--allow-native-drift` · `--optimization size\|speed` · `--output <path>` · `--base-url <url>` · `--dry-run` · `--no-prepare` |
+| `patchcli status` | Show the current deployment: version, rollout %, adoption, failure rate. | `--channel <name>` · `--base-url <url>` · `--json` |
+| `patchcli rollback` | Roll back to the previous module (or to a specific version). | `--channel <name>` · `--to <version>` · `--base-url <url>` · `--dry-run` · `--json` |
+| `patchcli fingerprint <diff\|register>` | Diff or register the native-shell fingerprint that gates OTA compatibility. `diff` is the default subcommand. | `--base-url <url>` · `--app-version <ver>` (register) · `--dry-run` (register) · `--json` |
+| `patchcli analyze <path>` | Analysis only, for CI/code review. Reports OTA coverage; with `--check-fingerprint` it exits 1 if the native shell changed. | `--format text\|json` · `--verbose` · `--check-fingerprint` · `--fingerprint-baseline <hash>` |
+| `patchcli channels` | List the deployment channels seen for the configured app, with the active module per channel. Calls `GET /apps/{app_id}/channels` (falls back to deriving channels from the module list). | `--base-url <url>` · `--json` |
+| `patchcli whoami` | Print the configured `app_id` / `workspace_id` / base URL / channel resolved from `.Patch.yml` (and env overrides). Handy for confirming which backend a command will hit. | `--json` |
+| `patchcli compile <path>` | Lower-level: compile a directory of generated `_wasm.swift` to a real `.wasm` module. | `--output <path>` · `--swift-sdk <id>` · `--exports <symbols>` |
+
+## Build coverage output
+
+`patchcli build` parses, classifies, splits, and compiles, then prints a coverage report and writes the module to `.Patch/build/module.wasm`. Use `--verbose` for the per-function table and `--dry-run` to skip the WASM compile.
+
+```bash title="~/MyApp — zsh"
+$ patchcli build ./Sources
+Coverage report:
+  WASM-eligible (pure)          7  (50.0%)
+  WASM-eligible (bridged)       3  (21.4%)
+  Mixed (auto-split)            0  (0.0%)
+  Native (stays in shell)       4  (28.6%)
+  OTA-updatable (realized): 71.4%
+  Packaging tier (start): T0 Embedded + bridges (tens of KB)
+
+  Module: .Patch/build/module.wasm (38.2 KB)
+  ✓ Build succeeded — push with: patchcli push
+```
+
+## Release in one command
+
+`patchcli release` runs the build pipeline, confirms the module, then runs the same fingerprint-gated push as `patchcli push` — so it accepts both sets of flags. This is the command you'll use day to day.
+
+```bash title="~/MyApp — zsh"
+# everyday: build + push to a 10% staged rollout on production
+$ patchcli release --rollout 10 --message "Tighten refund eligibility"
+
+# release to a named channel, optimizing the module for size
+$ patchcli release --channel staging --optimization size
+
+# mark a release mandatory (see Force updates)
+$ patchcli release --rollout 100 --mandatory --message "Critical tax fix"
+
+# preflight only — build + run all push checks, but do not upload
+$ patchcli release --dry-run
+```
+
+## Status & rollback
+
+```bash title="~/MyApp — zsh"
+# current deployment + device telemetry on a channel
+$ patchcli status --channel production
+Active version:   2026.06.03.142210
+Rollout:          10%
+  Adoption:       96.4% (activations / downloads)
+  Failure rate:   0.2% (errors / (activations+errors))
+
+# one-click revert to the previous module (≈60s to propagate)
+$ patchcli rollback --channel production
+
+# roll all the way back to a specific version
+$ patchcli rollback --to 2026.05.30.090112
+```
+
+## Check your setup: `patchcli doctor`
+
+`patchcli doctor` is the "is my setup correct?" command. It runs a **read-only** preflight — it never edits your project (unlike `init` / `prepare`), so it's safe to run anytime, in CI, or on a teammate's machine. Run it right after `patchcli init`, or whenever a patch isn't behaving the way you expect. It reports five checks, each with a ✓ / ⚠ / ✗ and a one-line fix hint:
+
+1. **`.Patch.yml` present + valid** — has an `app_key` (`pak_…`); `app_id` recommended for backend commands.
+2. **PatchSDK package added + linked** — referenced in your `.xcodeproj` *or* `Package.swift` **and** linked into your app target.
+3. **`Patch.configure(...)` + `Patch.shared.start()` in the `@main` App** — plus `import PatchSDK` (a `configure` with no `start()` never fetches updates).
+4. **Views are patch-ready** — every SwiftUI view `body` is `dynamic` and the dynamic-replacement thunks exist. If some aren't yet, this is just a ⚠ (not a blocker): `build` / `push` / `release` auto-run `prepare`, so it self-heals on your next release.
+5. **Native-shell fingerprint registered + current** — the registered fingerprint matches the current shell (needs network; degrades to a ⚠ with `--offline`).
+
+```bash title="~/MyApp — zsh"
+$ patchcli doctor
+Patch doctor
+============
+
+✓ .Patch.yml present + valid
+    app_key set; app_id 3f2b…-uuid.
+✓ PatchSDK package added to the project
+    MyApp.xcodeproj references patch-swift and links the PatchSDK product.
+✓ Patch.configure(...) + start() in the @main App entry
+    Patch.configure(...) + Patch.shared.start() + import PatchSDK found (MyAppApp.swift).
+✓ Views are patch-ready (bodies dynamic + thunks)
+    12 SwiftUI view(s) are `dynamic` + have generated thunks.
+✓ Native-shell fingerprint registered + current
+    Registered fingerprint matches the current native shell (3f2b9c1e7a4d…).
+
+5/5 checks passed.
+READY — this project is set up for OTA patches. ✓
+```
+
+It exits non-zero on any blocking ✗ (the ⚠ items are non-fatal but worth fixing), so you can drop it into CI as a setup gate. Add `--json` for a machine-readable report:
+
+```bash title="CI — setup gate"
+# fail the job if the project isn't set up for OTA patches
+$ patchcli doctor --json
+```
+
+<Aside type="note" title="Fingerprint gate">
+`push` and `release` refuse to upload if the local native-shell fingerprint doesn't match the backend's active fingerprint — the native shell changed since the last App Store release, so the module isn't compatible with installed apps. Run `patchcli fingerprint diff` to see what changed; after an App Store release, run `patchcli fingerprint register` to re-baseline.
+</Aside>
+
+## Native-shell drift: `--allow-native-drift`
+
+Sometimes your native shell changes but in ways the OTA patch **can't see** — you added a Swift package, edited `Info.plist`, tweaked an entitlement, or bumped the deployment target, without touching the source the patch is built against. The plain fingerprint gate would block the push, even though the view patch is provably compatible. To handle this, `patchcli fingerprint diff` tags each changed component as either **native-only** (the patch can't see it) or **patch-affecting** (it can change the surface the patch is built against), and `--allow-native-drift` lets you ship a view patch when *every* change is native-only.
+
+| Changed component | Classified | Why |
+| --- | --- | --- |
+| Info.plist | native-only | Pure native-shell metadata (display name, permission strings, URL schemes). The WASM module never reads or links it. |
+| Entitlements | native-only | Native binary capabilities (keychain groups, App Groups, push) — an OS/codesign concern the WASM ABI is blind to. |
+| Linked frameworks | native-only | Adding/removing a framework the shell links. (If a patched view had started using it, the view's source would have changed too — that shows up as a patch-affecting native-source change and blocks the skip.) |
+| Deployment target | native-only | A native build setting — it changes which OS versions the binary supports, not the OS-version-independent WASM ABI. |
+| Native .swift files | patch-affecting | A native function, signature, or file add/remove can change the surface the patch is built against — never skipped. |
+| Bridge definitions | patch-affecting | Host bridges are capabilities the module calls; changing them shifts the shell ABI. |
+| SDK / WasmKit / compiler version | patch-affecting | These govern how the module is marshalled and executed on-device — a rebuild + re-register is required. |
+
+```bash title="~/MyApp — zsh"
+# see the per-component breakdown (native-only vs patch-affecting)
+$ patchcli fingerprint diff
+
+# the native shell drifted, but only natively — ship the view patch anyway
+$ patchcli release --allow-native-drift --message "Restyle the paywall"
+```
+
+<Aside type="tip" title="The safety model">
+`--allow-native-drift` only ever bypasses the gate when **every** changed component is native-only. If **any** change is patch-affecting, the push is still refused — you must ship that change through the App Store and re-register; `--allow-native-drift` will not override it. When run interactively on an all-native-only drift, `push`/`release` prompt you instead; the flag is just the non-interactive (CI) form of that "yes." Either way, you should still ship the native change through the App Store and re-run `patchcli fingerprint register` so future devices report the new shell.
+</Aside>
+
+## Configuration: .Patch.yml
+
+`patchcli init` writes `.Patch.yml` at your project root — including the `app_key`/`app_id`/`workspace_id` it receives during browser registration. It's a small, fixed-shape YAML file. Environment variables override the API fields at call time; `app_id`/`workspace_id` are only needed for backend commands (`push`/`release`/`status`/`rollback`).
+
+```yaml title=".Patch.yml"
+version: 1
+app_key: pak_live_…          # per-app API key (written by patchcli init; also in the dashboard)
+project: MyApp.xcodeproj
+target: MyApp
+
+app_id: 3f2b…-uuid         # required for push/release/status/rollback
+workspace_id: 9a01…-uuid
+api_base_url: https://api.patchrelease.com
+api_key: pak_live_…          # env PATCH_API_KEY overrides this
+
+exclude:                    # paths/globs to skip during analysis
+  []
+
+bridges:                    # host bridges available to OTA code
+  networking: true
+  userDefaults: true
+  notifications: true
+  navigation: true
+  keychain: true
+  dateLocale: true
+  logging: true
+
+build:
+  optimization: size        # size | speed
+  stripDebugInfo: true
+  swiftui: true         # lower SwiftUI views to WASM (default on)
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| version | int | Config schema version. Currently 1. |
+| app_key | string | Per-app key (pak_…) issued by Patch. Sent as X-API-Key. |
+| project | string | Detected project file (e.g. MyApp.xcodeproj or Package.swift). |
+| target | string | The app target whose sources Patch analyzes. |
+| app_id | uuid? | Backend app UUID. Required for push/release/status/rollback; optional for offline build/analyze. |
+| workspace_id | uuid? | Backend workspace UUID the app belongs to. |
+| api_base_url | url? | Backend base URL. Overridden by env PATCH_API_URL / the --base-url flag. |
+| api_key | string? | API key for backend calls. Overridden by env PATCH_API_KEY. |
+| exclude | string[] | Paths/globs to skip during analysis. Empty list = analyze everything. |
+| bridges.* | bool | Toggle each host bridge: networking, userDefaults, notifications, navigation, keychain, dateLocale, logging, analytics, fileStorage, connectivity, biometrics, appReview, pasteboard, haptics, deviceInfo, shareSheet, openURL, location, calendar, contacts, appBadge, mailCompose, inAppPurchase, speechSynthesis, documentPicker, systemSound, photoPicker, secureRandom, appGroupStorage, screenControl, audioPlayback, audioRecording, motion, mapsDirections, networkImage, spotlightIndex, backgroundTask, fileDownload, accessibility, appShortcuts, handoff, watchConnectivity, nfcRead, processInfo, videoPlayback, speechRecognition, mediaInfo, imageFilter, pdfGenerate, qrGenerate, camera (51 in total). A disabled bridge means functions using it stay native. |
+| build.optimization | string | size (default) or speed. Overridden by --optimization. |
+| build.stripDebugInfo | bool | Strip debug info from the emitted module to shrink it. Default true. |
+| build.swiftui | bool | Lower SwiftUI View.body to WASM so views ship over the air. Default true (on if omitted); set false to keep views native. Env PATCH_SWIFTUI=0 overrides per-run. |

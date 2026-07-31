@@ -1,0 +1,47 @@
+---
+title: Patch documentation
+description: Over-the-air code updates for native Swift iOS apps.
+sidebar:
+  label: Introduction
+  order: 0
+---
+
+import { CardGrid, LinkCard, Card, Aside } from '@astrojs/starlight/components';
+
+**Patch** ships over-the-air code updates to native Swift iOS apps. You write
+ordinary Swift; the build engine works out which parts can run as WebAssembly,
+compiles those, and ships them as a small module that runs on-device in
+[WasmKit](https://github.com/swiftwasm/WasmKit). Your signed App Store binary
+never changes — only the interpreted layer updates.
+
+```bash
+brew install patch-release/tap/patchcli
+cd MyApp && patchcli init
+```
+
+<CardGrid>
+  <LinkCard title="Quick Start" description="Install the CLI and ship your first patch in about ten minutes." href="/quickstart/" />
+  <LinkCard title="How it works" description="The Swift→WebAssembly pipeline and the on-device runtime." href="/how-it-works/" />
+  <LinkCard title="What it can & can't update" description="Measured coverage, and the limits that are permanent." href="/coverage/" />
+  <LinkCard title="The fingerprint" description="Why a patch stops applying after you change native code." href="/fingerprint/" />
+</CardGrid>
+
+## If you've used CodePush or Expo
+
+Patch is the equivalent for **native Swift and SwiftUI** — no JavaScript bridge,
+no web views, no cross-platform runtime. CodePush and Expo/EAS Update patch a
+JavaScript bundle; Shorebird patches Dart. None of them touch native Swift.
+
+<Aside type="note" title="Is this allowed?">
+Yes — under the same provision of Apple's Developer Program License Agreement
+that Expo and CodePush have relied on for close to a decade. The signed binary is
+never modified and only interpreted code updates. See
+[Apple compliance](/apple-compliance/).
+</Aside>
+
+## Open source
+
+<CardGrid>
+  <LinkCard title="The packages" description="The SDK (MIT) and the engine (Apache-2.0) — both in patch-swift, what's in each, and how to build from source." href="/open-source/" />
+  <LinkCard title="Running it yourself" description="Reference architectures for GCP, AWS and Azure, and what static hosting can't do." href="/self-hosting/" />
+</CardGrid>

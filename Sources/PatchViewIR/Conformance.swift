@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Conformance.swift — `Codable` for the IR, but ONLY off the Embedded tier.
 // =========================================================================
 // The IR value types declare bare `Equatable, Sendable` (so they parse + build

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // AsyncBroker.swift — the HOST side of the guest↔host async round-trip.
 // ======================================================================
 // A guest async body that awaits real host I/O (network, disk, a bridge) calls

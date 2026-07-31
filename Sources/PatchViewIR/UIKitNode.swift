@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // UIKitNode — the serializable IR for a (declarative) UIKit view construction.
 // =============================================================================
 // This is the UIKit analogue of `ViewNode` (the SwiftUI IR). It is the SINGLE

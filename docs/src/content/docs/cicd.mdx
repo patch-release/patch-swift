@@ -1,0 +1,54 @@
+---
+title: CI/CD
+description: Release from GitHub Actions and other CI.
+sidebar:
+  order: 11
+---
+
+For production, run `patchcli release` from CI so deploys are reproducible, auditable, and free of long-lived credentials on developer machines. The shape of a pipeline:
+
+1. **Analyze (gate):** on pull requests, run `patchcli analyze --check-fingerprint`. If the native shell changed, fail the job — that change must ship through the App Store.
+2. **Release:** on merge to `main`, run `patchcli release` with the swift.org WASM SDK to build the module and push it behind the fingerprint check, then start a staged rollout.
+
+## GitHub Actions
+
+```yaml title=".github/workflows/patch.yml"
+# Build + release an OTA patch on every merge to main — automatically SKIPS the
+# release when the change isn't OTA-compatible (it touched the native shell,
+# which must ship through the App Store). One workflow, no separate gate.
+name: Patch OTA
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Patch CLI + the Swift→WASM toolchain it compiles with
+      - name: Install patchcli + toolchain
+        run: |
+          brew install patch-release/tap/patchcli
+          patchcli setup
+
+      # Ship the patch ONLY if the native shell is unchanged: analyze exits 1 when it
+      # changed → not OTA-compatible → skip the release (ship via the App Store).
+      - name: Release OTA if compatible
+        run: |
+          if patchcli analyze ./Sources --check-fingerprint; then
+            patchcli release ./Sources --channel production --rollout 10 \
+              --message "OTA: ${{ github.event.head_commit.message }}"
+          else
+            echo "Native shell changed — skipping OTA release (ship via the App Store)."
+          fi
+        env:
+          PATCH_API_KEY: ${{ secrets.PATCH_API_KEY }}
+```
+
+Prefer to catch it at PR time too? Run the same `patchcli analyze ./Sources --check-fingerprint` as a `pull_request` check to block an incompatible merge before it lands.
+
+## API keys & secrets
+
+CLI/SDK calls authenticate with a per-app API key (`X-API-Key: pak_…`). In CI, store it as a secret and pass it to `patchcli` via `PATCH_API_KEY` — that's all the release step needs. (Self-hosting Patch? Point the CLI at your own backend with `PATCH_API_URL`.)

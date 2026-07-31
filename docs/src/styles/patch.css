@@ -1,0 +1,191 @@
+/* ========================================================
+   Patch Docs — house theme for Starlight.
+
+   Mirrors web/css/main.css and docs-site/css/docs.css exactly: same blue accent
+   (named --orange there for legacy reasons — it is blue), same neutrals, same
+   font stack. Starlight's own tokens are remapped onto ours rather than a new
+   palette being introduced.
+   ======================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  /* House tokens (identical values to web/css/main.css) */
+  --patch-bg: #fbfbfb;
+  --patch-paper: #fff;
+  --patch-ink: #2a2d33;
+  --patch-sub: #5b6066;
+  --patch-faint: #9aa0a7;
+  --patch-line: #ededee;
+  --patch-line2: #e2e2e4;
+  --patch-blue: #0a7aff;
+  --patch-blue-d: #0a61cf;
+  --patch-blue-soft: #e8f1ff;
+  --patch-blue-line: #cfe0fb;
+  --patch-green: #1f9d57;
+  --patch-green-soft: #e7f4ed;
+  --patch-gray-soft: #f1f2f3;
+
+  --sans: 'Space Grotesk', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --disp: 'Instrument Sans', system-ui, -apple-system, sans-serif;
+
+  /* Starlight accent ramp -> house blue */
+  --sl-color-accent-low: var(--patch-blue-soft);
+  --sl-color-accent: var(--patch-blue);
+  --sl-color-accent-high: var(--patch-blue-d);
+
+  --sl-font: var(--sans);
+  --sl-font-mono: var(--mono);
+}
+
+/* Light theme — the house default */
+:root[data-theme='light'] {
+  /* NB: in Starlight --sl-color-white is the MAX-contrast text colour and
+     --sl-color-black is the page ground; they invert between themes. */
+  --sl-color-white: #14171c;
+  --sl-color-gray-1: var(--patch-ink);
+  --sl-color-gray-2: var(--patch-sub);
+  --sl-color-gray-3: var(--patch-faint);
+  --sl-color-gray-4: var(--patch-line2);
+  --sl-color-gray-5: var(--patch-line);
+  --sl-color-gray-6: var(--patch-gray-soft);
+  --sl-color-gray-7: #f7f7f8;
+  --sl-color-black: var(--patch-bg);
+  --sl-color-text: var(--patch-ink);
+  --sl-color-text-accent: var(--patch-blue-d);
+  --sl-color-bg: var(--patch-bg);
+  --sl-color-bg-nav: rgba(251, 251, 251, 0.86);
+  --sl-color-bg-sidebar: var(--patch-bg);
+  --sl-color-hairline: var(--patch-line);
+  --sl-color-hairline-light: var(--patch-line);
+  --sl-color-hairline-shade: var(--patch-line2);
+}
+
+/* Dark theme — kept legible rather than a naive inversion. Neutrals are given a
+   slight blue bias so the accent still reads as the same hue on a dark ground. */
+:root[data-theme='dark'] {
+  --sl-color-white: #f2f5f9;
+  --sl-color-gray-1: #e4e9f0;
+  --sl-color-gray-2: #b6bfcc;
+  --sl-color-gray-3: #8b95a5;
+  --sl-color-gray-4: #4d5768;
+  --sl-color-gray-5: #2c3442;
+  --sl-color-gray-6: #1d232e;
+  --sl-color-gray-7: #171c25;
+  --sl-color-black: #10141b;
+  --sl-color-text: #dfe5ee;
+  --sl-color-text-accent: #6fb2ff;
+  --sl-color-bg: #10141b;
+  --sl-color-bg-nav: rgba(16, 20, 27, 0.86);
+  --sl-color-bg-sidebar: #10141b;
+  --sl-color-hairline: #222a36;
+  --sl-color-hairline-light: #222a36;
+  --sl-color-hairline-shade: #2c3442;
+  --sl-color-accent-low: #12314f;
+  --sl-color-accent: #3d9bff;
+  --sl-color-accent-high: #b8d9ff;
+}
+
+/* ---- Typography ---- */
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+.content-panel h1 {
+  font-family: var(--disp);
+  letter-spacing: -0.025em;
+  font-weight: 600;
+}
+.sl-markdown-content h2 {
+  padding-top: 0.35em;
+  border-top: 1px solid var(--sl-color-hairline);
+  margin-top: 2.4em;
+}
+.sl-markdown-content h2:first-of-type { border-top: 0; margin-top: 1.4em; }
+.sl-markdown-content { font-size: 15.5px; line-height: 1.68; }
+.sl-markdown-content p { max-width: 74ch; }
+
+/* ---- Code ---- */
+.sl-markdown-content code:not(:where(.expressive-code *)) {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 5px;
+  padding: 0.12em 0.38em;
+}
+.expressive-code .frame pre { font-family: var(--mono); font-size: 13px; }
+
+/* ---- Tables: the reference pages are mostly tables ---- */
+.sl-markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+  display: block;
+  overflow-x: auto;
+}
+.sl-markdown-content th,
+.sl-markdown-content td {
+  border: 0;
+  border-bottom: 1px solid var(--sl-color-hairline);
+  padding: 10px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+.sl-markdown-content th {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.sl-markdown-content tbody tr:hover { background: var(--sl-color-gray-7); }
+
+/* ---- Asides ---- */
+.starlight-aside { border-radius: 8px; border-inline-start-width: 2px; }
+.starlight-aside__title { font-family: var(--disp); letter-spacing: -0.01em; }
+
+/* ---- Sidebar / nav ---- */
+.sidebar-content a { font-size: 14px; }
+.sidebar-content summary,
+.sidebar-content .large {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+}
+header.header { border-bottom: 1px solid var(--sl-color-hairline); }
+site-title span { font-family: var(--disp); font-weight: 600; letter-spacing: -0.02em; }
+
+/* ---- The measured-coverage callout, used on the coverage page ---- */
+.patch-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1px;
+  background: var(--sl-color-hairline);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.6rem 0;
+}
+.patch-stat {
+  background: var(--sl-color-bg);
+  padding: 16px 18px;
+}
+.patch-stat b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.patch-stat span { font-size: 12.5px; color: var(--sl-color-gray-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

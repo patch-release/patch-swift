@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // ViewNode — the serializable IR for a (declarative) SwiftUI view body.
 // ====================================================================
 // This file is the SINGLE shared contract between the WASM *guest* (which

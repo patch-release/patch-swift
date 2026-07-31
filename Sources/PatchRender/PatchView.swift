@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // PatchView.swift — the production SwiftUI entry point for rendering a WASM-
 // emitted ViewNode tree as REAL SwiftUI, with the interactive dispatch loop.
 // =============================================================================

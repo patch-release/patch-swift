@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // RenderUIKit.swift — the native SDK renderer: UIKitNode IR -> REAL UIKit.
 // =========================================================================
 // This is the UIKit analogue of `PatchRender/Render.swift` (the SwiftUI host

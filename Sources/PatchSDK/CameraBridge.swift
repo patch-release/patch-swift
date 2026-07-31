@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import Foundation
 import WasmKit
 // NOTE (guide Rule 2 + the SwiftUI re-export gotcha): capturing a still requires

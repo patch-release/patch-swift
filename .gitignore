@@ -1,20 +1,9 @@
-## SwiftPM
 .build/
 .swiftpm/
-*.xcodeproj
-*.xcworkspace
-DerivedData/
-
-## WebAssembly — ignore generated modules EXCEPT the committed test fixtures,
-## the bundled Example demo module, and fixtures-src sources. The large
-## regenerable guest modules (e.g. NetworkingGuest.wasm) stay out of git; the
-## small committed fixtures are force-added by the patterns below.
-*.wasm
-!Tests/**/*.wasm
-# …except the big regenerable networking guest (kept local; its test self-skips)
-Tests/PatchSDKTests/Fixtures/NetworkingGuest.wasm
-!Examples/**/*.wasm
-!fixtures-src/**/*.wasm
-
-## macOS
+*.xcuserdatad
 .DS_Store
+.Patch/
+node_modules/
+docs/dist/
+docs/.astro/
+corpus/repos/

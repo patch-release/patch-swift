@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Describe.swift — a stable, human-readable structural description of a
 // ViewNode tree. Two trees that describe identically are structurally identical
 // (the renderer is a pure function of the tree, so equal description ⇒ equal

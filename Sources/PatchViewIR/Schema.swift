@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Schema.swift — the ViewNode IR wire-format schema VERSION contract.
 // =====================================================================
 // `PatchViewIR` is the SINGLE shared IR between the WASM *guest* (which the
