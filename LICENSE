@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
---------------------------------------------------------------------------------
-
-SCOPE
-
-This MIT license covers the on-device SDK in `sdk/` (the PatchSDK Swift package)
-and everything else in this repository EXCEPT the `cli/` directory.
-
-The partitioning and Swift-to-WebAssembly engine in `cli/` is licensed
-separately under the Apache License, Version 2.0. See `cli/LICENSE` for its
-terms and `NOTICE` for the attribution notices that accompany it.

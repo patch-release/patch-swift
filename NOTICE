@@ -122,3 +122,17 @@ Verifying this list
 The authoritative dependency set is `cli/Package.resolved` and
 `sdk/Package.resolved`. After changing a dependency, re-resolve and update this
 file. Each dependency's own LICENSE file is fetched into `.build/checkouts/`.
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+
+LICENCE SCOPE
+
+This MIT license covers the on-device SDK — the PatchSDK Swift package rooted at
+this repository's `Sources/` and `Tests/` — and everything else in the repository
+EXCEPT the `cli/` directory.
+
+The partitioning and Swift-to-WebAssembly engine in `cli/` is licensed
+separately under the Apache License, Version 2.0. See `cli/LICENSE` for its
+terms and `NOTICE` for the attribution notices that accompany it.
