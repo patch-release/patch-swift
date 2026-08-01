@@ -43,6 +43,20 @@ public struct PatchConfig: Sendable, Equatable {
     /// Backend base URL + API key (env overrides these at call time).
     public var apiBaseURL: String?
     public var apiKey: String?
+    /// The PUBLISH TOKEN (`ppt_…`) — the credential that authorizes `push`,
+    /// `release`, `rollback` and fingerprint registration.
+    ///
+    /// This is deliberately NOT `appKey`. `app_key` is a public device
+    /// identifier: `patchcli init` bakes it into `Patch.configure(appKey:)`, so
+    /// it ships inside the app binary and is recoverable from any published IPA
+    /// with `strings`. It used to double as the publish credential, which meant
+    /// anyone who downloaded an app could push arbitrary code to all of its
+    /// users. The backend now rejects it on every write endpoint.
+    ///
+    /// Obtained by `patchcli init` / `patchcli login` (browser link flow) or
+    /// from the console. `.Patch.yml` should be gitignored; for CI prefer the
+    /// `PATCH_API_KEY` env var over committing this value.
+    public var publishToken: String?
     /// Optional path (relative to the project root) to a resource-overlay spec JSON
     /// (Phase 1b — named color/string/image OTA overrides; see `OverlaySpecReader`).
     /// When set, `patchcli build` auto-packages it into the built module artifact
@@ -66,6 +80,7 @@ public struct PatchConfig: Sendable, Equatable {
         bundleId: String? = nil,
         apiBaseURL: String? = nil,
         apiKey: String? = nil,
+        publishToken: String? = nil,
         overlaySpec: String? = nil
     ) {
         self.version = version
@@ -83,6 +98,7 @@ public struct PatchConfig: Sendable, Equatable {
         self.bundleId = bundleId
         self.apiBaseURL = apiBaseURL
         self.apiKey = apiKey
+        self.publishToken = publishToken
         self.overlaySpec = overlaySpec
     }
 
@@ -171,6 +187,7 @@ public struct PatchConfig: Sendable, Equatable {
         if let bundleId { out += "bundle_id: \(bundleId)\n" }
         if let apiBaseURL { out += "api_base_url: \(apiBaseURL)\n" }
         if let apiKey { out += "api_key: \(apiKey)\n" }
+        if let publishToken { out += "publish_token: \(publishToken)\n" }
         if let overlaySpec { out += "overlay: \(overlaySpec)\n" }
         out += "exclude:\n"
         if exclude.isEmpty {
@@ -268,6 +285,7 @@ public struct PatchConfig: Sendable, Equatable {
                 case "bundle_id": cfg.bundleId = emptyToNil(unquote(value))
                 case "api_base_url": cfg.apiBaseURL = emptyToNil(unquote(value))
                 case "api_key": cfg.apiKey = emptyToNil(unquote(value))
+                case "publish_token": cfg.publishToken = emptyToNil(unquote(value))
                 case "overlay": cfg.overlaySpec = emptyToNil(unquote(value))
                 case "exclude":
                     section = .exclude

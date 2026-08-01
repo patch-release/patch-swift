@@ -56,7 +56,7 @@ https://docs.patchrelease.com/llms-full.txt). Follow the real onboarding flow:
      generated. (This re-runs automatically on every "patchcli release" so views
      I add later are picked up; I can run "patchcli prepare --check" in CI to
      verify, or pass "--no-prepare" to opt out.)
-   - .Patch.yml exists in the project root with app_key / app_id.
+   - .Patch.yml exists in the project root with app_key / publish_token / app_id.
 
 4. After my next App Store build, I should run "patchcli fingerprint register"
    once to baseline the native shell (pushes are gated on this fingerprint).
@@ -114,7 +114,7 @@ https://docs.patchrelease.com/llms.txt). Follow the real flow:
      Show me the edit in context against my actual App struct.
 
 3. Tell me that after running "patchcli init" I should confirm a .Patch.yml file
-   appears in the project root with app_key / app_id, and that my SwiftUI view
+   appears in the project root with app_key / publish_token / app_id, and that my SwiftUI view
    bodies were marked dynamic. (This view-prep re-runs automatically on every
    "patchcli release", so I never have to remember it when I add new views.)
 

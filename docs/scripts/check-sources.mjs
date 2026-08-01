@@ -6,7 +6,7 @@
 //   ---
 //   title: CLI reference
 //   sources:
-//     - cli/Sources/PatchCLI/Commands/Release.swift
+//     - cli/Sources/PatchCLI/Release.swift
 //     - cli/Sources/CodeGenerator/BodyLowering.swift
 //   ---
 //
@@ -60,6 +60,25 @@ const lastTouched = (absPath) => {
   return { ts: statSync(absPath).mtimeMs, hash: 'wt', subject: 'uncommitted working copy', wt: true };
 };
 
+// The same docs ship from two repo layouts. In the monorepo the SDK lives at
+// `sdk/`; in the public `patch-swift` repo it IS the root package, so
+// `sdk/Sources/X` is just `Sources/X` there (tools/sync-public.sh does that
+// remap). The engine's `cli/` path is identical in both. Declare `sources:`
+// against the monorepo layout and resolve the public one as a fallback, so a
+// declaration is never "broken" merely because of which repo it is read from.
+const LAYOUTS = [(p) => p, (p) => (p.startsWith('sdk/') ? p.slice(4) : null)];
+
+const resolveSource = (src) => {
+  for (const map of LAYOUTS) {
+    const mapped = map(src);
+    if (!mapped) continue;
+    const abs = resolve(REPO, mapped);
+    if (abs.startsWith(REPO) && existsSync(abs)) return { abs, ok: true };
+  }
+  const abs = resolve(REPO, src);
+  return { abs, ok: false, escapes: !abs.startsWith(REPO) };
+};
+
 const fmt = (ms) => new Date(ms).toISOString().slice(0, 10);
 const days = (a, b) => Math.round((a - b) / 86_400_000);
 
@@ -73,12 +92,12 @@ let pairs = 0;
 for (const page of withSources) {
   const pageCommit = lastTouched(page.file);
   for (const src of page.sources) {
-    const abs = resolve(REPO, src);
-    if (!abs.startsWith(REPO)) {
+    const { abs, ok, escapes } = resolveSource(src);
+    if (escapes) {
       broken.push({ page: page.relFile, source: src, why: 'sources: path escapes the repo' });
       continue;
     }
-    if (!existsSync(abs)) {
+    if (!ok) {
       broken.push({ page: page.relFile, source: src, why: 'sources: path does not exist' });
       continue;
     }
@@ -106,7 +125,7 @@ if (JSON_OUT) {
   if (withSources.length === 0) {
     console.log(
       '   No page declares `sources:` yet. Add it to a page\'s frontmatter to have this check watch it:\n' +
-        '     sources:\n       - cli/Sources/PatchCLI/Commands/Release.swift',
+        '     sources:\n       - cli/Sources/PatchCLI/Release.swift',
     );
   }
   if (stale.length) {

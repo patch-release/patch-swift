@@ -471,16 +471,33 @@ struct Init: ParsableCommand {
             cfg.appKey = app.appKey
             cfg.appId = app.id
             cfg.workspaceId = app.workspaceId
+            // The PUBLISH credential. Without this, onboarding would end with a
+            // project that can build but not push: `app_key` is a public device
+            // identifier (it gets baked into the app source below, so it ships in
+            // the binary) and the backend rejects it on every write endpoint.
+            if let token = app.publishToken {
+                cfg.publishToken = token
+            }
             do {
                 try cfg.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
             } catch {
+                // Never print the publish token in an error path — it is a live
+                // secret and CLI output lands in scrollback, CI logs and pasted
+                // bug reports. The app key is public, so naming it is safe.
                 return .fallback("Registered, but couldn't write .Patch.yml: \(error). "
-                    + "Add app_key: \(app.appKey) manually.")
+                    + "Add app_key: \(app.appKey) manually, then run `patchcli login` "
+                    + "to store a publish token.")
             }
             if reused {
-                ok("Reconnected existing app “\(app.name)” (\(app.bundleId)) — its app key is saved in .Patch.yml.")
+                ok("Reconnected existing app “\(app.name)” (\(app.bundleId)) — credentials saved in .Patch.yml.")
             } else {
-                ok("Registered “\(app.name)” (\(app.bundleId)) — app key saved to .Patch.yml.")
+                ok("Registered “\(app.name)” (\(app.bundleId)) — credentials saved to .Patch.yml.")
+            }
+            if app.publishToken == nil {
+                note("The backend did not return a publish token. Run `patchcli login` "
+                    + "before your first push.")
+            } else {
+                note("Keep .Patch.yml out of version control — it now holds your publish token.")
             }
             return .linked
         case .expired, .timedOut:
@@ -661,6 +678,7 @@ struct Init: ParsableCommand {
         var s = "Register the app & get its key: open https://app.patchrelease.com (Quick Start),\n"
             + "     create the app, then copy its credentials into .Patch.yml:\n"
             + "       app_key:       <pak_… from the dashboard>   (replaces pak_REPLACE_ME)\n"
+            + "       publish_token: <ppt_… from Settings → CLI tokens>  (required to push)\n"
             + "       app_id:        <your app's UUID>\n"
             + "       workspace_id:  <your workspace UUID>"
         if bundleIdKnown {

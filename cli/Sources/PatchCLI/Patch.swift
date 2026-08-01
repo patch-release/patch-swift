@@ -16,7 +16,7 @@ struct Patch: ParsableCommand {
         abstract: "OTA code updates for native Swift iOS apps — auto-partitioning engine.",
         version: "1.7.0",
         subcommands: [
-            Setup.self, Init.self, Prepare.self, Doctor.self, Build.self, Push.self, Release.self, Status.self, Rollback.self,
+            Setup.self, Init.self, Login.self, Prepare.self, Doctor.self, Build.self, Push.self, Release.self, Status.self, Rollback.self,
             FingerprintCommand.self, Channels.self, Whoami.self, Analyze.self, Compile.self, Overlay.self,
             // Deprecated alias for `release`; hidden from --help, still functional.
             Ship.self,

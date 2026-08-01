@@ -3,6 +3,8 @@ title: CLI reference
 description: Every patchcli command.
 sidebar:
   order: 5
+sources:
+  - cli/Sources/PatchCLI/Patch.swift
 ---
 
 import cliHelp from '../../data/cli-help.json';
@@ -51,7 +53,8 @@ The full command surface of the `patchcli` CLI. `build` and `compile` drive the 
 
 | Command | What it does | Key flags |
 | --- | --- | --- |
-| `patchcli init [path]` | One-command app setup: detect the Xcode project/target/bundle id, register the app via the browser (`app.patchrelease.com/cli-connect` — the CLI receives the app key automatically and writes `app_key`/`app_id`/`workspace_id` into `.Patch.yml`), add the `PatchSDK` package to the project (backup at `project.pbxproj.patch-backup`), and propose the startup-code diff, applied after you confirm. Skips anything already done — safe to re-run. Anything it can't do safely falls back to printed manual steps. | `--manual` · `--no-open` · `--yes` · `--skip-package` · `--skip-code` · `--force` · `--target <name>` · `--base-url <url>` |
+| `patchcli init [path]` | One-command app setup: detect the Xcode project/target/bundle id, register the app via the browser (`app.patchrelease.com/cli-connect` — the CLI automatically receives the app key **and a publish token**, writing `app_key`/`publish_token`/`app_id`/`workspace_id` into `.Patch.yml`), add the `PatchSDK` package to the project (backup at `project.pbxproj.patch-backup`), and propose the startup-code diff, applied after you confirm. Skips anything already done — safe to re-run. Anything it can't do safely falls back to printed manual steps. | `--manual` · `--no-open` · `--yes` · `--skip-package` · `--skip-code` · `--force` · `--target <name>` · `--base-url <url>` |
+| `patchcli login [path]` (new) | Get a **publish token** (`ppt_…`) for this project and save it to `.Patch.yml`. Opens your browser, you approve, the CLI receives the token — the same hand-off `init` uses, on its own so you can run it any time. Use it when you clone a repo that has `.Patch.yml` but no token, when a token is revoked, or to mint one for CI. The token is never printed. | `--base-url <url>` |
 | `patchcli doctor [path]` (new) | Read-only setup/health preflight — answers "is my app set up correctly for OTA patches?" Runs five checks (each ✓/⚠/✗ with a one-line fix hint), **never mutates the project**, and exits non-zero on any blocking ✗ so it's CI-usable. Run it after `init` or whenever a patch isn't behaving. See [the doctor section](#check-your-setup-patchcli-doctor). | `--json` · `--offline` · `--base-url <url>` |
 | `patchcli prepare [path]` | Make your SwiftUI views patchable: mark each `var body: some View` `dynamic` and generate the `@_dynamicReplacement(for: body)` thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with no `PatchView` wrapping. Idempotent. **You normally never run this yourself** — it runs automatically on every `build` / `push` / `release`. This standalone command stays for CI (`--check`) and debugging. | `--check` |
 | `patchcli build [path]` | Parse → classify → split → compile to a real `.wasm` module at `.Patch/build/module.wasm`. Does not upload. Auto-runs `prepare` first (insert `dynamic` + thunks for any new views) unless `--no-prepare`. | `--verbose` · `--dry-run` · `--report <path>` · `--optimization size\|speed` · `--output <path>` · `--no-prepare` |
@@ -122,7 +125,7 @@ $ patchcli rollback --to 2026.05.30.090112
 
 `patchcli doctor` is the "is my setup correct?" command. It runs a **read-only** preflight — it never edits your project (unlike `init` / `prepare`), so it's safe to run anytime, in CI, or on a teammate's machine. Run it right after `patchcli init`, or whenever a patch isn't behaving the way you expect. It reports five checks, each with a ✓ / ⚠ / ✗ and a one-line fix hint:
 
-1. **`.Patch.yml` present + valid** — has an `app_key` (`pak_…`); `app_id` recommended for backend commands.
+1. **`.Patch.yml` present + valid** — has a publish token (`ppt_…`, or `PATCH_API_KEY` set); `app_id` recommended for backend commands. An `app_key` alone fails this check: it is a public identifier, not a publish credential.
 2. **PatchSDK package added + linked** — referenced in your `.xcodeproj` *or* `Package.swift` **and** linked into your app target.
 3. **`Patch.configure(...)` + `Patch.shared.start()` in the `@main` App** — plus `import PatchSDK` (a `configure` with no `start()` never fetches updates).
 4. **Views are patch-ready** — every SwiftUI view `body` is `dynamic` and the dynamic-replacement thunks exist. If some aren't yet, this is just a ⚠ (not a blocker): `build` / `push` / `release` auto-run `prepare`, so it self-heals on your next release.
@@ -134,7 +137,7 @@ Patch doctor
 ============
 
 ✓ .Patch.yml present + valid
-    app_key set; app_id 3f2b…-uuid.
+    publish token set; app_id 3f2b…-uuid.
 ✓ PatchSDK package added to the project
     MyApp.xcodeproj references patch-swift and links the PatchSDK product.
 ✓ Patch.configure(...) + start() in the @main App entry
@@ -187,18 +190,24 @@ $ patchcli release --allow-native-drift --message "Restyle the paywall"
 
 ## Configuration: .Patch.yml
 
-`patchcli init` writes `.Patch.yml` at your project root — including the `app_key`/`app_id`/`workspace_id` it receives during browser registration. It's a small, fixed-shape YAML file. Environment variables override the API fields at call time; `app_id`/`workspace_id` are only needed for backend commands (`push`/`release`/`status`/`rollback`).
+`patchcli init` writes `.Patch.yml` at your project root — including the `app_key`/`publish_token`/`app_id`/`workspace_id` it receives during browser registration. It's a small, fixed-shape YAML file. Environment variables override the API fields at call time; `app_id`/`workspace_id` are only needed for backend commands (`push`/`release`/`status`/`rollback`).
+
+:::caution[`.Patch.yml` holds a secret — don't commit it]
+`publish_token` authorizes publishing code to your users. `app_key` is public
+and harmless, but the token is not. Add `.Patch.yml` to `.gitignore` and use
+`PATCH_API_KEY` in CI.
+:::
 
 ```yaml title=".Patch.yml"
 version: 1
-app_key: pak_live_…          # per-app API key (written by patchcli init; also in the dashboard)
+app_key: pak_live_…          # PUBLIC app identifier (also baked into your binary)
+publish_token: ppt_…         # SECRET publish credential — env PATCH_API_KEY overrides
 project: MyApp.xcodeproj
 target: MyApp
 
 app_id: 3f2b…-uuid         # required for push/release/status/rollback
 workspace_id: 9a01…-uuid
 api_base_url: https://api.patchrelease.com
-api_key: pak_live_…          # env PATCH_API_KEY overrides this
 
 exclude:                    # paths/globs to skip during analysis
   []
@@ -221,13 +230,14 @@ build:
 | Field | Type | Description |
 | --- | --- | --- |
 | version | int | Config schema version. Currently 1. |
-| app_key | string | Per-app key (pak_…) issued by Patch. Sent as X-API-Key. |
+| app_key | string | PUBLIC per-app identifier (pak_…). Ships inside your binary and rides the device check-in body. Authenticates nothing — it is not accepted as X-API-Key. |
+| publish_token | string? | SECRET publish credential (ppt_…), sent as X-API-Key. Written by `patchcli init`/`login`. Overridden by env PATCH_API_KEY. |
 | project | string | Detected project file (e.g. MyApp.xcodeproj or Package.swift). |
 | target | string | The app target whose sources Patch analyzes. |
 | app_id | uuid? | Backend app UUID. Required for push/release/status/rollback; optional for offline build/analyze. |
 | workspace_id | uuid? | Backend workspace UUID the app belongs to. |
 | api_base_url | url? | Backend base URL. Overridden by env PATCH_API_URL / the --base-url flag. |
-| api_key | string? | API key for backend calls. Overridden by env PATCH_API_KEY. |
+| api_key | string? | Legacy alias for publish_token, still read as a fallback. Overridden by env PATCH_API_KEY. An app key here is ignored. |
 | exclude | string[] | Paths/globs to skip during analysis. Empty list = analyze everything. |
 | bridges.* | bool | Toggle each host bridge: networking, userDefaults, notifications, navigation, keychain, dateLocale, logging, analytics, fileStorage, connectivity, biometrics, appReview, pasteboard, haptics, deviceInfo, shareSheet, openURL, location, calendar, contacts, appBadge, mailCompose, inAppPurchase, speechSynthesis, documentPicker, systemSound, photoPicker, secureRandom, appGroupStorage, screenControl, audioPlayback, audioRecording, motion, mapsDirections, networkImage, spotlightIndex, backgroundTask, fileDownload, accessibility, appShortcuts, handoff, watchConnectivity, nfcRead, processInfo, videoPlayback, speechRecognition, mediaInfo, imageFilter, pdfGenerate, qrGenerate, camera (51 in total). A disabled bridge means functions using it stay native. |
 | build.optimization | string | size (default) or speed. Overridden by --optimization. |

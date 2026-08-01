@@ -152,7 +152,10 @@ struct Doctor: ParsableCommand {
             ), nil)
         }
 
-        let key = CLISupport.resolveAPIKey(config: config)   // nil for empty / pak_REPLACE_ME placeholder
+        // nil when no PUBLISH credential resolves. An `app_key` does NOT count:
+        // it is a public device identifier baked into the app binary, and the
+        // backend rejects it on every write endpoint.
+        let key = CLISupport.resolveAPIKey(config: config)
         let hasAppId = !(config.appId ?? "").isEmpty
         let hasBundle = !(config.bundleId ?? "").isEmpty
 
@@ -161,8 +164,8 @@ struct Doctor: ParsableCommand {
                 id: "config",
                 title: ".Patch.yml present + valid",
                 status: .fail,
-                detail: "Found \(configURL.path) but `app_key` is not set (still the placeholder, empty, or missing).",
-                fix: "Add your `app_key: pak_…` (from the dashboard) to .Patch.yml, or re-run `patchcli init`."
+                detail: "Found \(configURL.path) but no publish token is set — `push`/`release` cannot authenticate.",
+                fix: "Run `patchcli login` to get one (or set PATCH_API_KEY in CI). Note `app_key` is not a publish credential: it ships inside your app binary."
             ), config)
         }
 
@@ -170,8 +173,8 @@ struct Doctor: ParsableCommand {
         // either, push/release can't reach the backend).
         if !hasAppId {
             let detail = hasBundle
-                ? "app_key set; app_id absent but `bundle_id` is present (resolved + cached on first push)."
-                : "app_key set; app_id absent (and no bundle_id to resolve it from)."
+                ? "publish token set; app_id absent but `bundle_id` is present (resolved + cached on first push)."
+                : "publish token set; app_id absent (and no bundle_id to resolve it from)."
             return (Check(
                 id: "config",
                 title: ".Patch.yml present + valid",
@@ -187,7 +190,11 @@ struct Doctor: ParsableCommand {
             id: "config",
             title: ".Patch.yml present + valid",
             status: .pass,
-            detail: "app_key set; app_id \(config.appId!).",
+            // The credential this check actually verified is the PUBLISH TOKEN
+            // (`key`, above) — `app_key` is a public identifier that authorizes
+            // nothing. Reporting "app_key set" here contradicted the fail/warn
+            // branches and re-taught the exact confusion the split removed.
+            detail: "publish token set; app_id \(config.appId!).",
             fix: nil
         ), config)
     }

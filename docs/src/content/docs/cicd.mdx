@@ -51,4 +51,6 @@ Prefer to catch it at PR time too? Run the same `patchcli analyze ./Sources --ch
 
 ## API keys & secrets
 
-CLI/SDK calls authenticate with a per-app API key (`X-API-Key: pak_…`). In CI, store it as a secret and pass it to `patchcli` via `PATCH_API_KEY` — that's all the release step needs. (Self-hosting Patch? Point the CLI at your own backend with `PATCH_API_URL`.)
+Publishing authenticates with a **publish token** (`X-API-Key: ppt_…`). Create one with `patchcli login`, store it as a repository secret, and pass it to `patchcli` via `PATCH_API_KEY` — that's all the release step needs. (Self-hosting Patch? Point the CLI at your own backend with `PATCH_API_URL`.)
+
+Do **not** use `app_key` (`pak_…`) here. It ships inside your app binary, so it is public by design and the backend rejects it for anything that changes what your users run. A token is scoped to one workspace, optionally pinned to a single app, and can be revoked without rebuilding or resubmitting anything.

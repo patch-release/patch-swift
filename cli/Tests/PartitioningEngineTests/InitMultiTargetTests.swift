@@ -206,7 +206,7 @@ final class InitMultiTargetTests: XCTestCase {
         try proc.run()
         let out = String(decoding: outPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         proc.waitUntilExit()
-        XCTAssertTrue(out.contains("API key:        NOT configured"),
+        XCTAssertTrue(out.contains("Publish token:  NOT configured"),
                       "the pak_REPLACE_ME placeholder must read as NOT configured; got:\n\(out)")
     }
 
@@ -338,7 +338,10 @@ final class InitMultiTargetTests: XCTestCase {
         proc.waitUntilExit()
         XCTAssertTrue(out.contains("Still needed before `patchcli push`:"),
                       "whoami must list what's missing; got:\n\(out)")
-        XCTAssertTrue(out.contains("app_key"), "must flag the missing app_key; got:\n\(out)")
+        XCTAssertTrue(out.contains("publish token"),
+                      "must flag the missing publish token; got:\n\(out)")
+        XCTAssertTrue(out.contains("patchcli login"),
+                      "must name the command that supplies it; got:\n\(out)")
         XCTAssertTrue(out.contains("app_id"), "must flag the missing app_id; got:\n\(out)")
         XCTAssertTrue(out.contains("workspace_id"), "must flag the missing workspace_id; got:\n\(out)")
     }
@@ -365,7 +368,8 @@ final class InitMultiTargetTests: XCTestCase {
             return out
         }
 
-        // Key + bundle_id (app_id/workspace_id resolvable on first push).
+        // An app_key ALONE is NOT ready: it is a public device identifier that
+        // ships inside the app binary, and the backend rejects it for pushes.
         try """
         version: 1
         app_key: pak_realkey
@@ -373,20 +377,36 @@ final class InitMultiTargetTests: XCTestCase {
         target: Solo
         bundle_id: com.acme.app
         """.write(to: dir.appendingPathComponent(".Patch.yml"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(try whoami().contains("Ready to push"),
-                      "key + bundle_id should read as ready")
+        let appKeyOnly = try whoami()
+        XCTAssertFalse(appKeyOnly.contains("Ready to push"),
+                       "an app_key alone must NOT read as ready; got:\n\(appKeyOnly)")
+        XCTAssertTrue(appKeyOnly.contains("publish token"),
+                      "it must say what is actually missing; got:\n\(appKeyOnly)")
 
-        // Key + explicit app_id + workspace_id.
+        // Publish token + bundle_id (app_id/workspace_id resolvable on first push).
         try """
         version: 1
         app_key: pak_realkey
+        publish_token: ppt_realtoken
+        project: Solo
+        target: Solo
+        bundle_id: com.acme.app
+        """.write(to: dir.appendingPathComponent(".Patch.yml"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(try whoami().contains("Ready to push"),
+                      "publish token + bundle_id should read as ready")
+
+        // Publish token + explicit app_id + workspace_id.
+        try """
+        version: 1
+        app_key: pak_realkey
+        publish_token: ppt_realtoken
         project: Solo
         target: Solo
         app_id: 11111111-1111-1111-1111-111111111111
         workspace_id: 22222222-2222-2222-2222-222222222222
         """.write(to: dir.appendingPathComponent(".Patch.yml"), atomically: true, encoding: .utf8)
         XCTAssertTrue(try whoami().contains("Ready to push"),
-                      "key + app_id + workspace_id should read as ready")
+                      "publish token + app_id + workspace_id should read as ready")
     }
 
     // MARK: - Resolve-timeout robustness (DX: init must never hang on a slow network)

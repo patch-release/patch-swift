@@ -27,12 +27,20 @@ struct Whoami: ParsableCommand {
         // Mask the key for display: show only the source. Mirror resolveAPIKey's
         // precedence AND its placeholder/empty filtering, so we never report a
         // source for the unset `pak_REPLACE_ME` placeholder (hasKey would be false).
+        // NOTE `app_key` is deliberately NOT a source here: it is a public device
+        // identifier that ships inside the app binary, and the backend rejects it
+        // as a publish credential. Reporting it as "configured" is what made the
+        // two credentials look interchangeable.
         let placeholder = CLISupport.placeholderAppKey
+        func usable(_ value: String?) -> Bool {
+            guard let value else { return false }
+            let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !t.isEmpty && t != placeholder && !t.hasPrefix(CLISupport.appKeyPrefix)
+        }
         let keySource: String = {
-            if let env = ProcessInfo.processInfo.environment["PATCH_API_KEY"],
-               !env.isEmpty, env != placeholder { return "env PATCH_API_KEY" }
-            if let k = config.apiKey, !k.isEmpty, k != placeholder { return ".Patch.yml api_key" }
-            if !config.appKey.isEmpty, config.appKey != placeholder { return ".Patch.yml app_key" }
+            if usable(ProcessInfo.processInfo.environment["PATCH_API_KEY"]) { return "env PATCH_API_KEY" }
+            if usable(config.publishToken) { return ".Patch.yml publish_token" }
+            if usable(config.apiKey) { return ".Patch.yml api_key" }
             return "(none)"
         }()
 
@@ -42,8 +50,9 @@ struct Whoami: ParsableCommand {
                 "project": config.project,
                 "target": config.target,
                 "baseURL": base,
-                "apiKeyConfigured": hasKey,
-                "apiKeySource": keySource,
+                "publishTokenConfigured": hasKey,
+                "publishTokenSource": keySource,
+                "appKeyConfigured": Init.isRealKey(config.appKey),
             ]
             if let id = config.appId { obj["appId"] = id }
             if let ws = config.workspaceId { obj["workspaceId"] = ws }
@@ -59,14 +68,15 @@ struct Whoami: ParsableCommand {
         print("App id:         \(config.appId ?? "(not set — add app_id: <uuid>)")")
         print("Workspace id:   \(config.workspaceId ?? "(not set — add workspace_id: <uuid>)")")
         print("Base URL:       \(base)")
-        print("API key:        \(hasKey ? "configured (\(keySource))" : "NOT configured")")
+        print("Publish token:  \(hasKey ? "configured (\(keySource))" : "NOT configured")")
+        print("App key:        \(Init.isRealKey(config.appKey) ? "set (public — ships in your app)" : "not set")")
 
         // Surface what a `push`/`release` still needs, so the developer learns the
         // gaps HERE (offline, one command) instead of hitting them one-at-a-time as
         // mid-flow errors. A pinned bundle_id can stand in for app_id/workspace_id
         // (they're resolved + cached on the first push), so it's not "missing".
         var missing: [String] = []
-        if !hasKey { missing.append("app_key (or api_key) — from the dashboard") }
+        if !hasKey { missing.append("a publish token — run `patchcli login`") }
         let haveBundle = !(config.bundleId ?? "").isEmpty
         if (config.appId ?? "").isEmpty && !haveBundle {
             missing.append("app_id (or bundle_id, to resolve it automatically)")

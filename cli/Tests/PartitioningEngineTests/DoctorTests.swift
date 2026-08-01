@@ -51,6 +51,7 @@ final class DoctorTests: XCTestCase {
         try write("""
         version: 1
         app_key: pak_abc123
+        publish_token: ppt_abc123
         project: App.xcodeproj
         target: App
         app_id: 11111111-2222-3333-4444-555555555555
@@ -73,7 +74,8 @@ final class DoctorTests: XCTestCase {
         let d = doctor()
         let (check, _) = d.checkConfig(configURL: configURL)
         XCTAssertEqual(check.status, .fail)
-        XCTAssertTrue(check.fix!.contains("app_key"))
+        XCTAssertTrue(check.fix!.contains("patchcli login"),
+                      "must point at the command that supplies a publish token")
     }
 
     func testConfigKeySetButNoAppIdIsWarn() throws {
@@ -82,6 +84,7 @@ final class DoctorTests: XCTestCase {
         try write("""
         version: 1
         app_key: pak_abc123
+        publish_token: ppt_abc123
         project: App.xcodeproj
         target: App
         """, to: configURL)
@@ -96,6 +99,7 @@ final class DoctorTests: XCTestCase {
         try write("""
         version: 1
         app_key: pak_abc123
+        publish_token: ppt_abc123
         project: App.xcodeproj
         target: App
         bundle_id: com.acme.app
@@ -104,6 +108,26 @@ final class DoctorTests: XCTestCase {
         let (check, _) = d.checkConfig(configURL: configURL)
         XCTAssertEqual(check.status, .warn)
         XCTAssertTrue(check.fix!.contains("bundle_id") || check.fix!.contains("resolve"))
+    }
+
+    /// An `app_key` alone is NOT a usable credential: it ships inside the app
+    /// binary (recoverable with `strings`) and the backend rejects it for
+    /// pushes. Doctor must fail, and must name `patchcli login` as the fix.
+    func testConfigWithOnlyAnAppKeyIsFail() throws {
+        let dir = try makeTempDir("cfg-appkey-only")
+        let configURL = dir.appendingPathComponent(".Patch.yml")
+        try write("""
+        version: 1
+        app_key: pak_abc123
+        project: App.xcodeproj
+        target: App
+        app_id: 11111111-2222-3333-4444-555555555555
+        """, to: configURL)
+        let d = doctor()
+        let (check, _) = d.checkConfig(configURL: configURL)
+        XCTAssertEqual(check.status, .fail,
+                       "an app_key is a public device identifier, not a publish credential")
+        XCTAssertTrue(check.fix!.contains("patchcli login"))
     }
 
     // MARK: - Check 2: PatchSDK package

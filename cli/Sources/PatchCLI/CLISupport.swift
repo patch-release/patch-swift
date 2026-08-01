@@ -50,17 +50,54 @@ enum CLISupport {
     /// opaque 401 instead of a clear "set your app_key first" message.
     static let placeholderAppKey = "pak_REPLACE_ME"
 
-    /// Resolve the API key: env `PATCH_API_KEY` > config `api_key` > config
-    /// `app_key`.
-    /// The `pak_REPLACE_ME` placeholder + empty strings are treated as "not set".
+    /// Prefix of the PUBLIC per-app device identifier (`app_key`). Values with
+    /// this prefix are never valid publish credentials — see `resolveAPIKey`.
+    static let appKeyPrefix = "pak_"
+
+    /// Prefix of the SECRET publish token — the credential that authorizes writes.
+    static let publishTokenPrefix = "ppt_"
+
+    /// The message shown when no publish credential is configured. Names the one
+    /// command that fixes it — an opaque 401 is what made `app_key` and the
+    /// publish token look interchangeable in the first place.
+    static let noPublishCredentialMessage = """
+        No publish token found — this command changes what your users run, so it \
+        needs one.
+
+        Run `patchcli login` to get one (opens your browser, takes ~10s), or set \
+        the PATCH_API_KEY env var in CI.
+
+        Note: `app_key` is NOT a publish credential. It is a public device \
+        identifier that ships inside your app binary, so the backend rejects it \
+        for pushes — otherwise anyone who downloaded your app could publish code \
+        to all of your users.
+        """
+
+    /// Resolve the PUBLISH credential: env `PATCH_API_KEY` > config
+    /// `publish_token` > config `api_key`.
+    ///
+    /// It deliberately does NOT fall back to `config.appKey`. That fallback was
+    /// the client half of a critical vulnerability: `app_key` is baked into the
+    /// developer's app source by `init`, so it ships in every IPA, and sending it
+    /// as `X-API-Key` meant a value extractable with `strings` could authorize a
+    /// push to every user of the app. The backend now rejects it too, so keeping
+    /// the fallback would only turn a clear error into an opaque 401.
+    ///
+    /// Empty strings and the `pak_REPLACE_ME` placeholder are treated as unset.
     static func resolveAPIKey(config: PatchConfig) -> String? {
         func clean(_ s: String?) -> String? {
-            guard let s, !s.isEmpty, s != placeholderAppKey else { return nil }
-            return s
+            guard let s else { return nil }
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != placeholderAppKey else { return nil }
+            // An app key in a publish-credential slot is never usable. Treat it as
+            // unset so the caller prints the actionable message below instead of
+            // sending a credential the backend is guaranteed to reject.
+            guard !trimmed.hasPrefix(appKeyPrefix) else { return nil }
+            return trimmed
         }
         return clean(ProcessInfo.processInfo.environment["PATCH_API_KEY"])
+            ?? clean(config.publishToken)
             ?? clean(config.apiKey)
-            ?? clean(config.appKey)
     }
 
     /// Build a real HTTP API client from config + env. Throws if no key resolves.
@@ -70,8 +107,7 @@ enum CLISupport {
             throw ValidationError("Invalid backend base URL: \(base)")
         }
         guard let key = resolveAPIKey(config: config) else {
-            throw ValidationError(
-                "No API key found. Set the PATCH_API_KEY env var, or `api_key:` / `app_key:` in .Patch.yml.")
+            throw ValidationError(noPublishCredentialMessage)
         }
         return HTTPPatchAPI(baseURL: url, apiKey: key)
     }

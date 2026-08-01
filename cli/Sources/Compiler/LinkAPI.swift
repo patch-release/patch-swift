@@ -42,12 +42,20 @@ public enum CliLinkPollResult: Sendable, Equatable {
         public let workspaceId: String
         public let name: String
         public let bundleId: String
+        /// PUBLIC device identifier — baked into `Patch.configure(appKey:)`, so it
+        /// ships inside the app binary. It authorizes nothing.
         public let appKey: String
+        /// SECRET publish credential (`ppt_…`) — authorizes push/release. Written
+        /// to `.Patch.yml`, NEVER into app source. Optional so the CLI still
+        /// works against a backend that predates the credential split (it then
+        /// reports the missing token rather than failing to decode).
+        public let publishToken: String?
 
         public init(id: String, workspaceId: String, name: String,
-                    bundleId: String, appKey: String) {
+                    bundleId: String, appKey: String, publishToken: String? = nil) {
             self.id = id; self.workspaceId = workspaceId; self.name = name
             self.bundleId = bundleId; self.appKey = appKey
+            self.publishToken = publishToken
         }
     }
 }
@@ -127,7 +135,10 @@ public struct HTTPCliLinkAPI: CliLinkAPI {
                     workspaceId: ws,
                     name: (app["name"] as? String) ?? "",
                     bundleId: (app["bundle_id"] as? String) ?? "",
-                    appKey: key
+                    appKey: key,
+                    publishToken: (app["publish_token"] as? String).flatMap {
+                        $0.isEmpty ? nil : $0
+                    }
                 ),
                 reusedExisting: (o["reused_existing"] as? Bool) ?? false
             )

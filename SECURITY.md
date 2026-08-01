@@ -79,24 +79,31 @@ backport to older releases; please upgrade to receive them.
 
 ## Known limitations
 
-Two things below are architectural gaps rather than bugs. They are stated here so
-nobody has to discover them by reading source, and so a report about them isn't
+The item below is an architectural gap rather than a bug. It is stated here so
+nobody has to discover it by reading source, and so a report about it isn't
 mistaken for a novel finding.
 
-### The app key is also a publish credential
+### The app key is no longer a publish credential (fixed)
 
-`patchcli init` bakes your `app_key` into your app's source, so it ships inside
-every build and can be recovered from an IPA with `strings`. The same value is
-accepted by the CLI as an API key (`CLISupport.resolveAPIKey` falls back to
-`app_key`) and by the backend's CLI auth.
+This section previously documented a serious flaw: `app_key` (`pak_…`) is baked
+into your app by `patchcli init`, so it ships in every IPA and is recoverable
+with `strings` — and it was *also* accepted as the CLI's `X-API-Key`. Anyone who
+downloaded a published app could push arbitrary WebAssembly to every user of it.
 
-**Consequence:** anyone who extracts that string from a published app can push a
-module to that app. Treat the app key as a secret you cannot actually keep, and
-if you are shipping something where that matters, set a distinct `PATCH_API_KEY`
-in CI and do not rely on the baked key for publishing.
+**This is fixed.** The two roles are now separate credentials:
 
-Splitting a read-only client key from a publish credential is the correct fix and
-is not implemented.
+* **`app_key` (`pak_…`)** — a *public* app identifier. It rides the body of the
+  unauthenticated device endpoints (`POST /modules/check`, `POST /events`) and
+  authorizes nothing. It is rejected as `X-API-Key`.
+* **`publish_token` (`ppt_…`)** — the write credential. Never enters your app;
+  created by `patchcli login` or the dashboard; scoped to a workspace and
+  optionally pinned to one app; revocable; stored server-side as a SHA-256
+  digest only.
+
+**If you used Patch before this change:** your `app_key` needs no rotation — it
+is now correctly public. Run `patchcli login` once per project to get a publish
+token. If your app key was ever used as a *publish* credential in a place it
+could have leaked, audit your release history for pushes you didn't make.
 
 ### Modules are not code-signed
 

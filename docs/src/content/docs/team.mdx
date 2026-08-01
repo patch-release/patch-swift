@@ -56,7 +56,13 @@ These workspace-scoped routes back the dashboard's **Team** page. You must be a 
 Owners and admins invite by email from the dashboard's **Team** page. An invite creates a *pending* member; when that person signs in with the same email, their account links automatically and they take the assigned role. Removing a member revokes access immediately (you can't remove the last owner). Trying to invite a second member on the free Hobby plan returns `402 Payment Required` with an upgrade message — see [Plans & billing](/billing/).
 
 <Aside type="note" title="Auth model">
-The CLI and SDK authenticate with the per-app API key (`X-API-Key: pak_…`). The dashboard uses Firebase Auth (Google + email/password): the web app obtains an ID token and sends it as `Authorization: Bearer <idToken>`. The two surfaces are independent — humans use the dashboard, machines use the app key.
+Three credentials, deliberately separate:
+
+- **Publish token** (`X-API-Key: ppt_…`) — the CLI's write credential. Scoped to a workspace, optionally pinned to one app, revocable. Created by `patchcli login` or from the dashboard.
+- **App key** (`pak_…`) — a *public* app identifier. It ships inside your binary and rides the request body when a device checks for an update. It authenticates nothing.
+- **Firebase ID token** (`Authorization: Bearer …`) — the dashboard, for humans.
+
+Revoking a publish token cuts off publishing immediately and needs no app release, because the credential was never in the app.
 </Aside>
 
 ## The dashboard

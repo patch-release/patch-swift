@@ -3,6 +3,9 @@ title: Quick Start
 description: Install the CLI and ship your first patch.
 sidebar:
   order: 1
+sources:
+  - cli/Sources/PatchCLI/Init.swift
+  - cli/Sources/PatchCLI/Setup.swift
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -28,7 +31,7 @@ $ patchcli setup
 From your app's directory, run `patchcli init`. One command does the whole setup, skipping anything already done (it's safe to re-run):
 
 1. **Detects** the Xcode project, build target, bundle id, and app icon.
-2. **Registers the app** — your browser opens `app.patchrelease.com/cli-connect`; sign in (or create a free account) and click **Register app**. The CLI receives the app key automatically within seconds and writes `app_key`/`app_id`/`workspace_id` into `.Patch.yml` — no copying credentials.
+2. **Registers the app** — your browser opens `app.patchrelease.com/cli-connect`; sign in (or create a free account) and click **Register app**. The CLI receives the app key **and a publish token** automatically within seconds and writes `app_key`/`publish_token`/`app_id`/`workspace_id` into `.Patch.yml` — no copying credentials.
 3. **Adds the PatchSDK Swift package** to the Xcode project (exactly what Xcode's "Add Package Dependencies…" would write; a backup is kept at `project.pbxproj.patch-backup`), then resolves packages.
 4. **Proposes a diff** inserting the Patch startup code into your `@main` App struct — applied only after you confirm (`y/n`).
 5. **Makes your SwiftUI views patchable** — marks each view `body` patchable and generates the dynamic-replacement thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with **no `PatchView` wrapping and no changes to your views**. This runs **automatically on every `patchcli release` / `push` / `build`**, so views you add later are picked up with no extra step. (You can still run `patchcli prepare --check` in CI to verify, or `--no-prepare` to opt out.)
@@ -38,7 +41,7 @@ $ patchcli init
 Patch init
 ==========
 Detected Xcode project:   MyApp.xcodeproj  (target MyApp · com.example.myapp)
-Opening browser to register the app…       ✓ app key received
+Opening browser to register the app…       ✓ app key + publish token received
 Wrote:                    /Users/you/MyApp/.Patch.yml
 Adding PatchSDK package…                   ✓ resolved (backup: project.pbxproj.patch-backup)
 Proposed change to MyApp.swift — apply? (y/n) y   ✓ startup code inserted
@@ -65,11 +68,17 @@ struct MyApp: App {
 }
 ```
 
-:::caution[Your app key ships inside your app]
-`app_key` is compiled into your binary, so it can be recovered from a published
-build. It is also accepted as a publish credential today, which means anyone who
-extracts it can push a module to this app. For CI, set a separate
-`PATCH_API_KEY` rather than relying on the baked key. See
+:::note[Two credentials, and only one of them is secret]
+`app_key` (`pak_…`) is compiled into your binary, so anyone with a published
+build can extract it. That's fine — it identifies your app when a device asks
+for an update, and it authorizes nothing.
+
+Publishing uses a **separate** credential, the publish token (`ppt_…`), which
+never goes near your app. `patchcli init` stores it in `.Patch.yml`; `patchcli
+login` gets you another. In CI, put a publish token in `PATCH_API_KEY`.
+
+Sending an app key where a publish token belongs is refused with a message
+telling you to run `patchcli login`. See
 [SECURITY.md](https://github.com/patch-release/patch-swift/blob/main/SECURITY.md).
 :::
 
@@ -130,4 +139,5 @@ Everything `patchcli init` automates can be done by hand — and `init` prints t
 1. **Add the SDK package** — in Xcode, **File → Add Package Dependencies…** with `https://github.com/patch-release/patch-swift` (product `PatchSDK`, from `1.0.0`). See [SDK reference](/sdk/) for the `Package.swift` form.
 2. **Create the app** in the [dashboard](https://app.patchrelease.com) to get its `pak_…` app key.
 3. **Paste the key** — set `app_key` (and optionally `app_id`/`workspace_id`) in [`.Patch.yml`](/cli/#configuration-patchyml).
+4. **Get a publish token** — run `patchcli login`, or create one in the dashboard and set `publish_token` in `.Patch.yml`. Without it, `push`/`release` cannot authenticate.
 4. **Add the startup code** — the `import PatchSDK` + `Patch.configure` / `Patch.shared.start()` snippet from step 2 above, in your `@main` App struct's `init()`.
