@@ -66,7 +66,7 @@ public struct ProjectFingerprinter {
     ///   • the Apple/Xcode toolchain → "Apple Swift version 6.1.2 (swiftlang-6.1.2.x...)"
     ///   • the swift.org/swiftly toolchain → "Swift version 6.1.2 (swift-6.1.2-RELEASE)"
     /// Because the WASM-compile shell puts swiftly first on PATH while the host-build shell
-    /// puts /usr/bin first (per CLAUDE.md), registering the fingerprint in one shell and
+    /// puts /usr/bin first (see CONTRIBUTING.md), registering the fingerprint in one shell and
     /// pushing in the other flipped `swiftCompilerVersion` and tripped a spurious MISMATCH
     /// on an otherwise-identical machine. Keying on the bare `MAJOR.MINOR[.PATCH]` makes the
     /// component PATH-order-independent while STILL churning on a real compiler-version bump

@@ -159,6 +159,12 @@ let package = Package(
                 .product(name: "SystemPackage", package: "swift-system"),
                 // libbz2 shim for diff decompression.
                 "CBZ2"
+            ],
+            resources: [
+                // Apple requires a privacy manifest from third-party SDKs. It is
+                // only shipped if declared here — an undeclared file is silently
+                // left out of the bundle and consumers get ITMS-91053 on upload.
+                .copy("PrivacyInfo.xcprivacy")
             ]
         ),
 

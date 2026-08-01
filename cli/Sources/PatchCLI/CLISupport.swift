@@ -51,7 +51,7 @@ enum CLISupport {
     static let placeholderAppKey = "pak_REPLACE_ME"
 
     /// Resolve the API key: env `PATCH_API_KEY` > config `api_key` > config
-    /// `app_key`. (The backend dev key is `dev-secret-api-key-change-in-prod`.)
+    /// `app_key`.
     /// The `pak_REPLACE_ME` placeholder + empty strings are treated as "not set".
     static func resolveAPIKey(config: PatchConfig) -> String? {
         func clean(_ s: String?) -> String? {

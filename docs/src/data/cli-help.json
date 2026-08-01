@@ -1,0 +1,232 @@
+{
+  "generatedBy": "scripts/gen-cli-help.mjs",
+  "cli": "patchcli",
+  "version": "1.7.0",
+  "commandCount": 20,
+  "commands": [
+    {
+      "name": "patchcli",
+      "path": [],
+      "overview": "OTA code updates for native Swift iOS apps — auto-partitioning engine.",
+      "usage": "patchcli <subcommand>",
+      "subcommands": [
+        "setup",
+        "init",
+        "prepare",
+        "doctor",
+        "build",
+        "push",
+        "release",
+        "status",
+        "rollback",
+        "fingerprint",
+        "channels",
+        "whoami",
+        "analyze",
+        "compile",
+        "overlay"
+      ],
+      "help": "OVERVIEW: OTA code updates for native Swift iOS apps — auto-partitioning engine.\n\nUSAGE: patchcli <subcommand>\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information.\n\nSUBCOMMANDS:\n  setup                   Install the Swift→WebAssembly toolchain `patchcli\n                          release` needs (one-time).\n  init                    Set up this app for Patch: detect the project,\n                          register the app, add the SDK, insert startup code.\n  prepare                 Make this app's SwiftUI views patchable out of the\n                          box (dynamic-replacement thunks).\n  doctor                  Preflight: check (read-only) that this project is set\n                          up for OTA patches, with a fix hint per gap.\n  build                   Parse → classify → split → compile to a real .wasm\n                          module. Track F1.\n  push                    Upload the built .wasm to the backend (gated on\n                          fingerprint compatibility). Track F2.\n  release                 Release a patch to your users: build the .wasm then\n                          upload it in one shot (fingerprint-gated).\n  status                  Show the current deployment: version, rollout %,\n                          adoption, failure rate.\n  rollback                Roll back to the previous module (or --to <version>).\n  fingerprint             Compute / diff / register the native-shell\n                          fingerprint.\n  channels                List deployment channels for the configured app (+\n                          active module per channel).\n  whoami                  Print the configured app_id / workspace_id / base URL\n                          / channel from .Patch.yml.\n  analyze                 Analysis only, for CI. Reports OTA coverage; exits 1\n                          if the native shell changed.\n  compile                 Generate _wasm.swift for OTA-eligible code and\n                          compile it to a real .wasm module.\n  overlay                 Author + package an OTA resource overlay (colors /\n                          strings / images).\n\n  See 'patchcli help <subcommand>' for detailed help."
+    },
+    {
+      "name": "setup",
+      "path": [
+        "setup"
+      ],
+      "overview": "Install the Swift→WebAssembly toolchain `patchcli release` needs (one-time).",
+      "usage": "patchcli setup [--force]",
+      "subcommands": [],
+      "help": "OVERVIEW: Install the Swift→WebAssembly toolchain `patchcli release` needs\n(one-time).\n\nUSAGE: patchcli setup [--force]\n\nOPTIONS:\n  --force                 Reinstall even if a toolchain is already detected.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "init",
+      "path": [
+        "init"
+      ],
+      "overview": "Set up this app for Patch: detect the project, register the app, add the SDK, insert startup code.",
+      "usage": "patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code]",
+      "subcommands": [],
+      "help": "OVERVIEW: Set up this app for Patch: detect the project, register the app, add\nthe SDK, insert startup code.\n\nUSAGE: patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code]\n\nARGUMENTS:\n  <path>                  Project directory (default: current directory).\n\nOPTIONS:\n  --target <target>       Build target. Optional: inferred from Package.swift /\n                          .xcodeproj / source layout when omitted.\n  --base-url <base-url>   Backend base URL to record in .Patch.yml (root or\n                          .../api/v1 — both work). Default: the live production\n                          API.\n  --force                 Overwrite an existing .Patch.yml and start fresh.\n  --manual                Skip all automation (browser registration, package\n                          add, code insertion); just write .Patch.yml and print\n                          the manual steps.\n  --no-open               Don't auto-open the browser for registration (the URL\n                          is printed instead).\n  --yes                   Apply proposed source-code changes without asking.\n  --skip-package          Skip adding the PatchSDK Swift package to the Xcode\n                          project.\n  --skip-code             Skip inserting the Patch startup code into App.swift.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "prepare",
+      "path": [
+        "prepare"
+      ],
+      "overview": "Make this app's SwiftUI views patchable out of the box (dynamic-replacement thunks).",
+      "usage": "patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet]",
+      "subcommands": [],
+      "help": "OVERVIEW: Make this app's SwiftUI views patchable out of the box\n(dynamic-replacement thunks).\n\nUSAGE: patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet]\n\nARGUMENTS:\n  <path>                  Project directory (default: the directory of\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --yes                   Apply source changes without asking.\n  --thunks-only           Only regenerate the thunk file; never edit existing\n                          sources. (For a build phase.)\n  --check                 Report views that aren't patch-ready (missing\n                          `dynamic`) and exit non-zero if any. (For CI /\n                          pre-push.)\n  --quiet                 Less output.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "doctor",
+      "path": [
+        "doctor"
+      ],
+      "overview": "Preflight: check (read-only) that this project is set up for OTA patches, with a fix hint per gap.",
+      "usage": "patchcli doctor [<path>] [--base-url <base-url>] [--offline] [--json]",
+      "subcommands": [],
+      "help": "OVERVIEW: Preflight: check (read-only) that this project is set up for OTA\npatches, with a fix hint per gap.\n\nUSAGE: patchcli doctor [<path>] [--base-url <base-url>] [--offline] [--json]\n\nARGUMENTS:\n  <path>                  Project directory (default: the directory of\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override (for the fingerprint check).\n  --offline               Skip every network call (the fingerprint-registration\n                          check degrades to a warning).\n  --json                  Output JSON (machine-readable).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "build",
+      "path": [
+        "build"
+      ],
+      "overview": "Parse → classify → split → compile to a real .wasm module. Track F1.",
+      "usage": "patchcli build [<path>] [--verbose] [--dry-run] [--report <report>] [--optimization <optimization>] [--output <output>] [--no-prepare]",
+      "subcommands": [],
+      "help": "OVERVIEW: Parse → classify → split → compile to a real .wasm module. Track F1.\n\nUSAGE: patchcli build [<path>] [--verbose] [--dry-run] [--report <report>] [--optimization <optimization>] [--output <output>] [--no-prepare]\n\nARGUMENTS:\n  <path>                  Source directory to build (default: project root from\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --verbose               Verbose: print generated sources + per-function table.\n  --dry-run               Generate sources + coverage report but skip the WASM\n                          compile.\n  --report <report>       Write the coverage report (JSON) to this path.\n  --optimization <optimization>\n                          Optimization: size | speed.\n  --output <output>       Output .wasm path (default: .Patch/build/module.wasm).\n  --no-prepare            Skip the automatic `prepare` step (don't add\n                          `dynamic`/thunks to new views before building).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "push",
+      "path": [
+        "push"
+      ],
+      "overview": "Upload the built .wasm to the backend (gated on fingerprint compatibility). Track F2.",
+      "usage": "patchcli push <options>",
+      "subcommands": [],
+      "help": "OVERVIEW: Upload the built .wasm to the backend (gated on fingerprint\ncompatibility). Track F2.\n\nUSAGE: patchcli push <options>\n\nOPTIONS:\n  --channel <channel>     Release channel (default: production). (default:\n                          production)\n  --rollout <rollout>     Rollout percentage 0-100 (default: 100). (default:\n                          100)\n  --message <message>     Release notes / changelog message.\n  --version <version>     Module version (default: timestamp-derived).\n  --module <module>       Path to the .wasm to push (default:\n                          .Patch/build/module.wasm).\n  --base-url <base-url>   Backend base URL override.\n  --mandatory             Mark the update as mandatory.\n  --min-app-version <min-app-version>\n                          Only deliver to app versions ≥ this (e.g. 2.1.0).\n                          Absent = all versions.\n  --max-app-version <max-app-version>\n                          Only deliver to app versions ≤ this (e.g. 3.0.0).\n                          Absent = no upper bound.\n  --min-os-version <min-os-version>\n                          Only deliver to OS versions ≥ this (e.g. 16.0).\n                          Absent = all OS versions.\n  --target-cohort <target-cohort>\n                          Restrict the rollout to a named cohort/segment.\n                          Absent = all devices.\n  --dry-run               Run all checks + show what would be sent, but do not\n                          upload.\n  --force                 Upload even if the native-shell fingerprint gate\n                          reports a MISMATCH (dangerous; skips the\n                          compatibility refusal).\n  --allow-native-drift    Ship the patch when the native shell drifted ONLY in\n                          ways the OTA patch can't see (a package / Info.plist\n                          / entitlements / deployment-target change, with no\n                          native-source change). Refused if any change is\n                          patch-affecting. The non-interactive form of the\n                          native-drift prompt.\n  --no-prepare            Skip the automatic `prepare` step (don't add\n                          `dynamic`/thunks to new views before pushing).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "release",
+      "path": [
+        "release"
+      ],
+      "overview": "Release a patch to your users: build the .wasm then upload it in one shot (fingerprint-gated).",
+      "usage": "patchcli release <options>",
+      "subcommands": [],
+      "help": "OVERVIEW: Release a patch to your users: build the .wasm then upload it in one\nshot (fingerprint-gated).\n\nUSAGE: patchcli release <options>\n\nOPTIONS:\n  --optimization <optimization>\n                          Optimization: size | speed.\n  --output <output>       Output .wasm path (default: .Patch/build/module.wasm).\n  --channel <channel>     Release channel (default: production). (default:\n                          production)\n  --rollout <rollout>     Rollout percentage 0-100 (default: 100). (default:\n                          100)\n  -m, --message <message> Release notes / changelog message.\n  --version <version>     Module version (default: timestamp-derived).\n  --base-url <base-url>   Backend base URL override.\n  --mandatory             Mark the update as mandatory.\n  --min-app-version <min-app-version>\n                          Only deliver to app versions ≥ this (e.g. 2.1.0).\n                          Absent = all versions.\n  --max-app-version <max-app-version>\n                          Only deliver to app versions ≤ this (e.g. 3.0.0).\n                          Absent = no upper bound.\n  --min-os-version <min-os-version>\n                          Only deliver to OS versions ≥ this (e.g. 16.0).\n                          Absent = all OS versions.\n  --target-cohort <target-cohort>\n                          Restrict the rollout to a named cohort/segment.\n                          Absent = all devices.\n  --dry-run               Build, then run all push checks + show what would be\n                          sent, but do not upload.\n  --force                 Upload even if the native-shell fingerprint gate\n                          reports a MISMATCH (dangerous; skips the\n                          compatibility refusal).\n  --allow-native-drift    Ship the patch when the native shell drifted ONLY in\n                          ways the OTA patch can't see (a package / Info.plist\n                          / entitlements / deployment-target change, with no\n                          native-source change). Refused if any change is\n                          patch-affecting. The non-interactive form of the\n                          native-drift prompt.\n  --allow-empty           Release even if the module has no real OTA coverage\n                          (only a version probe / a degenerate near-empty\n                          module). Off by default.\n  --no-prepare            Skip the automatic `prepare` step (don't add\n                          `dynamic`/thunks to new views before building).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "status",
+      "path": [
+        "status"
+      ],
+      "overview": "Show the current deployment: version, rollout %, adoption, failure rate.",
+      "usage": "patchcli status [--channel <channel>] [--base-url <base-url>] [--json]",
+      "subcommands": [],
+      "help": "OVERVIEW: Show the current deployment: version, rollout %, adoption, failure\nrate.\n\nUSAGE: patchcli status [--channel <channel>] [--base-url <base-url>] [--json]\n\nOPTIONS:\n  --channel <channel>     Release channel (default: production). (default:\n                          production)\n  --base-url <base-url>   Backend base URL override.\n  --json                  Output JSON.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "rollback",
+      "path": [
+        "rollback"
+      ],
+      "overview": "Roll back to the previous module (or --to <version>).",
+      "usage": "patchcli rollback [--channel <channel>] [--to <to>] [--base-url <base-url>] [--dry-run] [--json]",
+      "subcommands": [],
+      "help": "OVERVIEW: Roll back to the previous module (or --to <version>).\n\nUSAGE: patchcli rollback [--channel <channel>] [--to <to>] [--base-url <base-url>] [--dry-run] [--json]\n\nOPTIONS:\n  --channel <channel>     Release channel (default: production). (default:\n                          production)\n  --to <to>               Roll back to a specific version (rolls back\n                          everything newer first).\n  --base-url <base-url>   Backend base URL override.\n  --dry-run               Show what would be rolled back without calling the\n                          backend.\n  --json                  Output JSON.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "fingerprint",
+      "path": [
+        "fingerprint"
+      ],
+      "overview": "Compute / diff / register the native-shell fingerprint.",
+      "usage": "patchcli fingerprint <subcommand>",
+      "subcommands": [
+        "fingerprint diff",
+        "fingerprint register"
+      ],
+      "help": "OVERVIEW: Compute / diff / register the native-shell fingerprint.\n\nUSAGE: patchcli fingerprint <subcommand>\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information.\n\nSUBCOMMANDS:\n  diff (default)          Show what changed in the native shell since the last\n                          registered fingerprint.\n  register                Register the current native-shell fingerprint with\n                          the backend.\n\n  See 'patchcli help fingerprint <subcommand>' for detailed help."
+    },
+    {
+      "name": "fingerprint diff",
+      "path": [
+        "fingerprint",
+        "diff"
+      ],
+      "overview": "Show what changed in the native shell since the last registered fingerprint.",
+      "usage": "patchcli fingerprint diff [--base-url <base-url>] [--json] [--explain] [--no-build]",
+      "subcommands": [],
+      "help": "OVERVIEW: Show what changed in the native shell since the last registered\nfingerprint.\n\nUSAGE: patchcli fingerprint diff [--base-url <base-url>] [--json] [--explain] [--no-build]\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override.\n  --json                  Output JSON.\n  --explain               Also list the native (not OTA-patchable) functions in\n                          the shell and WHY each is native.\n  --no-build              Skip the build-confirmation compile; compute the\n                          STATIC estimate instead (faster, but the result is an\n                          estimate — the authoritative check runs at\n                          build/release).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "fingerprint register",
+      "path": [
+        "fingerprint",
+        "register"
+      ],
+      "overview": "Register the current native-shell fingerprint with the backend.",
+      "usage": "patchcli fingerprint register [--base-url <base-url>] [--app-version <app-version>] [--dry-run] [--json] [--no-prepare]",
+      "subcommands": [],
+      "help": "OVERVIEW: Register the current native-shell fingerprint with the backend.\n\nUSAGE: patchcli fingerprint register [--base-url <base-url>] [--app-version <app-version>] [--dry-run] [--json] [--no-prepare]\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override.\n  --app-version <app-version>\n                          App version string to record (e.g. 2.0.0).\n  --dry-run               Compute + print the fingerprint but do not call the\n                          backend.\n  --json                  Output JSON.\n  --no-prepare            Skip the automatic prepare step before hashing\n                          (advanced — risks a post-upgrade fingerprint mismatch\n                          on the next release).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "channels",
+      "path": [
+        "channels"
+      ],
+      "overview": "List deployment channels for the configured app (+ active module per channel).",
+      "usage": "patchcli channels [--base-url <base-url>] [--json]",
+      "subcommands": [],
+      "help": "OVERVIEW: List deployment channels for the configured app (+ active module per\nchannel).\n\nUSAGE: patchcli channels [--base-url <base-url>] [--json]\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override.\n  --json                  Output JSON.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "whoami",
+      "path": [
+        "whoami"
+      ],
+      "overview": "Print the configured app_id / workspace_id / base URL / channel from .Patch.yml.",
+      "usage": "patchcli whoami [--base-url <base-url>] [--json]",
+      "subcommands": [],
+      "help": "OVERVIEW: Print the configured app_id / workspace_id / base URL / channel from\n.Patch.yml.\n\nUSAGE: patchcli whoami [--base-url <base-url>] [--json]\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override (to preview what would be\n                          used).\n  --json                  Output JSON.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "analyze",
+      "path": [
+        "analyze"
+      ],
+      "overview": "Analysis only, for CI. Reports OTA coverage; exits 1 if the native shell changed.",
+      "usage": "patchcli analyze <path> [--format <format>] [--verbose] [--fast-no-split-check] [--split-diagnostics] [--check-fingerprint] [--fingerprint-baseline <fingerprint-baseline>] [--base-url <base-url>]",
+      "subcommands": [],
+      "help": "OVERVIEW: Analysis only, for CI. Reports OTA coverage; exits 1 if the native\nshell changed.\n\nUSAGE: patchcli analyze <path> [--format <format>] [--verbose] [--fast-no-split-check] [--split-diagnostics] [--check-fingerprint] [--fingerprint-baseline <fingerprint-baseline>] [--base-url <base-url>]\n\nARGUMENTS:\n  <path>                  Path to a directory (or a single .swift file) to\n                          analyze.\n\nOPTIONS:\n  --format <format>       Output format: text (default) or json. (default: text)\n  --verbose               Print the per-function classification table.\n  --fast-no-split-check   Skip the realized-split pass (faster; reports only\n                          the optimistic mixed-inclusive OTA%).\n  --split-diagnostics     Print the per-strategy realized-split outcome\n                          breakdown (A / sub-expr / guard / unrealized reasons).\n  --check-fingerprint     CI gate: exit 1 if the native-shell fingerprint\n                          differs from the baseline (.Patch.yml + backend, or\n                          --fingerprint-baseline).\n  --fingerprint-baseline <fingerprint-baseline>\n                          Expected native-shell fingerprint to compare against\n                          (CI; avoids a backend call).\n  --base-url <base-url>   Backend base URL override (for --check-fingerprint).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "compile",
+      "path": [
+        "compile"
+      ],
+      "overview": "Generate _wasm.swift for OTA-eligible code and compile it to a real .wasm module.",
+      "usage": "patchcli compile <path> [--output <output>] [--swift-sdk <swift-sdk>] [--exports <exports>]",
+      "subcommands": [],
+      "help": "OVERVIEW: Generate _wasm.swift for OTA-eligible code and compile it to a real\n.wasm module.\n\nUSAGE: patchcli compile <path> [--output <output>] [--swift-sdk <swift-sdk>] [--exports <exports>]\n\nARGUMENTS:\n  <path>                  Path to a directory of generated _wasm.swift files\n                          (or a single .swift file) to compile.\n\nOPTIONS:\n  --output <output>       Output .wasm path. (default: patch.wasm)\n  --swift-sdk <swift-sdk> Swift SDK identifier for the WASM target. (default:\n                          swift-6.3.2-RELEASE_wasm)\n  --exports <exports>     Comma-separated symbols to export from the module.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "overlay",
+      "path": [
+        "overlay"
+      ],
+      "overview": "Author + package an OTA resource overlay (colors / strings / images).",
+      "usage": "patchcli overlay <subcommand>",
+      "subcommands": [
+        "overlay package",
+        "overlay inspect"
+      ],
+      "help": "OVERVIEW: Author + package an OTA resource overlay (colors / strings / images).\n\nUSAGE: patchcli overlay <subcommand>\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information.\n\nSUBCOMMANDS:\n  package                 Bundle an overlay spec (JSON) into the built module\n                          artifact.\n  inspect                 Print the resource overlay carried by a packaged\n                          module artifact.\n\n  See 'patchcli help overlay <subcommand>' for detailed help."
+    },
+    {
+      "name": "overlay package",
+      "path": [
+        "overlay",
+        "package"
+      ],
+      "overview": "Bundle an overlay spec (JSON) into the built module artifact.",
+      "usage": "patchcli overlay package <spec> [--module <module>] [--output <output>]",
+      "subcommands": [],
+      "help": "OVERVIEW: Bundle an overlay spec (JSON) into the built module artifact.\n\nUSAGE: patchcli overlay package <spec> [--module <module>] [--output <output>]\n\nARGUMENTS:\n  <spec>                  Path to the overlay spec JSON (colors / strings /\n                          images).\n\nOPTIONS:\n  --module <module>       Module to wrap (default: .Patch/build/module.wasm).\n  --output <output>       Where to write the wrapped artifact (default:\n                          overwrite the module in place).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "overlay inspect",
+      "path": [
+        "overlay",
+        "inspect"
+      ],
+      "overview": "Print the resource overlay carried by a packaged module artifact.",
+      "usage": "patchcli overlay inspect <artifact>",
+      "subcommands": [],
+      "help": "OVERVIEW: Print the resource overlay carried by a packaged module artifact.\n\nUSAGE: patchcli overlay inspect <artifact>\n\nARGUMENTS:\n  <artifact>              Path to the artifact (a POVR-wrapped module, or any\n                          module).\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information."
+    }
+  ]
+}

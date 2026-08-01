@@ -47,10 +47,12 @@ see [Running it yourself](https://docs.patchrelease.com/self-hosting/).
 
 ## Install
 
+Requires **iOS 16+ / macOS 14+** and Swift 6.
+
 **SDK** — Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/patch-release/patch-swift", from: "1.5.0")
+.package(url: "https://github.com/patch-release/patch-swift", from: "1.7.0")
 ```
 
 **CLI** — Homebrew:
@@ -65,9 +67,14 @@ Or build it from source (see below).
 
 This is the part worth reading before you invest any time.
 
-Across a **24-app public benchmark** — our own apps and well-known open-source
-ones — **74.6% of SwiftUI view bodies** lower to WebAssembly and ship over the
-air (82.5% measured per element). Per app it ranges from **45% to 98%**.
+Across 24 real apps, **74.6% of SwiftUI view bodies** lower to WebAssembly and
+ship over the air. Per app it ranges from **45% to 98%**.
+
+Sixteen of those are open-source apps you can measure yourself, pinned to exact
+commits — **70.8%** across that verifiable subset. The other eight are our own
+apps (89.1%), included because we dogfood but not published. Both numbers come
+from the same committed census; we quote the combined figure and show you the
+split rather than only the flattering half.
 
 Three limits are permanent:
 
@@ -93,9 +100,14 @@ Full detail: [what Patch can & can't update](https://docs.patchrelease.com/cover
 They're generated from a committed census, not typed by hand:
 
 ```bash
-./corpus/fetch.sh                       # 20 open-source apps, pinned commits
+./corpus/fetch.sh                       # the open-source corpus, at pinned commits
 ./tools/swiftui-corpus-coverage/run.sh  # the census
 ```
+
+That prints **70.8%** — the open-source subset, because our own apps aren't in
+the clone. It's the same census that produces the 74.6% combined figure; the
+first-party rows are simply skipped as missing. If you get a different number
+for the open-source apps, that's a bug and we'd like to hear about it.
 
 ## Is this allowed by Apple?
 
@@ -143,7 +155,7 @@ Issues and pull requests welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 Two things make a bug report immediately actionable:
 
 ```bash
-patchcli doctor --report   # versions, toolchain, fingerprint state — no source
+patchcli doctor --json   # versions, toolchain, fingerprint state — no source
 ```
 
 and, if a view didn't patch when you expected it to, the per-view demote

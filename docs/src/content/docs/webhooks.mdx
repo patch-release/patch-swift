@@ -24,7 +24,7 @@ Pick any combination of the four event types per endpoint:
 
 In the console, open **Settings → Webhooks**, paste an HTTPS URL, tick the events you want, and save. Patch reveals a one-time **signing secret** at creation — copy it then; it's the key you use to verify deliveries. Each row has a **Test** button that sends a sample `ping` delivery so you can confirm connectivity and your signature check before relying on it, and a **Delete** that stops delivery immediately.
 
-The same operations are available over the API (owner/admin, scoped to the workspace): `POST` / `GET` / `DELETE /api/v1/workspaces/{workspace_id}/webhooks` and `POST …/{webhook_id}/test`.
+The same operations are available over the API (owner/admin, scoped to the workspace): `POST` / `GET /api/v1/workspaces/{workspace_id}/webhooks`, `DELETE …/webhooks/{webhook_id}`, and `POST …/webhooks/{webhook_id}/test`.
 
 ```bash title="Create a webhook"
 # register an endpoint subscribed to releases + error spikes

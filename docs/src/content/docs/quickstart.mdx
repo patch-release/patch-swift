@@ -65,6 +65,15 @@ struct MyApp: App {
 }
 ```
 
+:::caution[Your app key ships inside your app]
+`app_key` is compiled into your binary, so it can be recovered from a published
+build. It is also accepted as a publish credential today, which means anyone who
+extracts it can push a module to this app. For CI, set a separate
+`PATCH_API_KEY` rather than relying on the baked key. See
+[SECURITY.md](https://github.com/patch-release/patch-swift/blob/main/SECURITY.md).
+:::
+
+
 Anything `patchcli init` can't do safely — no bundle id detected, an unusual project layout, a UIKit `AppDelegate` app, a declined confirmation, or no network — falls back to printing exact manual steps. See [Manual setup](#manual-setup-the-fallback) for the same steps, and the [CLI reference](/cli/) for flags like `--manual`, `--no-open`, and `--yes`.
 
 ## 3 · Write a patchable Swift function
@@ -79,7 +88,9 @@ enum Pricing {
   static func orderTotal(items: [LineItem], promo: String?) -> Decimal {
     var subtotal = items.reduce(Decimal(0)) { $0 + $1.price * Decimal($1.qty) }
     if promo == "LAUNCH20" { subtotal *= 0.80 }
-    return subtotal.rounded(2, .bankers)
+    var total = Decimal()
+    NSDecimalRound(&total, &subtotal, 2, .bankers)
+    return total
   }
 }
 ```

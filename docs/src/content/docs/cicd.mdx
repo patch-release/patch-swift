@@ -7,7 +7,7 @@ sidebar:
 
 For production, run `patchcli release` from CI so deploys are reproducible, auditable, and free of long-lived credentials on developer machines. The shape of a pipeline:
 
-1. **Analyze (gate):** on pull requests, run `patchcli analyze --check-fingerprint`. If the native shell changed, fail the job — that change must ship through the App Store.
+1. **Analyze (gate):** on pull requests, run `patchcli analyze ./Sources --check-fingerprint`. If the native shell changed, fail the job — that change must ship through the App Store.
 2. **Release:** on merge to `main`, run `patchcli release` with the swift.org WASM SDK to build the module and push it behind the fingerprint check, then start a staged rollout.
 
 ## GitHub Actions
@@ -38,7 +38,7 @@ jobs:
       - name: Release OTA if compatible
         run: |
           if patchcli analyze ./Sources --check-fingerprint; then
-            patchcli release ./Sources --channel production --rollout 10 \
+            patchcli release --channel production --rollout 10 \
               --message "OTA: ${{ github.event.head_commit.message }}"
           else
             echo "Native shell changed — skipping OTA release (ship via the App Store)."

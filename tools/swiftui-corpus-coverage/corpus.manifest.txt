@@ -26,25 +26,25 @@
 ~/patch-corpus/private-apps/AppK
 
 # === OSS apps with real SwiftUI views (pure-SwiftUI first, then mixed) ===
-~/patch-corpus/repos/clean-architecture-swiftui
-~/patch-corpus/repos/MovieSwiftUI
-~/patch-corpus/repos/ACHNBrowserUI
-~/patch-corpus/repos/isowords
-~/patch-corpus/repos/IceCubesApp
-~/patch-corpus/repos/SwiftHub
-~/patch-corpus/repos/kiwix-apple
-~/patch-corpus/repos/exyte-Chat
-~/patch-corpus/repos/GoCycling
-~/patch-corpus/repos/Pulse
-~/patch-corpus/repos/WWDC
-~/patch-corpus/repos/NetNewsWire
-~/patch-corpus/repos/Gifski
-~/patch-corpus/repos/WhatsNewKit
-~/patch-corpus/repos/wire-ios
-~/patch-corpus/repos/firefox-ios
-~/patch-corpus/repos/wikipedia-ios
+corpus/repos/clean-architecture-swiftui
+corpus/repos/MovieSwiftUI
+corpus/repos/ACHNBrowserUI
+corpus/repos/isowords
+corpus/repos/IceCubesApp
+corpus/repos/SwiftHub
+corpus/repos/kiwix-apple
+corpus/repos/exyte-Chat
+corpus/repos/GoCycling
+corpus/repos/Pulse
+corpus/repos/WWDC
+corpus/repos/NetNewsWire
+corpus/repos/Gifski
+corpus/repos/WhatsNewKit
+corpus/repos/wire-ios
+corpus/repos/firefox-ios
+corpus/repos/wikipedia-ios
 
 # Single-SwiftUI-view weather/chat samples (mostly UIKit — small SwiftUI surface).
-~/patch-corpus/repos/SwiftWeather
-~/patch-corpus/repos/SwiftLanguageWeather
-~/patch-corpus/repos/tinode-ios
+corpus/repos/SwiftWeather
+corpus/repos/SwiftLanguageWeather
+corpus/repos/tinode-ios

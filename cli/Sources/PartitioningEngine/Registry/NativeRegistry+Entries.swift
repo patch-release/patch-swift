@@ -322,7 +322,7 @@ extension NativeRegistry {
         ])
 
         // MARK: Read-only file system / Bundle — bridged (breakthrough #8).
-        // The host-ABI bridge family (docs/ENGINEERING.md §2 breakthrough #8,
+        // The host-ABI bridge family (the host-bridge design,
         // 16/16 executing-WASM checks) proved the read-only FileManager surface
         // (fileExists / contents / attributesOfItem .size) and Bundle Info/resource
         // lookups are safe synchronous value-bridges. The FusionRewriter rewrites

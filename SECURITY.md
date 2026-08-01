@@ -41,7 +41,12 @@ will work to it or explain why we cannot.
 Because Patch delivers code to devices over the air, we are particularly
 interested in reports concerning:
 
-* The **update protocol** — module authenticity, integrity and confidentiality
+* Module *integrity* (SHA-256 verification of downloaded modules).
+  Note: modules are **not** code-signed today — integrity is verified
+  against a hash delivered by the same response as the module URL, so it
+  proves transport integrity, not authorship. Asymmetric module signing is
+  not yet implemented; reports about that gap are welcome but it is a known
+  limitation rather than a vulnerability.
   in transit or at rest; anything that lets a party deliver, alter, suppress or
   read a patch it should not be able to.
 * The **on-device runtime** — sandbox escape from a WebAssembly guest, memory
@@ -71,3 +76,36 @@ demonstrate the issue.
 
 Security fixes land on the latest released version of each package. We do not
 backport to older releases; please upgrade to receive them.
+
+## Known limitations
+
+Two things below are architectural gaps rather than bugs. They are stated here so
+nobody has to discover them by reading source, and so a report about them isn't
+mistaken for a novel finding.
+
+### The app key is also a publish credential
+
+`patchcli init` bakes your `app_key` into your app's source, so it ships inside
+every build and can be recovered from an IPA with `strings`. The same value is
+accepted by the CLI as an API key (`CLISupport.resolveAPIKey` falls back to
+`app_key`) and by the backend's CLI auth.
+
+**Consequence:** anyone who extracts that string from a published app can push a
+module to that app. Treat the app key as a secret you cannot actually keep, and
+if you are shipping something where that matters, set a distinct `PATCH_API_KEY`
+in CI and do not rely on the baked key for publishing.
+
+Splitting a read-only client key from a publish credential is the correct fix and
+is not implemented.
+
+### Modules are not code-signed
+
+A downloaded module is verified by SHA-256 against a hash delivered in the *same
+response* as the module URL. That proves the bytes arrived intact; it does not
+prove who produced them. There is no asymmetric signature and no developer-held
+key, so the update channel is only as trustworthy as the control plane serving
+it. Notably, webhook payloads *are* HMAC-signed — the low-stakes channel is
+authenticated and the code-execution channel is not.
+
+If you self-host, this is on you: anything that can answer the check endpoint can
+execute code in your users' apps.

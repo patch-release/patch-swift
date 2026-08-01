@@ -4,7 +4,7 @@ Thanks for your interest. This repository holds two Swift packages:
 
 | Directory | What it is | License |
 |---|---|---|
-| `sdk/` | **PatchSDK** — the on-device runtime: WebAssembly execution, value marshalling, update lifecycle, host bridges, the SwiftUI/UIKit renderers. | MIT (`LICENSE`) |
+| `Sources/`, `Tests/` | **PatchSDK** — the on-device runtime: WebAssembly execution, value marshalling, update lifecycle, host bridges, the SwiftUI/UIKit renderers. | MIT (`LICENSE`) |
 | `cli/` | The **engine** and the `patchcli` tool — project partitioning, the Swift→WebAssembly compile pipeline, SwiftUI/UIKit lowering, fingerprinting. | Apache-2.0 (`cli/LICENSE`) |
 
 They are independent SwiftPM packages with no cross-import. A change that
@@ -157,14 +157,14 @@ git rebase --signoff main
 Commits without a sign-off cannot be merged.
 
 By contributing, you agree your contribution is licensed under the license of
-the directory it lands in — MIT for `sdk/`, Apache-2.0 for `cli/`.
+the directory it lands in — MIT for the SDK at the repository root, Apache-2.0 for `cli/`.
 
 ### License headers
 
 New Swift source files carry an SPDX identifier on the first line:
 
 ```swift
-// SPDX-License-Identifier: MIT          // for files under sdk/
+// SPDX-License-Identifier: MIT          // for the SDK at the repo root
 // SPDX-License-Identifier: Apache-2.0   // for files under cli/
 ```
 

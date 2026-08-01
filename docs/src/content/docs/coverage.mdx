@@ -43,9 +43,11 @@ ship over the air.
 </div>
 
 Per-app results vary widely, so the average matters less than the spread. The
-twenty named apps are public repositories measured at pinned commits, so you can
-verify those yourself; the eight `first-party-app-*` rows are our own apps,
-included because dogfooding is the point but not named:
+{coverage.apps.filter((a) => !a.name.startsWith('first-party-app-')).length} named
+apps are public repositories measured at pinned commits, so you can verify those
+yourself; the {coverage.apps.filter((a) => a.name.startsWith('first-party-app-')).length}{' '}
+`first-party-app-*` rows are our own apps, included because dogfooding is the
+point but not named:
 
 <table>
   <thead>

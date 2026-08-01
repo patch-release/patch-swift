@@ -11,7 +11,7 @@ Your native shell changed since the last App Store release (a native `.swift` fi
 
 ## My function stayed native — why isn't it updatable?
 
-It touches a must-stay-native API (low-level platform rendering, the file system, threads, the ObjC runtime, unsafe pointers, or device/OS APIs) somewhere it depends on, or it relies on a bridge you disabled in `.Patch.yml`. Logic and `async`/`await` code *is* updatable, and SwiftUI view code is updatable when SwiftUI coverage is enabled — run `patchcli build --verbose` (or `patchcli analyze --verbose`) to see the per-function classification and the reason each eligible function wasn't emitted. Factoring the pure logic out of a UI/IO function usually moves it into the WASM bucket.
+It touches a must-stay-native API (low-level platform rendering, the file system, threads, the ObjC runtime, unsafe pointers, or device/OS APIs) somewhere it depends on, or it relies on a bridge you disabled in `.Patch.yml`. Logic and `async`/`await` code *is* updatable, and SwiftUI view code is updatable when SwiftUI coverage is enabled — run `patchcli build --verbose` (or `patchcli analyze ./Sources --verbose`) to see the per-function classification and the reason each eligible function wasn't emitted. Factoring the pure logic out of a UI/IO function usually moves it into the WASM bucket.
 
 ## Can I OTA-update *this* particular view or feature?
 

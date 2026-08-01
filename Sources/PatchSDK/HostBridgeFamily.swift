@@ -8,7 +8,7 @@ import WasmKit
 // Read-only synchronous native leaves the FusionRewriter rewrites a developer's
 // real source onto, so a 95%-pure function whose ONLY native touch is one of
 // these compiles + ships OTA instead of demoting. Proven end-to-end in executing
-// WASM (docs/ENGINEERING.md §2 breakthrough #8, experiments/host-bridges/,
+// WASM (the host-bridge design, the host-bridge prototypes,
 // 16/16 checks). Every function here is registered under the flat-ABI namespace
 // **"patch_host"** (the namespace the CLI's generated C header imports), with the
 // exact `(ptr,len)` + packed-i64 marshalling the existing `BridgeContext` uses.

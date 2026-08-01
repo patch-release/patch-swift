@@ -25,7 +25,6 @@ description = "Obvious placeholders"
 regexes = [
   '''pak_replace_me''',
   '''pak_abc123''',
-  '''pak_live_a3f8''',
   '''pak_…''',
   '''pak_test''',
 ]

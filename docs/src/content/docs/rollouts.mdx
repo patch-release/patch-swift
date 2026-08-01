@@ -5,6 +5,8 @@ sidebar:
   order: 8
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 Every release carries a rollout percentage. Ship to a slice of devices first, watch the failure rate, then widen to 100%. Because bucketing is deterministic, a device that's "in" the rollout stays in as you raise the percentage — adoption only ever grows, devices never flip-flop.
 
 ## Release a staged rollout with `--rollout`
@@ -12,11 +14,26 @@ Every release carries a rollout percentage. Ship to a slice of devices first, wa
 ```bash title="~/MyApp — zsh"
 # start at 10% of eligible devices on production
 $ patchcli release --rollout 10 --message "New pricing engine"
-
-# widen the SAME release — devices already in the bucket stay in
-$ patchcli release --rollout 50
-$ patchcli release --rollout 100
 ```
+
+Then **widen that same release in place** — from the console (**Rollouts** → the
+release → raise the percentage), or over the API:
+
+```bash title="Widen the existing release"
+$ curl -X PATCH https://api.patchrelease.com/api/v1/modules/$MODULE_ID/rollout \
+    -H "X-API-Key: $PATCH_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"rollout_pct": 50}'
+```
+
+<Aside type="caution" title="Don't re-run `release` to widen">
+`patchcli release` builds and uploads a **new** module version every time, so
+running it again at a higher percentage does not widen the release you already
+started — it publishes a second one. Because the bucket is derived from the
+device id **and the version** (below), that re-buckets every device and the
+"already in, stays in" guarantee no longer holds across the two releases. Raise
+the percentage on the existing module instead.
+</Aside>
 
 ## Deterministic bucketing
 

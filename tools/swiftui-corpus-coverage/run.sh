@@ -54,7 +54,20 @@ if [[ "$HAS_TARGETS" == "0" ]]; then
   MANIFEST="${COVERAGE_MANIFEST:-$HERE/corpus.manifest.txt}"
   if [[ -f "$MANIFEST" ]]; then
     echo ">> using default corpus manifest: $MANIFEST" >&2
-    ARGS+=(--manifest "$MANIFEST")
+    # Manifest entries are written relative to the REPO ROOT (e.g.
+    # corpus/repos/Foo) so the recipe in the README works from a fresh clone.
+    # This script cd's into its own directory, so resolve them against the root
+    # into a temp manifest rather than making the checked-in one machine-specific.
+    REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+    RESOLVED="$(mktemp -t patch-corpus-manifest)"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        ''|\#*)      printf '%s\n' "$line" >> "$RESOLVED" ;;
+        /*|~*)       printf '%s\n' "$line" >> "$RESOLVED" ;;
+        *)           printf '%s/%s\n' "$REPO_ROOT" "$line" >> "$RESOLVED" ;;
+      esac
+    done < "$MANIFEST"
+    ARGS+=(--manifest "$RESOLVED")
   else
     echo "!! no app dirs given and no manifest at $MANIFEST" >&2
     echo "   pass app dirs explicitly, or create the manifest (see README)." >&2

@@ -10,7 +10,7 @@ import WasmKit
 // decodes JSON + runs value-type logic — runs in WASM by rewriting the
 // `URLSession.shared.data(from:)` / `.data(for:)` leaf (CLI FusionRewriter) onto
 // the async imports this file serves. Proven end-to-end in executing WASM
-// (docs/ENGINEERING.md §2 breakthrough #6, 6/6 incl a live HTTPS fetch).
+// (the host-bridge design, 6/6 incl a live HTTPS fetch).
 //
 // ## The async-suspend contract (matches the engine's emitted shims + the C ABI)
 //   guest import  `patch_host.http_get(urlPtr,urlLen,token) -> ()`           [SUSPEND]

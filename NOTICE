@@ -6,7 +6,7 @@ This product includes software developed at Patch Release Ltd.
 The Patch partitioning and Swift-to-WebAssembly engine (`cli/`, including the
 `patchcli` command-line tool) is licensed under the Apache License, Version 2.0.
 This NOTICE file is provided under section 4(d) of that License. The on-device
-SDK (`sdk/`) is licensed under the MIT License; see LICENSE.
+SDK (the package at the repository root) is licensed under the MIT License; see LICENSE.
 
 
 ================================================================================
@@ -51,30 +51,7 @@ compiled binary. The notices are reproduced regardless.
     Licensed under Apache License v2.0 with Runtime Library Exception.
     Used by: WasmKit's system-call layer (transitive).
 
-  swift-nio
-    https://github.com/apple/swift-nio
-    Copyright (c) 2017-2026 Apple Inc. and the Swift project authors
-    Licensed under Apache License v2.0 with Runtime Library Exception.
-    swift-nio's own NOTICE.txt records that it contains "sha1.c"/"sha1.h" from
-    FreeBSD, Copyright (C) 1995, 1996, 1997 and 1998 WIDE Project, and further
-    derived works; see that file in the swift-nio distribution.
-
-  swift-atomics
-    https://github.com/apple/swift-atomics
-    Copyright (c) 2020-2026 Apple Inc. and the Swift project authors
-    Licensed under Apache License v2.0 with Runtime Library Exception.
-
-  swift-collections
-    https://github.com/apple/swift-collections
-    Copyright (c) 2021-2026 Apple Inc. and the Swift project authors
-    Licensed under Apache License v2.0 with Runtime Library Exception.
-
-  swift-log
-    https://github.com/apple/swift-log
-    Copyright (c) 2018-2026 Apple Inc. and the Swift project authors
-    Licensed under Apache License v2.0 with Runtime Library Exception.
-
-
+  
 --------------------------------------------------------------------------------
 MIT License
 --------------------------------------------------------------------------------
@@ -109,7 +86,7 @@ MIT License
 System libraries
 --------------------------------------------------------------------------------
 
-The SDK links `libbz2` via a system-library shim (`sdk/Sources/CBZ2`) to inflate
+The SDK links `libbz2` via a system-library shim (`Sources/CBZ2`) to inflate
 BSDIFF40 patch payloads. `libbz2` ships with the macOS and iOS SDKs and is not
 vendored, redistributed or modified by this project. bzip2 is Copyright (C)
 1996-2019 Julian R Seward, under the BSD-style bzip2 license.
@@ -120,7 +97,7 @@ Verifying this list
 --------------------------------------------------------------------------------
 
 The authoritative dependency set is `cli/Package.resolved` and
-`sdk/Package.resolved`. After changing a dependency, re-resolve and update this
+`Package.resolved`. After changing a dependency, re-resolve and update this
 file. Each dependency's own LICENSE file is fetched into `.build/checkouts/`.
 
 --------------------------------------------------------------------------------

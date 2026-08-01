@@ -231,7 +231,7 @@ public struct FusionRewriter {
     // MARK: - Breakthrough #8 host-ABI bridge FAMILY (module "patch_host")
     //
     // Read-only synchronous native leaves proven end-to-end in executing WASM
-    // (docs/ENGINEERING.md §2 breakthrough #8, experiments/host-bridges/,
+    // (the host-bridge design, the host-bridge prototypes,
     // 16/16 checks). Each entry's `(cImportModule, cImportName, signature)` matches
     // a live `imports.host("patch_host", name, …)` registration in
     // `sdk/Sources/PatchSDK/Bridges.swift` (FileManagerBridge / BundleBridge /
@@ -883,7 +883,7 @@ public struct FusionRewriter {
     //
     // The dominant real-app async shape: a function that is `async` ONLY because it
     // `await`s `URLSession`, then decodes JSON + runs value-type logic. Proven
-    // end-to-end in executing WASM (docs/ENGINEERING.md §2 breakthrough #6, 6/6
+    // end-to-end in executing WASM (the host-bridge design, 6/6
     // incl a live HTTPS fetch). This is the async sibling of the #8 family: the host
     // import returns `()` (the guest SUSPENDS via a continuation), the host performs
     // the REAL `URLSession` fetch on its own run loop, and resumes the guest by
