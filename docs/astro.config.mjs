@@ -9,9 +9,14 @@ export default defineConfig({
       description:
         'Over-the-air code updates for native Swift iOS apps. Compile changed Swift to WebAssembly and ship it without App Store review.',
       logo: { src: './src/assets/patch-icon.png', replacesTitle: false },
-      social: {
-        github: 'https://github.com/patch-release/patch-swift',
-      },
+      // Array form since Starlight 0.33 — the old object shape is a build error.
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/patch-release/patch-swift',
+        },
+      ],
       editLink: {
         baseUrl: 'https://github.com/patch-release/patch-swift/edit/main/docs/',
       },

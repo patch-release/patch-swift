@@ -18,8 +18,11 @@
     "check:cli-help": "node scripts/gen-cli-help.mjs --check"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.30.0",
-    "astro": "^5.1.0",
-    "sharp": "^0.33.5"
+    "@astrojs/starlight": "^0.41.6",
+    "astro": "^7.1.6",
+    "sharp": "^0.35.3"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }
