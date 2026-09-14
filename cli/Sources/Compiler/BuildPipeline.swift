@@ -1264,7 +1264,12 @@ public struct BuildPipeline {
                           rejectedExports: rejectedExports.map { (name: $0.0, reason: $0.1) })
         }
 
-        let candidates = wasmSources.map {
+        PATCH_SWIFTUI_ONLY=1 skips the default (function-thunk)
+        // module entirely. Its generated JSON-ABI wrappers force T2 (~11.7 MB); with
+        // no primary module the SwiftUI guest is promoted to be `module.wasm`.
+        let swiftUIOnly = ProcessInfo.processInfo.environment["PATCH_SWIFTUI_ONLY"] != nil
+        if swiftUIOnly { FileHandle.standardError.write(Data("PATCH_SWIFTUI_ONLY: skipping the default function module; shipping the SwiftUI guest only\n".utf8)) }
+        let candidates = swiftUIOnly ? [] : wasmSources.map {
             WasmConvergence.Candidate(functionID: $0.lastPathComponent, sourceFile: $0,
                                       exports: exportsBySource[$0] ?? [])
         }
@@ -1375,7 +1380,7 @@ public struct BuildPipeline {
         // Lowers a declarative UIKit cell's construction to a guest `uikit_configure`
         // export + ships it. Gated by the SAME `swiftui` toggle (the UIKit path is part
         // of the same view-patching feature) and skipped without the toolchain.
-        if swiftUIOn, !(outcome.toolchainUnavailable) {
+        if ProcessInfo.processInfo.environment["PATCH_UIKIT"] != "0", swiftUIOn, !(outcome.toolchainUnavailable) {
             if let uk = try runUIKitLowering(
                 sourceDir: sourceDir, buildDir: buildDir,
                 compiler: compiler, defaultModule: moduleURL) {
@@ -1599,6 +1604,16 @@ public struct BuildPipeline {
     /// module is reported but not promoted — never a regression, never a broken module).
     /// Copies (not moves) so the original guest path stays valid for reporting.
     @discardableResult
+    /read a packaging tier from an env var (`t0` | `t1` | `t2`).
+    static func envTier(_ name: String) -> PackagingTier? {
+        switch ProcessInfo.processInfo.environment[name]?.lowercased() {
+        case "t0", "t0embedded", "embedded": return .t0Embedded
+        case "t1", "t1stdlib", "stdlib": return .t1Stdlib
+        case "t2", "t2foundation", "foundation": return .t2Foundation
+        default: return nil
+        }
+    }
+
     static func promoteGuestToPrimary(guest: URL, primary: URL) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: guest.path),
@@ -2019,8 +2034,16 @@ public struct BuildPipeline {
                 WasmConvergence.Candidate(functionID: $0.lastPathComponent, sourceFile: $0,
                                           exports: exportsBySource[$0] ?? [])
             }
+            the guest IR is Foundation-free by design (see
+            // SwiftUIGuestEmitter.irResourceNames), so start it at T0 and let the
+            // convergence loop escalate on a real compile failure. Upstream pins T2,
+            // which is the ~11.7 MB floor. PATCH_SWIFTUI_START_TIER / _MAX_TIER
+            // (t0|t1|t2) override per run for measurement.
+            let guestStart = Self.envTier("PATCH_SWIFTUI_START_TIER") ?? .t0Embedded
+            let guestMax = Self.envTier("PATCH_SWIFTUI_MAX_TIER")
+            log("guest module convergence: start=\(guestStart.rawValue) max=\(guestMax?.rawValue ?? "none")")
             let outcome = try convergence.converge(candidates, outputModule: swModuleURL,
-                                                   startTier: .t2Foundation)
+                                                   startTier: guestStart, maxTier: guestMax)
             lastOutcome = outcome
             // SHIP iff a module compiled AND it actually carries view exports. A subtle
             // trap: the convergence loop is FILE-level — on a wrapper compile error it
@@ -2175,8 +2198,11 @@ public struct BuildPipeline {
             WasmConvergence.Candidate(functionID: $0.lastPathComponent, sourceFile: $0,
                                       exports: exportsBySource[$0] ?? [])
         }
+        same as the SwiftUI guest — start embedded, escalate on failure.
         let outcome = try WasmConvergence(compiler: compiler).converge(
-            candidates, outputModule: ukModuleURL, startTier: .t2Foundation)
+            candidates, outputModule: ukModuleURL,
+            startTier: Self.envTier("PATCH_UIKIT_START_TIER") ?? .t0Embedded,
+            maxTier: Self.envTier("PATCH_UIKIT_MAX_TIER"))
         let shippedExports = outcome.compiled.flatMap { $0.exports }
             .filter { $0 != "patch_malloc" && $0 != "patch_free" }
         guard outcome.moduleURL != nil, !shippedExports.isEmpty else {
