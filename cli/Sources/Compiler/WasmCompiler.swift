@@ -177,6 +177,13 @@ public struct SwiftWasmCompiler: WasmCompiling {
             try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
             try file.contents.write(to: dst, atomically: true, encoding: .utf8)
         }
+        embedded Swift on wasm leaves `_swift_stdlib_strtod_clocale`
+        // (what `Double(String)` lowers to) to the platform; the full runtime defines
+        // it at T1/T2, so the shim is written ONLY at T0 to avoid a duplicate symbol.
+        if tier == .t0Embedded {
+            let shim = work.appendingPathComponent("Sources/\(CHeaderBridge.cTargetName)/swift_stdlib_shims.c")
+            try Self.embeddedStdlibShimSource.write(to: shim, atomically: true, encoding: .utf8)
+        }
 
         try packageManifest(exports: exportedSymbols).write(
             to: work.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
@@ -427,6 +434,18 @@ public struct SwiftWasmCompiler: WasmCompiling {
     /// treats nil as "no guard verdict" — the existing toolchain error handling wins).
     /// Minimal hand-rolled parser: WASM is `\0asm` + version, then sections; the
     /// import section (id 2) is a vec of (module: name, field: name, desc).
+    /C shim for the one Swift runtime hook embedded wasm needs
+    /// from the platform. wasi-libc's `strtod` is the C-locale parse.
+    static let embeddedStdlibShimSource = """
+    #include <stdlib.h>
+    const char *_swift_stdlib_strtod_clocale(const char *nptr, double *outResult) {
+        char *end = NULL;
+        *outResult = strtod(nptr, &end);
+        return end;
+    }
+
+    """
+
     static func unsatisfiableEnvImports(_ bytes: [UInt8]) -> [String]? {
         guard bytes.count > 8,
               bytes[0] == 0x00, bytes[1] == 0x61, bytes[2] == 0x73, bytes[3] == 0x6d else { return nil }
@@ -510,6 +529,7 @@ public struct SwiftWasmCompiler: WasmCompiling {
     private func realSourceManifest(moduleName: String, exports: [String], fusion: Bool = false) -> String {
         var flags = ["-Xclang-linker", "-mexec-model=reactor", "-Xlinker", "--allow-undefined"]
         for symbol in exports { flags += ["-Xlinker", "--export-if-defined=\(symbol)"] }
+        if tier == .t0Embedded && !fusion { flags += ["-Xlinker", "-lswiftUnicodeDataTables"] }
         let flagList = flags.map { "\"\($0)\"" }.joined(separator: ", ")
         // BREAKTHROUGH #9 — T0 EMBEDDED real-source compile. When the tier is
         // `.t0Embedded`, build the real-module target with the Embedded feature +
@@ -537,6 +557,11 @@ public struct SwiftWasmCompiler: WasmCompiling {
                   swiftSettings: [
                     .swiftLanguageMode(.v5),
                     .enableExperimentalFeature("Embedded"),
+                    the guest IR guards its Codable conformances
+                    // behind `#if !FRONTIER_EMBEDDED` (see Conformance.swift) but
+                    // upstream never defined it, so every T0 compile failed on
+                    // `Codable is unavailable in embedded Swift`.
+                    .define("FRONTIER_EMBEDDED"),
                     .unsafeFlags(["-wmo"])
                   ],
                   linkerSettings: [ .unsafeFlags([\(flagList)]) ]
@@ -608,6 +633,11 @@ public struct SwiftWasmCompiler: WasmCompiling {
         for symbol in exports {
             flags += ["-Xlinker", "--export-if-defined=\(symbol)"]
         }
+        embedded Swift's String comparison/normalization calls
+        // `_swift_stdlib_getNormData` & co, which live in the SDK's static
+        // `libswiftUnicodeDataTables.a`. Without it `--allow-undefined` leaves them
+        // as `env.*` imports the SDK runtime cannot satisfy (instantiate fails).
+        if tier == .t0Embedded { flags += ["-Xlinker", "-lswiftUnicodeDataTables"] }
         let flagList = flags.map { "\"\($0)\"" }.joined(separator: ", ")
 
         if tier == .t0Embedded {
@@ -627,6 +657,11 @@ public struct SwiftWasmCompiler: WasmCompiling {
                   dependencies: ["\(CHeaderBridge.cTargetName)"],
                   swiftSettings: [
                     .enableExperimentalFeature("Embedded"),
+                    the guest IR guards its Codable conformances
+                    // behind `#if !FRONTIER_EMBEDDED` (see Conformance.swift) but
+                    // upstream never defined it, so every T0 compile failed on
+                    // `Codable is unavailable in embedded Swift`.
+                    .define("FRONTIER_EMBEDDED"),
                     .unsafeFlags(["-wmo"])
                   ],
                   linkerSettings: [ .unsafeFlags([\(flagList)]) ]
