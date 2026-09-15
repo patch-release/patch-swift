@@ -41,7 +41,7 @@ public struct ShareSheetBridge: Bridge {
             // main actor with `Task { @MainActor in … }` (fire-and-forget — the share
             // sheet has no result the guest awaits). The Sendable `String?` inputs are
             // captured; the UIKit work runs main-actor-isolated. A Task is used rather
-            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15 floor.
             Task { @MainActor in
                 ShareSheetBridge.presentActivityController(text: text, url: url)
             }

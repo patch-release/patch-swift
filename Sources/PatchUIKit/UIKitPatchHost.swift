@@ -345,7 +345,9 @@ extension Patch {
     /// The view tag the patched root carries so a reuse re-install removes exactly it.
     static let patchedRootTag = 0x50_4154_4348   // "PATCH" — distinctive, app-unlikely
 
-    static func clearPatchedRoot(in contentView: UIView) {
+    /// Main-actor-isolated: it reads `subviews`/`tag` and calls `removeFromSuperview()`.
+    /// Every caller (`installPatchedCell` and its decline paths) is already `@MainActor`.
+    @MainActor static func clearPatchedRoot(in contentView: UIView) {
         for sub in contentView.subviews where sub.tag == patchedRootTag {
             sub.removeFromSuperview()
         }

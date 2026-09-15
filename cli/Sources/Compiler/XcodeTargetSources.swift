@@ -19,10 +19,10 @@ import Foundation
 
 public enum XcodeTargetSources {
 
-    /// PatchSDK's minimum iOS deployment target (`sdk/Package.swift` `.iOS(.v16)`). An app target
+    /// PatchSDK's minimum iOS deployment target (`sdk/Package.swift` `.iOS(.v15)`). An app target
     /// below it cannot `import PatchSDK` — `compiling for iOS 14.0, but module 'PatchSDK' has a
-    /// minimum deployment target of iOS 16.0` in every generated thunk file.
-    public static let sdkMinimumIOS = "16.0"
+    /// minimum deployment target of iOS 15.0` in every generated thunk file.
+    public static let sdkMinimumIOS = "15.0"
 
     /// The LOWEST `IPHONEOS_DEPLOYMENT_TARGET` the native target `target` builds with — the
     /// target's own build configurations, falling back to the project-level configurations for any

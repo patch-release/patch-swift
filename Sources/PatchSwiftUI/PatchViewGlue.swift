@@ -29,12 +29,18 @@ public enum PatchViewError: Error, CustomStringConvertible {
     /// `patchView` refuses to render it rather than reach the destructive array-revert
     /// path (bug #71).
     case notThunkSafe(String)
+    /// The tree uses renderer constructs the running OS can't render faithfully (e.g.
+    /// `NavigationStack` on iOS 15 — see `PatchRenderCapabilities`). `patchView` shows the
+    /// `errorView` instead of a silently approximated tree. Carries the OS + construct names.
+    case unsupportedOnThisOS(os: String, features: [String])
     public var description: String {
         switch self {
         case .schema(let m): return m.description
         case .decode(let e): return "ViewNode decode failed: \(e)"
         case .runtime(let e): return "module call failed: \(e)"
         case .notThunkSafe(let export): return "view export \(export) is not thunk-safe (refused)"
+        case .unsupportedOnThisOS(let os, let features):
+            return "view uses \(features.joined(separator: ", ")), unavailable on \(os) (refused)"
         }
     }
 }
@@ -162,11 +168,25 @@ extension Patch {
             return PatchView(initialState: initialState, context: context,
                              treeProvider: { _ in stub }, reduce: nil)
         }
+        // OS CAPABILITY GATE: like the auto-route path, never render a tree using a construct
+        // this OS lacks (with no faithful older rendition) — show the errorView instead.
+        let os = PatchViewPatchRegistry.runningOS
+        let checkCapabilities = PatchRenderCapabilities.mayLackFeatures(on: os)
         return PatchView(
             initialState: initialState,
             context: context,
             treeProvider: { state in
-                do { return try self.viewBody(state: state, export: viewBodyExport) }
+                do {
+                    let tree = try self.viewBody(state: state, export: viewBodyExport)
+                    if checkCapabilities {
+                        let unsupported = PatchRenderCapabilities.unsupportedFeatures(in: tree, on: os)
+                        if !unsupported.isEmpty {
+                            return errorView(PatchViewError.unsupportedOnThisOS(
+                                os: os.description, features: unsupported.map(\.rawValue)))
+                        }
+                    }
+                    return tree
+                }
                 catch { return errorView(error) }
             },
             reduce: hasDispatch ? { state, event, value in

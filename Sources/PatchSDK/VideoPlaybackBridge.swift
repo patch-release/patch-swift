@@ -107,9 +107,17 @@ final class NativeVideoPlayer: VideoPlaying, @unchecked Sendable {
         }
     }
 
-    private func onMain(_ body: @escaping () -> Void) {
+    /// Runs `body` on the main actor: SYNCHRONOUSLY when already on the main thread
+    /// (so a guest `play`/`pause` call from main takes effect before the call returns),
+    /// otherwise via an async hop. `AVPlayer.play()`/`pause()`/`seek(to:)` are
+    /// main-actor-isolated in the iOS 15 SDK annotations, so `body` is `@MainActor`.
+    /// `MainActor.assumeIsolated` is `@_alwaysEmitIntoClient` and available back to
+    /// iOS 13 in the Swift 6 toolchain this package requires (`swift-tools-version:6.0`),
+    /// so the synchronous branch needs no availability guard; on the main thread its
+    /// isolation check always holds.
+    private func onMain(_ body: @escaping @MainActor () -> Void) {
         if Thread.isMainThread {
-            body()
+            MainActor.assumeIsolated { body() }
         } else {
             let box = UncheckedSendableBoxVP(body)
             DispatchQueue.main.async { box.value() }

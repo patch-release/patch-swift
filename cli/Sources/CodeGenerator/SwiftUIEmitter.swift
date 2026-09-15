@@ -131,6 +131,12 @@ struct Emitter {
     /// view's manifest `minVersion` (11) so an older host DEMOTES this view to native (where the
     /// real implicit animation runs) instead. See BuildPipeline's `minSchemaVersion`.
     private(set) var usesAnimationValue = false
+    /// Every `#available(…)` condition whose AVAILABLE branch the body lowered in place of the
+    /// whole `if`/`else` (G25), verbatim, in encounter order. The lowered body is only faithful on
+    /// an OS that meets them, so they become the view's manifest `minOS` (the SDK renders the
+    /// native body — which still has the `else` — on an older device). Manifest-only: not part of
+    /// the guest tree, the thunk, `bodyHash` or the fingerprint.
+    private(set) var resolvedAvailability: [String] = []
     /// True while lowering the ACTIONS LIST of a modifier-action context (alert /
     /// confirmationDialog / toolbar / Menu / contextMenu). In this context a `Button`
     /// whose action isn't a recordable rule can't be slotted (the renderer can't put a
@@ -667,6 +673,7 @@ struct Emitter {
             // failed `'X' is only available in iOS 17.0 or newer`. Tag them; `ThunkGenerator` wraps
             // each entry in the same `if #available`. Thunk-text only (no id/tree/hash change).
             let cond = ifExpr.conditions.first.map { $0.condition.trimmedDescription } ?? ""
+            if !cond.isEmpty, !resolvedAvailability.contains(cond) { resolvedAvailability.append(cond) }
             let snap = (opaqueLeaves.count, hostTokens.count, indexedRowSlots.count,
                         actionSlots.count, effectSlots.count, callbackSlots.count)
             defer {

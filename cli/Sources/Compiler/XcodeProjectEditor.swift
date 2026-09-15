@@ -30,7 +30,7 @@ public enum XcodeProjectEditor {
     public static let productName = "PatchSDK"
     // The SDK floor `init` writes. Keep it at the oldest SDK this CLI's generated thunks
     // compile against (one tag ships both CLI and SDK since 1.7.0).
-    public static let minimumVersion = "1.7.0"
+    public static let minimumVersion = "1.7.2"
 
     public enum EditResult: Sendable, Equatable {
         case added

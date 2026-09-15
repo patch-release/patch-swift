@@ -97,6 +97,11 @@ public struct SwiftUIGuestEmitter {
         /// when false to keep the JSON compact). ADDITIVE + backward-decode safe: `false`/absent =
         /// always-WASM (the safe prior behavior).
         public let isStructurallyStatic: Bool
+        /// The minimum OS per platform this view's lowered body assumes (from `#available`
+        /// branches the lowering resolved — `BodyLowering.minimumOS(fromAvailabilityConditions:)`).
+        /// Emitted as `"minOS":{…}` (omitted when empty); the SDK keeps the view native on an older
+        /// device. Additive: an older SDK ignores the key.
+        public let minOS: [String: String]
         public init(viewName: String, guestBody: String,
                     inputs: [BodyLowering.ViewInput] = [],
                     stateModel: BodyLowering.StateModel? = nil,
@@ -106,7 +111,8 @@ public struct SwiftUIGuestEmitter {
                     slotArgs: [String: [String]] = [:],
                     minSchemaVersion: Int = 8,
                     bodyHash: String? = nil,
-                    isStructurallyStatic: Bool = false) {
+                    isStructurallyStatic: Bool = false,
+                    minOS: [String: String] = [:]) {
             self.viewName = viewName
             self.guestBody = guestBody
             self.inputs = inputs
@@ -118,6 +124,7 @@ public struct SwiftUIGuestEmitter {
             self.minSchemaVersion = minSchemaVersion
             self.bodyHash = bodyHash
             self.isStructurallyStatic = isStructurallyStatic
+            self.minOS = minOS
         }
     }
 
@@ -989,6 +996,10 @@ public struct SwiftUIGuestEmitter {
             // common case) to keep the manifest compact. Additive + backward-decode safe:
             // an older host that doesn't know this field treats it as always-WASM.
             let staticField = v.isStructurallyStatic ? ",\"isStructurallyStatic\":true" : ""
+            // PER-VIEW OS FLOOR: the lowering took the available branch of an `if #available`,
+            // so an older device must keep this view native. Sorted keys → deterministic bytes.
+            let minOSField = v.minOS.isEmpty ? "" : ",\"minOS\":{"
+                + v.minOS.keys.sorted().map { "\"\($0)\":\"\(v.minOS[$0]!)\"" }.joined(separator: ",") + "}"
             manifestEntries.append(
                 "{\"type\":\"\(Self.sanitizedViewName(v.viewName))\","
                 + "\"export\":\"\(sym)\","
@@ -996,7 +1007,8 @@ public struct SwiftUIGuestEmitter {
                 + "\"thunkSafe\":\(v.thunkSafe ? "true" : "false"),"
                 + "\"minVersion\":\(v.minSchemaVersion)"
                 + "\(bodyHashField)"
-                + "\(staticField)}")
+                + "\(staticField)"
+                + "\(minOSField)}")
         }
 
         // Emit the VIEW MANIFEST export: a compile-time JSON literal describing every

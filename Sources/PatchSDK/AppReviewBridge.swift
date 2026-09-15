@@ -63,7 +63,7 @@ public struct AppReviewBridge: Bridge {
         // body onto the main actor with `Task { @MainActor in … }` (fire-and-forget
         // — the review prompt has no result the guest can act on). We use a Task
         // rather than `MainActor.assumeIsolated`, which is iOS 17+, to keep the
-        // SDK's iOS 16 floor.
+        // SDK's iOS 15 floor.
         Task { @MainActor in
             let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             guard let scene = scenes.first(where: { $0.activationState == .foregroundActive })

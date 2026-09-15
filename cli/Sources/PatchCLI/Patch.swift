@@ -14,7 +14,7 @@ struct Patch: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "patchcli",
         abstract: "OTA code updates for native Swift iOS apps — auto-partitioning engine.",
-        version: "1.7.1",
+        version: "1.7.2",
         subcommands: [
             Setup.self, Init.self, Login.self, Prepare.self, Unprepare.self, Doctor.self, Build.self, Push.self, Release.self, Status.self, Rollback.self,
             FingerprintCommand.self, Channels.self, Whoami.self, Analyze.self, Compile.self, Overlay.self,

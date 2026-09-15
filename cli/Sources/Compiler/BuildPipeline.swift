@@ -1968,7 +1968,12 @@ public struct BuildPipeline {
                                         // STRUCTURALLY-STATIC CACHE: the engine proved the tree is identical
                                         // across ALL inputs. The SDK caches after the first WASM call and
                                         // skips WASM on all subsequent renders. Propagated from `LoweredView`.
-                                        isStructurallyStatic: lowered.isStructurallyStatic))
+                                        isStructurallyStatic: lowered.isStructurallyStatic,
+                                        // PER-VIEW OS FLOOR from `if #available` branches the lowering
+                                        // resolved to their available side (the SDK keeps the view
+                                        // native on an older device, where the native `else` shows).
+                                        minOS: BodyLowering.minimumOS(
+                                            fromAvailabilityConditions: lowered.resolvedAvailability)))
                 totalElements += report.totalElements
                 totalWasm += report.loweredElements
                 detail.append((view: lowered.viewName, export: sym,

@@ -17,8 +17,12 @@ let package = Package(
     name: "PatchSDK",
     platforms: [
         .macOS(.v14),   // WasmKit requires macOS 14+ on macOS hosts.
-        .iOS(.v16),     // iOS 16+ floor for the SDK (WasmKit itself supports iOS 12+).
-        .tvOS(.v16),    // SwiftUI renderer is platform-guarded for the Apple UI family.
+        // iOS/tvOS 15+ floor for the SDK (WasmKit itself supports iOS 12+). Renderer
+        // features that need a newer OS are `#available`-guarded, and a patched view
+        // whose tree needs one renders its NATIVE body on an older device
+        // (`PatchRenderCapabilities`) — never a silent approximation.
+        .iOS(.v15),
+        .tvOS(.v15),    // SwiftUI renderer is platform-guarded for the Apple UI family.
         .visionOS(.v1)
     ],
     products: [

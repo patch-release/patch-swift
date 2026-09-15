@@ -79,7 +79,7 @@ public struct AppShortcutsBridge: Bridge {
             // closure captures only the Sendable `[QuickAction]` input, never the
             // non-Sendable items array. Fire-and-forget (the assignment has no
             // result). A Task is used rather than `MainActor.assumeIsolated`
-            // (iOS 17+) to keep the SDK's iOS 16 floor.
+            // (iOS 17+) to keep the SDK's iOS 15 floor.
             Task { @MainActor in
                 let items: [UIApplicationShortcutItem] = actions.map { action in
                     let icon = action.systemImageName.map {

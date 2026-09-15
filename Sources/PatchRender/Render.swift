@@ -319,8 +319,63 @@ struct Renderer {
         // the fill, default-foreground/black, under the outline). `.fill` stays on the
         // default filled path (already correct).
         if let outlined = strokedShapeIfNeeded(node) { return outlined }
+        // Pre-iOS-16 only: `View.bold()`/`.italic()`/`.fontWeight(_:)`/`.kerning(_:)`/… are
+        // iOS 16+, but their `Text` forms are iOS 13+ — and a Text leaf's leading run of
+        // these is exactly what an iOS 15 app's native `Text("…").bold()` compiles to. Render
+        // that run as the real `Text` chain (faithful). iOS 16+ keeps the path below unchanged.
+        if #unavailable(iOS 16, macOS 13, tvOS 16, watchOS 9) {
+            if let chained = legacyTextChainIfNeeded(node) { return chained }
+        }
         let base = renderKind(node.kind)
         return applyModifiers(node.modifiers, to: base)
+    }
+
+    // MARK: Pre-iOS-16 faithful renditions (no `AnyShape`, `Text`-level styling)
+
+    /// Pre-iOS-16 Text chain (see `render(_:)`): nil unless `node` is a Text leaf whose leading
+    /// Text-method run (`PatchRenderCapabilities.legacyTextChainPrefixLength`, shared with the
+    /// capability check so the two always agree) contains a modifier `View` only gained in iOS 16.
+    func legacyTextChainIfNeeded(_ node: ViewNode) -> AnyView? {
+        let n = PatchRenderCapabilities.legacyTextChainPrefixLength(node)
+        guard n > 0, node.modifiers[..<n].contains(where: PatchRenderCapabilities.isTextOnlyBeforeIOS16) else {
+            return nil
+        }
+        var text: Text
+        switch node.kind {
+        case .text(let s):
+            text = Text(s)
+        case .styledText(let s, let verbatim, let markdown, let localized):
+            text = styledText(s, verbatim: verbatim, markdown: markdown, localized: localized)
+        case .dateText(let epoch, let style):
+            let date = Date(timeIntervalSince1970: epoch)
+            switch style {
+            case .date: text = Text(date, style: .date)
+            case .time: text = Text(date, style: .time)
+            case .relative: text = Text(date, style: .relative)
+            case .offset: text = Text(date, style: .offset)
+            case .timer: text = Text(date, style: .timer)
+            }
+        default:
+            return nil
+        }
+        for m in node.modifiers[..<n] {
+            switch m {
+            case .font(let f): text = text.font(font(f))
+            case .fontToken(let id): if let f = context.tokens.font(for: id) { text = text.font(f) }
+            case .foregroundColor(let c): text = text.foregroundColor(color(c))
+            case .bold: text = text.bold()
+            case .italic: text = text.italic()
+            case .fontWeight(let w): text = text.fontWeight(w.map { weight($0) })
+            case .kerning(let k): text = text.kerning(CGFloat(k))
+            case .tracking(let t): text = text.tracking(CGFloat(t))
+            case .baselineOffset(let o): text = text.baselineOffset(CGFloat(o))
+            case .underline(let active, let c): text = text.underline(active, color: c.map { color($0) })
+            case .strikethrough(let active, let c): text = text.strikethrough(active, color: c.map { color($0) })
+            case .monospacedDigit: text = text.monospacedDigit()
+            default: break   // unreachable: the prefix holds only the cases above
+            }
+        }
+        return applyModifiers(Array(node.modifiers[n...]), to: AnyView(text))
     }
 
     /// If `node` is a `.shape`/`.path` carrying `.stroke`/`.strokeBorder`, render the
@@ -329,6 +384,8 @@ struct Renderer {
     /// Returns nil for non-shape nodes or shapes without a stroke modifier.
     /// The concrete `AnyShape` for a `.shape`/`.path` node, with a `.trim(from:to:)`
     /// modifier applied (the progress-ring idiom). Returns nil for a non-shape node.
+    /// `AnyShape` is iOS 16+; an older OS takes `strokedShapeConcrete(_:)` instead.
+    @available(iOS 16, macOS 13, tvOS 16, watchOS 9, *)
     private func baseShape(for node: ViewNode) -> AnyShape? {
         var baseShape: AnyShape
         switch node.kind {
@@ -347,6 +404,14 @@ struct Renderer {
     }
 
     private func strokedShapeIfNeeded(_ node: ViewNode) -> AnyView? {
+        if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+            return strokedShapeViaAnyShape(node)
+        }
+        return strokedShapeConcrete(node)
+    }
+
+    @available(iOS 16, macOS 13, tvOS 16, watchOS 9, *)
+    func strokedShapeViaAnyShape(_ node: ViewNode) -> AnyView? {
         guard let baseShape = baseShape(for: node) else { return nil }
         let strokeMod = node.modifiers.first { m in
             if case .stroke = m { return true }; if case .strokeBorder = m { return true }; return false
@@ -375,6 +440,52 @@ struct Renderer {
             return true
         }
         return applyModifiers(rest, to: outline)
+    }
+
+    /// Pre-iOS-16 twin of `strokedShapeViaAnyShape(_:)`: the SAME decisions (stroke → unfilled
+    /// outline, trim-only → trimmed shape, neither → nil) and the SAME remaining-modifier
+    /// filtering, but applied to the CONCRETE shape type through generic dispatch instead of
+    /// the iOS 16 `AnyShape` eraser — so the shape keeps its own `animatableData` and sizing,
+    /// exactly as the app's native `Circle().trim(…).stroke(…)` does.
+    func strokedShapeConcrete(_ node: ViewNode) -> AnyView? {
+        switch node.kind {
+        case .shape, .path: break
+        default: return nil
+        }
+        let trims: [ConcreteShapeRender.Trim] = node.modifiers.compactMap {
+            if case .trim(let from, let to) = $0 { return .init(from: CGFloat(from), to: CGFloat(to)) }
+            return nil
+        }
+        let strokeMod = node.modifiers.first { m in
+            if case .stroke = m { return true }; if case .strokeBorder = m { return true }; return false
+        }
+        let outline: ConcreteShapeRender.Outline?
+        let rest: [Modifier]
+        if let strokeMod {
+            switch strokeMod {
+            case .stroke(let style, let stroke), .strokeBorder(let style, let stroke):
+                outline = .init(stroke: strokeStyle(stroke), style: renderShapeStyle(style))
+            default:
+                return nil
+            }
+            rest = node.modifiers.filter { m in
+                if case .stroke = m { return false }; if case .strokeBorder = m { return false }
+                if case .trim = m { return false }
+                return true
+            }
+        } else {
+            guard !trims.isEmpty else { return nil }
+            outline = nil
+            rest = node.modifiers.filter { if case .trim = $0 { return false }; return true }
+        }
+        let consumer = ConcreteShapeRender(trims: trims[...], outline: outline)
+        let base: AnyView
+        switch node.kind {
+        case .shape(let k): base = withConcreteShape(k, consumer)
+        case .path(let commands): base = consumer.consume(buildPath(commands))
+        default: return nil
+        }
+        return applyModifiers(rest, to: base)
     }
 
     /// A real `ForEach` over the unrolled rows with `.onDelete`/`.onMove` attached.
@@ -476,7 +587,10 @@ struct Renderer {
             return AnyView(color(c))
 
         case .shape(let s):
-            return AnyView(shape(s))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(shape(s))
+            }
+            return withConcreteShape(s, ConcreteShapeLeaf())
 
         case .path(let commands):
             return AnyView(buildPath(commands))
@@ -1148,9 +1262,18 @@ struct Renderer {
         case .foregroundColor(let c):
             return AnyView(v.foregroundColor(color(c)))
         case .bold:
-            return AnyView(v.bold())
+            // `View.bold()` is iOS 16+. Pre-16 a Text leaf's bold renders via the Text chain
+            // (`legacyTextChainIfNeeded`); anywhere else `PatchRenderCapabilities` demotes the
+            // view to native first, so the no-op below is never reached from `PatchedBodyHost`.
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.bold())
+            }
+            return v
         case .italic:
-            return AnyView(v.italic())
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.italic())
+            }
+            return v
         case .padding(let insets):
             return AnyView(v.padding(edgeInsets(insets)))
         case .frame(let w, let h, let a):
@@ -1192,9 +1315,18 @@ struct Renderer {
                                    minHeight: cg(minH), idealHeight: cg(idealH), maxHeight: cg(maxH),
                                    alignment: zalignment(a)))
         case .tint(let c):
+            // Overload pin: in an iOS 16+ availability context `tint(_:)` resolves to the generic
+            // `tint<S: ShapeStyle>(_:)` (today's path, kept byte-for-byte); below 16 only the
+            // iOS 15 `tint(_: Color?)` exists — exactly what an iOS 15 app's `.tint(.red)` calls.
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.tint(color(c)))
+            }
             return AnyView(v.tint(color(c)))
         case .clipShape(let k):
-            return AnyView(v.clipShape(shapeValue(k)))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.clipShape(shapeValue(k)))
+            }
+            return withConcreteShape(k, ConcreteShapeClip(view: v))
         case .trim:
             // `Shape.trim(from:to:)` is a Shape method, applied to the concrete
             // `AnyShape` in `baseShape(for:)` (the shape render path). On a
@@ -1212,11 +1344,20 @@ struct Renderer {
             return AnyView(v.background(alignment: zalignment(a)) { renderChildren(content) })
         case .backgroundStyle(let s, let shape):
             if let shape {
-                return AnyView(v.background(renderShapeStyle(s), in: shapeValue(shape)))
+                if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                    return AnyView(v.background(renderShapeStyle(s), in: shapeValue(shape)))
+                }
+                return withConcreteShape(shape, ConcreteShapeBackground(view: v, style: renderShapeStyle(s)))
             }
             return AnyView(v.background(renderShapeStyle(s)))
         case .tintStyle(let s):
-            return AnyView(v.tint(renderShapeStyle(s)))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.tint(renderShapeStyle(s)))
+            }
+            // Pre-16 `tint` only takes a `Color`: a plain color renders faithfully; any other
+            // style is demoted to native upstream (`PatchRenderCapabilities`).
+            if case .color(let c) = s { return AnyView(v.tint(color(c))) }
+            return v
         case .fill(let s, _):
             // A Shape rendered as a view fills via `.foregroundStyle` (exactly what
             // `Shape.fill(_:)` does); the eoFill rule has no View-level analogue.
@@ -1234,7 +1375,10 @@ struct Renderer {
         case .overlayContent(let a, let content):
             return AnyView(v.overlay(alignment: zalignment(a)) { renderChildren(content) })
         case .overlayStyle(let s, let shape):
-            return AnyView(v.overlay(renderShapeStyle(s), in: shapeValue(shape)))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.overlay(renderShapeStyle(s), in: shapeValue(shape)))
+            }
+            return withConcreteShape(shape, ConcreteShapeOverlay(view: v, style: renderShapeStyle(s)))
         case .shadow(let c, let r, let x, let y):
             if let c {
                 return AnyView(v.shadow(color: color(c), radius: CGFloat(r), x: CGFloat(x), y: CGFloat(y)))
@@ -1336,7 +1480,10 @@ struct Renderer {
 
         // MARK: Text styling
         case .fontWeight(let w):
-            return AnyView(v.fontWeight(w.map { weight($0) }))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.fontWeight(w.map { weight($0) }))
+            }
+            return v
         case .fontDesign(let d):
             #if os(watchOS)
             return AnyView(v.fontDesign(design(d)))
@@ -1380,7 +1527,9 @@ struct Renderer {
         case .truncationMode(let m):
             return AnyView(v.truncationMode(truncationMode(m)))
         case .monospaced:
-            if #available(iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1, *) {
+            // `View.monospaced(_:)` is iOS 16+ (the old iOS 15 guard was wrong — it only
+            // compiled because the SDK floor was 16). Pre-16 demotes upstream.
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
                 return AnyView(v.monospaced())
             }
             return v
@@ -1461,7 +1610,11 @@ struct Renderer {
         case .preferredColorScheme(let s):
             return AnyView(v.preferredColorScheme(colorScheme(s)))
         case .accentColor(let c):
-            return AnyView(v.tint(c.map { color($0) }))   // accentColor is deprecated → tint
+            // accentColor is deprecated → tint. Overload pin as in `.tint` above.
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.tint(c.map { color($0) }))
+            }
+            return AnyView(v.tint(c.map { color($0) }))
 
         // MARK: Gestures
         case .onLongPressGesture(let minDur, let e):
@@ -2030,7 +2183,10 @@ struct Renderer {
             _ = b; return v
             #endif
         case .contentShape(let k, let eoFill):
-            return AnyView(v.contentShape(shapeValue(k), eoFill: eoFill))
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                return AnyView(v.contentShape(shapeValue(k), eoFill: eoFill))
+            }
+            return withConcreteShape(k, ConcreteShapeContentShape(view: v, eoFill: eoFill))
         case .coordinateSpaceNamed(let s):
             if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, *) {
                 return AnyView(v.coordinateSpace(.named(s)))
@@ -2131,7 +2287,16 @@ struct Renderer {
     func font(_ f: IRFont) -> Font {
         var base: Font
         if let style = f.style {
-            base = Font.system(textStyle(style))
+            // Overload pin: in an iOS 16+ availability context this resolves to
+            // `system(_:design:weight:)` (today's path, kept byte-for-byte); below 16 only the
+            // iOS 13 `system(_:design:)` exists. (Overload resolution follows the availability
+            // context, so without the branch lowering the deployment target would silently
+            // switch iOS 16+ devices to the older overload.)
+            if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, *) {
+                base = Font.system(textStyle(style))
+            } else {
+                base = Font.system(textStyle(style))
+            }
         } else if let size = f.size {
             base = Font.system(size: CGFloat(size),
                                weight: weight(f.weight),
@@ -2183,14 +2348,18 @@ struct Renderer {
         }
     }
 
+    @available(iOS 16, macOS 13, tvOS 16, watchOS 9, *)
     func shape(_ k: ShapeKind) -> some View {
         shapeValue(k)
     }
 
     /// A concrete, type-erased `Shape` for `.clipShape` (which needs a `Shape`, not
     /// the `some View` the `shape(_:)` Group returns). `AnyShape` is iOS 16+ /
-    /// macOS 13+ / tvOS 16+ / visionOS 1+ — the SDK's entire declared platform
-    /// floor (see sdk/Package.swift), so it's always available here.
+    /// macOS 13+ / tvOS 16+ / visionOS 1+ — ABOVE the SDK's iOS/tvOS 15 floor, so every
+    /// call site branches on `#available` and an older OS dispatches the concrete shape
+    /// generically instead (`withConcreteShape(_:_:)`). `AnyShape` forwards `path`,
+    /// `sizeThatFits` AND `animatableData`, so the iOS 16+ path is unchanged.
+    @available(iOS 16, macOS 13, tvOS 16, watchOS 9, *)
     func shapeValue(_ k: ShapeKind) -> AnyShape {
         switch k {
         case .rectangle: return AnyShape(Rectangle())
@@ -2222,6 +2391,33 @@ struct Renderer {
         switch s {
         case .circular: return .circular
         case .continuous: return .continuous
+        }
+    }
+
+    /// Hand `consumer` the CONCRETE SwiftUI shape for `k` (no type erasure — the pre-iOS-16
+    /// counterpart of `shapeValue(_:)`, which needs the iOS 16 `AnyShape`). The shape mapping
+    /// is identical to `shapeValue(_:)`, including the pre-16.4 `UnevenRoundedRectangle`
+    /// fallback (which `PatchRenderCapabilities` demotes before it can render).
+    func withConcreteShape<C: ConcreteShapeConsumer>(_ k: ShapeKind, _ consumer: C) -> AnyView {
+        switch k {
+        case .rectangle: return consumer.consume(Rectangle())
+        case .roundedRectangle(let r): return consumer.consume(RoundedRectangle(cornerRadius: CGFloat(r)))
+        case .circle: return consumer.consume(Circle())
+        case .ellipse: return consumer.consume(Ellipse())
+        case .capsule: return consumer.consume(Capsule())
+        case .containerRelative: return consumer.consume(ContainerRelativeShape())
+        case .unevenRoundedRectangle(let tl, let tr, let bl, let br, let style):
+            #if os(iOS) || os(macOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, *) {
+                return consumer.consume(UnevenRoundedRectangle(
+                    topLeadingRadius: CGFloat(tl), bottomLeadingRadius: CGFloat(bl),
+                    bottomTrailingRadius: CGFloat(br), topTrailingRadius: CGFloat(tr),
+                    style: roundedCornerStyle(style)))
+            }
+            #endif
+            let maxR = Swift.max(tl, tr, bl, br)
+            return consumer.consume(RoundedRectangle(cornerRadius: CGFloat(maxR),
+                                                     style: roundedCornerStyle(style)))
         }
     }
 
@@ -2375,8 +2571,9 @@ struct Renderer {
 
     // MARK: - Unified style vocabulary → real SwiftUI
 
-    /// Resolve an `IRShapeStyle` to a real `AnyShapeStyle` (iOS 16+ / the SDK's
-    /// entire declared platform floor — same as `AnyShape`, see `shapeValue`).
+    /// Resolve an `IRShapeStyle` to a real `AnyShapeStyle` (iOS 15+ / macOS 12+ — within
+    /// the SDK's declared platform floor). Styles needing a newer OS are `#available`-guarded
+    /// and listed in `PatchRenderCapabilities` (an older device demotes that view to native).
     func renderShapeStyle(_ s: IRShapeStyle) -> AnyShapeStyle {
         switch s {
         case .color(let c):
@@ -2406,9 +2603,10 @@ struct Renderer {
             }
         case .semantic(let name):
             // `.separator`/`.placeholder`/`.link` ShapeStyles are iOS 17 / macOS 14+
-            // ONLY — the SDK floor is iOS 16, so they MUST be availability-guarded (an
-            // unguarded reference fails to compile ANY iOS-16-floored app linking the
-            // SDK). Pre-17 they degrade to the nearest always-available hierarchical style.
+            // ONLY — above the SDK floor (iOS 15), so they MUST be availability-guarded (an
+            // unguarded reference fails to compile ANY app below iOS 17 linking the SDK).
+            // Pre-17 the fallback below is never reached from `PatchedBodyHost`:
+            // `PatchRenderCapabilities` demotes such a view to its native body first.
             switch name {
             case "tint": return AnyShapeStyle(.tint)
             case "foreground": return AnyShapeStyle(.foreground)
@@ -2965,12 +3163,20 @@ struct Renderer {
             if #available(iOS 16, macOS 13, tvOS 17, watchOS 9, visionOS 1, *) {
                 return AnyView(v.pickerStyle(.menu))
             }
+            // Pre-iOS-16: `.menu` (MenuPickerStyle) itself is iOS 14+ — the exact style an
+            // iOS 15 app's native `.pickerStyle(.menu)` uses. (tvOS < 17 demotes upstream.)
+            #if !os(watchOS)
+            if #available(iOS 14, macOS 11, tvOS 17, *) {
+                return AnyView(v.pickerStyle(.menu))
+            }
+            #endif
             return AnyView(v.pickerStyle(.automatic))
         case "inline":
             if #available(iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, *) {
                 return AnyView(v.pickerStyle(.inline))
             }
-            return AnyView(v.pickerStyle(.automatic))
+            // Pre-iOS-16: `.inline` (InlinePickerStyle) is iOS 14+ / tvOS 14+ — faithful.
+            return AnyView(v.pickerStyle(.inline))
         case "wheel":
             #if os(iOS) || os(watchOS) || os(visionOS)
             return AnyView(v.pickerStyle(.wheel))
@@ -3629,6 +3835,71 @@ struct Renderer {
         case "bottomTrailing": return .bottomTrailing
         default: return .center
         }
+    }
+}
+
+// MARK: - Concrete-shape dispatch (pre-iOS-16: no `AnyShape`)
+
+/// A generic shape sink: how the pre-iOS-16 renderer hands a CONCRETE `Shape` to a modifier
+/// without SwiftUI's iOS 16 `AnyShape` eraser. `Renderer.withConcreteShape(_:_:)` switches over
+/// `ShapeKind` and calls `consume` with the real `Circle`/`RoundedRectangle`/…, so the shape
+/// keeps its own `path`, sizing and `animatableData` — exactly what the app's native code uses.
+/// (A closure-based stand-in for `AnyShape` would drop `animatableData`/`sizeThatFits`.)
+@MainActor
+protocol ConcreteShapeConsumer {
+    func consume<S: Shape>(_ shape: S) -> AnyView
+}
+
+/// A shape rendered as a leaf view (`Circle()`), default-filled.
+struct ConcreteShapeLeaf: ConcreteShapeConsumer {
+    func consume<S: Shape>(_ shape: S) -> AnyView { AnyView(shape) }
+}
+
+/// `.clipShape(shape)`.
+struct ConcreteShapeClip: ConcreteShapeConsumer {
+    let view: AnyView
+    func consume<S: Shape>(_ shape: S) -> AnyView { AnyView(view.clipShape(shape)) }
+}
+
+/// `.background(style, in: shape)` (iOS 15+).
+struct ConcreteShapeBackground: ConcreteShapeConsumer {
+    let view: AnyView
+    let style: AnyShapeStyle
+    func consume<S: Shape>(_ shape: S) -> AnyView { AnyView(view.background(style, in: shape)) }
+}
+
+/// `.overlay(style, in: shape)` (iOS 15+).
+struct ConcreteShapeOverlay: ConcreteShapeConsumer {
+    let view: AnyView
+    let style: AnyShapeStyle
+    func consume<S: Shape>(_ shape: S) -> AnyView { AnyView(view.overlay(style, in: shape)) }
+}
+
+/// `.contentShape(shape, eoFill:)`.
+struct ConcreteShapeContentShape: ConcreteShapeConsumer {
+    let view: AnyView
+    let eoFill: Bool
+    func consume<S: Shape>(_ shape: S) -> AnyView { AnyView(view.contentShape(shape, eoFill: eoFill)) }
+}
+
+/// A shape NODE's own trims + optional stroke outline, applied in modifier order to the concrete
+/// shape (the pre-16 twin of `Renderer.baseShape(for:)` + the outline in `strokedShapeViaAnyShape`).
+/// Each `trim` is applied by recursing with the trimmed (opaque) shape type, so no erasure.
+struct ConcreteShapeRender: ConcreteShapeConsumer {
+    struct Trim { let from: CGFloat; let to: CGFloat }
+    struct Outline { let stroke: StrokeStyle; let style: AnyShapeStyle }
+    let trims: ArraySlice<Trim>
+    let outline: Outline?
+
+    func consume<S: Shape>(_ shape: S) -> AnyView {
+        if let first = trims.first {
+            return ConcreteShapeRender(trims: trims.dropFirst(), outline: outline)
+                .consume(shape.trim(from: first.from, to: first.to))
+        }
+        if let outline {
+            return AnyView(shape.stroke(style: outline.stroke).foregroundStyle(outline.style))
+        }
+        return AnyView(shape)
     }
 }
 

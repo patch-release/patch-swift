@@ -73,7 +73,7 @@ public struct ScreenControlBridge: Bridge {
                 // this is a synchronous nonisolated `@Sendable` closure. The write is
                 // fire-and-forget → `Task { @MainActor in … }` (capturing the Sendable
                 // `Double`). A Task is used rather than `MainActor.assumeIsolated`
-                // (iOS 17+) to keep the iOS 16 floor.
+                // (iOS 17+) to keep the iOS 15 floor.
                 Task { @MainActor in UIScreen.main.brightness = CGFloat(unit) }
             },
             setIdleTimerDisabled: { disabled in

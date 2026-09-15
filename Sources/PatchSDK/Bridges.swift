@@ -135,7 +135,7 @@ public struct BridgeContext {
 /// *synchronous* host getter whose guest call must return a real value, but the
 /// underlying UIKit state is `@MainActor`-isolated. Such a getter cannot use a
 /// fire-and-forget `Task { @MainActor in … }` (it needs the value back), and the
-/// SDK's iOS-16 floor rules out `MainActor.assumeIsolated` (treat it as 17+).
+/// SDK's iOS-15 floor rules out `MainActor.assumeIsolated` (treat it as 17+).
 ///
 /// Every host->wasm invocation — and therefore every bridge getter closure — runs
 /// on `Patch.callQueue`, a private serial queue (see `Patch.swift`), NOT the main

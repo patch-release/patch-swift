@@ -253,6 +253,81 @@ final class SwiftUIControlFlowLoweringTests: XCTestCase {
         XCTAssertFalse(v.referencesUnresolvedSymbol)
     }
 
+    /// The resolved condition is RECORDED so the manifest can carry the view's OS floor: on a
+    /// device below it the lowered body would show the available branch where the native body
+    /// shows the `else`, so the SDK keeps the view native there (PatchSDK's floor is iOS 15, so
+    /// `if #available(iOS 16, *)` is a real branch on supported devices).
+    func testAvailabilityRecordsResolvedConditionsForTheManifestMinOS() throws {
+        let src = """
+        import SwiftUI
+        struct V: View {
+            var body: some View {
+                VStack {
+                    if #available(iOS 16.0, macOS 13, *) {
+                        Text("stack")
+                    } else {
+                        Text("view")
+                    }
+                    if #available(iOS 17, *) { Text("seventeen") }
+                    if #available(iOS 16.0, macOS 13, *) { Text("again") }
+                }
+            }
+        }
+        """
+        let v = try lowerOne(src)
+        XCTAssertEqual(v.resolvedAvailability, ["#available(iOS 16.0, macOS 13, *)", "#available(iOS 17, *)"])
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: v.resolvedAvailability),
+                       ["iOS": "17.0", "macOS": "13.0"])
+        // A body with no `#available` records nothing (no manifest key, no gate).
+        let plain = try lowerOne("""
+        import SwiftUI
+        struct P: View { var body: some View { Text("plain") } }
+        """)
+        XCTAssertEqual(plain.resolvedAvailability, [])
+    }
+
+    /// Recording the condition is manifest-only: the guest body and `bodyHash` are unchanged.
+    func testResolvedAvailabilityDoesNotEnterTheGuestBodyOrHash() throws {
+        let with17 = try lowerOne("""
+        import SwiftUI
+        struct V: View { var body: some View { VStack { if #available(iOS 17, *) { Text("a") } } } }
+        """)
+        let with16 = try lowerOne("""
+        import SwiftUI
+        struct V: View { var body: some View { VStack { if #available(iOS 16, *) { Text("a") } } } }
+        """)
+        XCTAssertNotEqual(with17.resolvedAvailability, with16.resolvedAvailability)
+        XCTAssertEqual(with17.guestBody, with16.guestBody)
+        XCTAssertEqual(BodyLowering.viewBodyContentHash(with17), BodyLowering.viewBodyContentHash(with16))
+    }
+
+    func testMinimumOSParsing() {
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: []), [:])
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: ["#available(iOS 16.4, *)"]), ["iOS": "16.4"])
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: [
+            "#available(iOSApplicationExtension 16, OSX 13.3, tvOS 17.0.1, visionOS 1, macCatalyst 16, *)"]),
+            ["iOS": "16.0", "macOS": "13.3", "tvOS": "17.0.1", "visionOS": "1.0"])
+        // The stricter version wins per platform, regardless of order.
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: [
+            "#available(iOS 17.2, *)", "#available(iOS 16, macOS 14, *)", "#available(iOS 17.10, *)"]),
+            ["iOS": "17.10", "macOS": "14.0"])
+        // Malformed specs contribute nothing rather than a bogus floor.
+        XCTAssertEqual(BodyLowering.minimumOS(fromAvailabilityConditions: ["#available(iOS, *)", "#available(iOS x.1, *)", "garbage"]), [:])
+    }
+
+    func testManifestEmitsMinOSOnlyWhenPresent() throws {
+        let body = #"N.text("hi")"#
+        let emission = try SwiftUIGuestEmitter().emit(views: [
+            SwiftUIGuestEmitter.GuestView(viewName: "Gated", guestBody: body, thunkSafe: true,
+                                          minOS: ["macOS": "14.0", "iOS": "17.0"]),
+            SwiftUIGuestEmitter.GuestView(viewName: "Plain", guestBody: body, thunkSafe: true),
+        ])
+        let wrapper = try XCTUnwrap(emission.files.first { $0.fileName == "_PatchSwiftUI.swift" }).contents
+        XCTAssertTrue(wrapper.contains(#"\"thunkSafe\":true,\"minVersion\":8,\"minOS\":{\"iOS\":\"17.0\",\"macOS\":\"14.0\"}}"#),
+                      "sorted minOS object on the gated entry:\n\(wrapper)")
+        XCTAssertEqual(wrapper.components(separatedBy: "minOS").count - 1, 1, "only the gated entry carries minOS")
+    }
+
     /// `if #available` with NO else still lowers the available branch.
     func testAvailabilityNoElse() throws {
         let src = """

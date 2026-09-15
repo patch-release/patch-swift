@@ -578,7 +578,11 @@ final class PrepareWholeAppBuildBreakTests: XCTestCase {
         XCTAssertEqual(XcodeTargetSources.iOSDeploymentTarget(pbxproj: pbx, target: "Old"), "14.0")
         XCTAssertEqual(XcodeTargetSources.iOSDeploymentTarget(pbxproj: pbx, target: "Inherits"), "17.0")
         XCTAssertTrue(XcodeTargetSources.versionPrecedes("9.3", "16.0"))
-        XCTAssertTrue(XcodeTargetSources.versionPrecedes("15.6", XcodeTargetSources.sdkMinimumIOS))
+        // PatchSDK's floor is iOS 15.0 (`sdk/Package.swift` `.iOS(.v15)`).
+        XCTAssertEqual(XcodeTargetSources.sdkMinimumIOS, "15.0")
+        XCTAssertTrue(XcodeTargetSources.versionPrecedes("14.6", XcodeTargetSources.sdkMinimumIOS))
+        XCTAssertFalse(XcodeTargetSources.versionPrecedes("15.0", XcodeTargetSources.sdkMinimumIOS))
+        XCTAssertFalse(XcodeTargetSources.versionPrecedes("15.2", XcodeTargetSources.sdkMinimumIOS))
         XCTAssertFalse(XcodeTargetSources.versionPrecedes("16.0", XcodeTargetSources.sdkMinimumIOS))
     }
 

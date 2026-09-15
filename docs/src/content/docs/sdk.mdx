@@ -16,7 +16,7 @@ The `PatchSDK` Swift package loads, verifies, hot-swaps, and runs OTA modules on
 
 ```swift title="Package.swift"
 dependencies: [
-  .package(url: "https://github.com/patch-release/patch-swift", from: "1.7.0"),
+  .package(url: "https://github.com/patch-release/patch-swift", from: "1.7.2"),
 ],
 targets: [
   .target(name: "MyApp", dependencies: [
@@ -24,6 +24,8 @@ targets: [
   ]),
 ]
 ```
+
+PatchSDK supports iOS 15 and tvOS 15 or later (macOS 14, visionOS 1). Patches reach every supported device, but a patched view that uses a SwiftUI API newer than the device's OS (for example `NavigationStack` on iOS 15) shows its original native body on that device rather than an approximation, and the SDK logs which API it was.
 
 ## Versions & compatibility
 

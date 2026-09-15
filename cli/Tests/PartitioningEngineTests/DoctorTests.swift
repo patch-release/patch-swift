@@ -132,6 +132,50 @@ final class DoctorTests: XCTestCase {
 
     // MARK: - Check 2: PatchSDK package
 
+    // MARK: - Check 2a: deployment target vs PatchSDK's iOS floor
+
+    private func writeProject(deploymentTarget: String, in dir: URL) throws {
+        try write("""
+        // !$*UTF8*$!
+        {
+            objects = {
+                C1 = {isa = XCBuildConfiguration; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = \(deploymentTarget); }; name = Debug; };
+                L1 = {isa = XCConfigurationList; buildConfigurations = ( C1, ); };
+                T1 = {isa = PBXNativeTarget; buildConfigurationList = L1; name = App; };
+                P0 = {isa = PBXProject; buildConfigurationList = L1; };
+            };
+            rootObject = P0;
+        }
+        """, to: dir.appendingPathComponent("App.xcodeproj/project.pbxproj"))
+    }
+
+    /// An iOS 15.x app can add PatchSDK (the floor is iOS 15.0): doctor passes it.
+    func testDeploymentTargetIOS15IsPass() throws {
+        for dt in ["15.0", "15.2", "15.5"] {
+            let dir = try makeTempDir("dt-15-\(dt)")
+            try writeProject(deploymentTarget: dt, in: dir)
+            let check = try XCTUnwrap(doctor().checkDeploymentTarget(root: dir, target: "App"))
+            XCTAssertEqual(check.id, "deployment-target")
+            XCTAssertEqual(check.status, .pass, "iOS \(dt): \(check.detail ?? "")")
+            XCTAssertTrue(check.title.contains("iOS 15.0+"), check.title)
+        }
+    }
+
+    /// Below iOS 15 the app can't import PatchSDK: doctor warns and names the floor.
+    func testDeploymentTargetBelowIOS15IsWarn() throws {
+        let dir = try makeTempDir("dt-14")
+        try writeProject(deploymentTarget: "14.0", in: dir)
+        let check = try XCTUnwrap(doctor().checkDeploymentTarget(root: dir, target: "App"))
+        XCTAssertEqual(check.status, .warn)
+        XCTAssertTrue((check.detail ?? "").contains("minimum iOS 15.0"), check.detail ?? "")
+        XCTAssertTrue((check.fix ?? "").contains("to 15.0 or later"), check.fix ?? "")
+        let projectURL = dir.appendingPathComponent("App.xcodeproj")
+        XCTAssertEqual(XcodeTargetSources.deploymentTargetBelowSDKMinimum(projectURL: projectURL, target: "App"), "14.0")
+        try writeProject(deploymentTarget: "15.2", in: dir)
+        XCTAssertNil(XcodeTargetSources.deploymentTargetBelowSDKMinimum(projectURL: projectURL, target: "App"),
+                     "init's step-2 note must not fire for an iOS 15.2 app")
+    }
+
     // MARK: - Check 2b: resolved PatchSDK version
 
     private func writeResolved(_ version: String, in dir: URL) throws {

@@ -61,7 +61,7 @@ public struct MailComposeBridge: Bridge {
             // actor with `Task { @MainActor in … }` (fire-and-forget — the composer
             // has no result the guest awaits). The Sendable `MailDraft` is captured;
             // the UIKit/MessageUI work runs main-actor-isolated. A Task is used rather
-            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+            // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15 floor.
             Task { @MainActor in
                 MailComposeBridge.presentMailComposer(draft)
             }
@@ -167,7 +167,7 @@ private final class MailComposeDismisser: NSObject, MFMailComposeViewControllerD
         // code → a Swift 6 data-race conformance error). UIKit invokes this on the
         // main thread anyway; hop the dismiss onto the main actor with
         // `Task { @MainActor in … }` (fire-and-forget). A Task is used rather than
-        // `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+        // `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15 floor.
         Task { @MainActor in
             controller.dismiss(animated: true)
         }

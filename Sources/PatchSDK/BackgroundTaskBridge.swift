@@ -120,7 +120,7 @@ private final class BackgroundTaskStore: @unchecked Sendable {
         // Concurrency hop: `endBackgroundTask` is main-actor-isolated; ending is
         // fire-and-forget, so hop onto the main actor with `Task { @MainActor in … }`
         // (capturing the Sendable `UIBackgroundTaskIdentifier`). A Task is used rather
-        // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+        // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15 floor.
         Task { @MainActor in UIApplication.shared.endBackgroundTask(id) }
     }
 }

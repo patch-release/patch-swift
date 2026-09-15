@@ -326,6 +326,9 @@ public struct BodyLowering {
         /// callback-slot id the thunk didn't supply). Fingerprinted under `CB:` (the slot source,
         /// NOT the callback body, so a callback-body edit is fingerprint-stable = OTA).
         public let callbackSlots: [CallbackSlot]
+        /// The `#available(…)` conditions whose available branch this body lowered in place of the
+        /// whole `if` (see `SwiftUIEmitter.resolvedAvailability`). Drives the manifest `minOS`.
+        public let resolvedAvailability: [String]
         public init(viewName: String, report: LoweringReport, guestBody: String,
                     inputs: [ViewInput] = [], stateModel: StateModel? = nil,
                     opaqueLeaves: [OpaqueLeaf] = [],
@@ -346,7 +349,8 @@ public struct BodyLowering {
                     hasUndispatchableEffect: Bool = false,
                     usesReactiveMarshalling: Bool = false,
                     usesAnimationValue: Bool = false,
-                    isStructurallyStatic: Bool = false) {
+                    isStructurallyStatic: Bool = false,
+                    resolvedAvailability: [String] = []) {
             self.viewName = viewName
             self.report = report
             self.guestBody = guestBody
@@ -371,7 +375,41 @@ public struct BodyLowering {
             self.usesReactiveMarshalling = usesReactiveMarshalling
             self.usesAnimationValue = usesAnimationValue
             self.isStructurallyStatic = isStructurallyStatic
+            self.resolvedAvailability = resolvedAvailability
         }
+    }
+
+    /// The minimum OS per platform implied by a view's resolved `#available(…)` conditions, as the
+    /// manifest's `minOS` (`["iOS": "17.0", "macOS": "14.0"]`; the stricter version wins per
+    /// platform). App-extension spellings fold into their platform (`iOSApplicationExtension` →
+    /// `iOS`, `OSX` → `macOS`); `*` and unknown platforms (`macCatalyst`) add nothing. Empty for
+    /// a body with no resolved `#available`.
+    public static func minimumOS(fromAvailabilityConditions conditions: [String]) -> [String: String] {
+        var out: [String: [Int]] = [:]
+        for condition in conditions {
+            guard let open = condition.firstIndex(of: "("), let close = condition.lastIndex(of: ")"),
+                  open < close else { continue }
+            for spec in condition[condition.index(after: open)..<close].split(separator: ",") {
+                let parts = spec.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+                guard parts.count == 2 else { continue }
+                let platform: String
+                switch parts[0] {
+                case "iOS", "iOSApplicationExtension": platform = "iOS"
+                case "macOS", "OSX", "macOSApplicationExtension", "OSXApplicationExtension": platform = "macOS"
+                case "tvOS", "tvOSApplicationExtension": platform = "tvOS"
+                case "watchOS", "watchOSApplicationExtension": platform = "watchOS"
+                case "visionOS", "visionOSApplicationExtension": platform = "visionOS"
+                default: continue
+                }
+                let nums = parts[1].split(separator: ".").map { Int($0) }
+                guard !nums.isEmpty, nums.count <= 3, !nums.contains(where: { $0 == nil }) else { continue }
+                var version = nums.map { $0! }
+                while version.count < 2 { version.append(0) }
+                if let existing = out[platform], !existing.lexicographicallyPrecedes(version) { continue }
+                out[platform] = version
+            }
+        }
+        return out.mapValues { $0.map(String.init).joined(separator: ".") }
     }
 
     /// The interactive state model the engine derives for a view: the `@State`
@@ -1486,7 +1524,8 @@ public struct BodyLowering {
                                    hasUndispatchableEffect: emitter.hasUndispatchableEffect,
                                    usesReactiveMarshalling: !reactiveInputs.isEmpty,
                                    usesAnimationValue: emitter.usesAnimationValue,
-                                   isStructurallyStatic: isStructurallyStatic))
+                                   isStructurallyStatic: isStructurallyStatic,
+                                   resolvedAvailability: emitter.resolvedAvailability))
         }
         return out
     }

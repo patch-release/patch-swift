@@ -43,7 +43,7 @@ public struct UpdateInfo: Sendable, Equatable {
 /// Drives a "Update available → Download now → Reload" UI without the developer
 /// having to track booleans by hand. Published on `Patch.shared.updateState`
 /// (an `@MainActor` `ObservableObject`). `@MainActor` + `ObservableObject` is
-/// used (rather than the newer `@Observable` macro) so the SDK keeps its iOS 16
+/// used (rather than the newer `@Observable` macro) so the SDK keeps its iOS 15
 /// deployment floor — `@Observable` requires iOS 17+.
 public enum PatchUpdateState: Sendable, Equatable {
     /// No check has run yet (or state was reset).

@@ -97,8 +97,11 @@ See [What Patch can & can't update](/coverage/).
 
 ## Which iOS versions are supported?
 
-iOS 16 and later. That is the deployment target PatchSDK requires. The
-deployment target is also part of the
+iOS 15 and later. That is the deployment target PatchSDK requires. A patched
+view that uses a SwiftUI API newer than the device's iOS (for example
+`NavigationStack` or `.scrollDisabled` on iOS 15) shows its original native
+body on that device instead of an approximation; newer devices get the patch.
+The deployment target is also part of the
 [native-shell fingerprint](/fingerprint/), so raising it in a future build
 means registering a new fingerprint before you release patches against it.
 

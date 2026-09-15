@@ -225,7 +225,7 @@ struct Init: ParsableCommand {
         } else if manual {
             note("Skipped (--manual).")
         } else if let projectURL = Self.xcodeprojURL(root: root, detected: detected, fm: fm) {
-            // PatchSDK needs iOS 16+: say so up front (never change the developer's deployment target).
+            // PatchSDK needs iOS 15+: say so up front (never change the developer's deployment target).
             if let dt = XcodeTargetSources.deploymentTargetBelowSDKMinimum(projectURL: projectURL, target: targetName) {
                 note("⚠ \(targetName) deploys to iOS \(dt), but PatchSDK requires iOS \(XcodeTargetSources.sdkMinimumIOS)+. "
                      + "The app won't build with PatchSDK until you raise the target's Minimum Deployment "

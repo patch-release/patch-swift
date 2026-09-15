@@ -17,7 +17,7 @@ import Compression
 /// loader inflates first, then verifies the inflated bytes against `sha256`.
 ///
 /// Uses Apple's `Compression` framework (`COMPRESSION_BROTLI`, available on
-/// macOS 12+ / iOS 15+ — within the SDK's macOS 14 / iOS 16 floor). Verified to
+/// macOS 12+ / iOS 15+ — within the SDK's macOS 14 / iOS 15 floor). Verified to
 /// round-trip Python's `brotli.compress()` output. No third-party dependency.
 public enum Brotli {
 

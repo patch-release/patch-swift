@@ -142,7 +142,7 @@ Running `patchcli release` from your machine is great for the first end-to-end t
 
 Everything `patchcli init` automates can be done by hand — and `init` prints these exact steps whenever it can't do something safely (or when you run `patchcli init --manual`):
 
-1. **Add the SDK package** — in Xcode, **File → Add Package Dependencies…** with `https://github.com/patch-release/patch-swift` (product `PatchSDK`, from `1.7.0`). See [SDK reference](/sdk/) for the `Package.swift` form.
+1. **Add the SDK package** — in Xcode, **File → Add Package Dependencies…** with `https://github.com/patch-release/patch-swift` (product `PatchSDK`, from `1.7.2`). See [SDK reference](/sdk/) for the `Package.swift` form.
 2. **Create the app** in the [dashboard](https://app.patchrelease.com) to get its `pak_…` app key.
 3. **Paste the key** — set `app_key` (and optionally `app_id`/`workspace_id`) in [`.Patch.yml`](/cli/#configuration-patchyml).
 4. **Get a publish token** — run `patchcli login`, or create one in the dashboard and set `publish_token` in `.Patch.yml`. Without it, `push`/`release` cannot authenticate.

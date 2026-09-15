@@ -58,7 +58,7 @@ public struct AppBadgeBridge: Bridge {
                 // assignment is fire-and-forget, so hop onto the main actor with
                 // `Task { @MainActor in … }` (capturing only the Sendable `Int`). A Task
                 // is used rather than `MainActor.assumeIsolated` (iOS 17+) to keep the
-                // iOS 16 floor.
+                // iOS 15 floor.
                 Task { @MainActor in
                     UIApplication.shared.applicationIconBadgeNumber = count
                 }

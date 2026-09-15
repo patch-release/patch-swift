@@ -55,7 +55,7 @@ public struct MapsDirectionsBridge: Bridge {
             // opening Maps is fire-and-forget (we report success as soon as the URL is
             // valid, exactly as before), so hop onto the main actor with
             // `Task { @MainActor in … }` (capturing only the Sendable `URL`). A Task is
-            // used rather than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16
+            // used rather than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15
             // floor.
             Task { @MainActor in UIApplication.shared.open(url, options: [:]) }
             return true

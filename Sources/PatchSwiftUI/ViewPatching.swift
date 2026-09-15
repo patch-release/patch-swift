@@ -39,7 +39,7 @@
 // Live invalidation: on iOS 17+/macOS 14+ the registry exposes an `@Observable`
 // generation counter read during every thunked body evaluation — SwiftUI then
 // re-evaluates ALL thunked views when a patch (de)activates mid-session, so a
-// hot-applied patch appears without navigation. On iOS 16 the new module is
+// hot-applied patch appears without navigation. On iOS 15/16 the new module is
 // picked up on each view's next natural re-evaluation (or next launch).
 
 #if canImport(SwiftUI)
@@ -103,9 +103,17 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
         /// manifest (ignores this key). No `minSupportedVersion` bump — this is a purely
         /// optional optimization field, not a wire-format node case.
         public let isStructurallyStatic: Bool?
+        /// The MINIMUM OS per platform (`{"iOS":"17.0","macOS":"14.0"}`) this view's lowered body
+        /// assumes: the engine resolves `if #available(iOS 17, *) { A } else { B }` in a body by
+        /// lowering `A` only, so on an older device the lowered body would show `A` where the
+        /// native body shows `B`. The SDK refuses such an entry on a device below it (the view
+        /// renders its native body). ADDITIVE + backward-decode safe: absent/nil (an older cli, or
+        /// a body with no resolved `#available`) = no OS floor beyond the SDK's. A platform key the
+        /// running OS doesn't match is ignored (like `*`).
+        public let minOS: [String: String]?
         public init(type: String, export: String, dispatch: String?, thunkSafe: Bool,
                     minVersion: Int? = nil, bodyHash: String? = nil,
-                    isStructurallyStatic: Bool? = nil) {
+                    isStructurallyStatic: Bool? = nil, minOS: [String: String]? = nil) {
             self.type = type
             self.export = export
             self.dispatch = dispatch
@@ -113,6 +121,15 @@ public struct PatchViewManifest: Codable, Equatable, Sendable {
             self.minVersion = minVersion
             self.bodyHash = bodyHash
             self.isStructurallyStatic = isStructurallyStatic
+            self.minOS = minOS
+        }
+
+        /// True when `os` meets this entry's `minOS` (always true without one). A `minOS` version
+        /// for `os`'s platform that doesn't parse fails CLOSED (the view renders natively).
+        public func meetsMinimumOS(_ os: PatchOSVersion) -> Bool {
+            guard let minOS, let raw = minOS[os.platform.rawValue] else { return true }
+            guard let min = PatchVersionNumber(parsing: raw) else { return false }
+            return os.version >= min
         }
     }
     /// PatchViewIR schema version the module's emissions target.
@@ -188,6 +205,36 @@ public final class PatchViewPatchRegistry {
     /// View types DEMOTED for the current epoch after a render/decode failure —
     /// their thunks fall back to the native body until the next module change.
     private var failedTypes: Set<String> = []
+    /// View types whose first patched tree of the current epoch passed the pre-render OS
+    /// capability check in `Patch.thunkBody` (see `needsCapabilityPreflight`), so later
+    /// evaluations skip that pre-flight; cleared on every module change.
+    private var capabilityCheckedTypes: Set<String> = []
+    /// The OS render decisions are made for — the running device. A test seam: tests set an
+    /// older OS to exercise the iOS 15 / 16 capability demotes on any host.
+    static var runningOS: PatchOSVersion = .current
+
+    /// Whether `thunkBody` must check a view's first tree against the OS BEFORE handing out a
+    /// `PatchedBodyHost`. On iOS/tvOS 17+ (and macOS 14+ / visionOS) the host's own capability
+    /// demote bumps the per-type Observation signal, so SwiftUI re-evaluates the thunk into the
+    /// native body on the next pass. Below that there is no Observation invalidation: a host
+    /// demote would leave the view blank until something else re-rendered it, so the check has
+    /// to happen before routing.
+    static var needsCapabilityPreflight: Bool {
+        let observationFloor = PatchOSAvailability(iOS: .init(17), macOS: .init(14), tvOS: .init(17),
+                                                   watchOS: .init(10))
+        return !observationFloor.isAvailable(on: runningOS)
+    }
+
+    func hasPassedCapabilityPreflight(typeName: String) -> Bool {
+        syncWithModuleEpoch()
+        return capabilityCheckedTypes.contains(typeName)
+    }
+
+    func markPassedCapabilityPreflight(typeName: String, forEpoch: UInt64) {
+        syncWithModuleEpoch()
+        guard forEpoch == loadedEpoch else { return }
+        capabilityCheckedTypes.insert(typeName)
+    }
     /// One-shot setup guards.
     private var didInstallChangeHandler = false
     private var didEnsureActivation = false
@@ -209,6 +256,7 @@ public final class PatchViewPatchRegistry {
         self.didInstallChangeHandler = true
         self.entries = Dictionary(entries.map { ($0.type, $0) }, uniquingKeysWith: { _, b in b })
         self.failedTypes.removeAll()
+        self.capabilityCheckedTypes.removeAll()
         // Pin to the live epoch so the next `entryIfPatchable` doesn't re-sync + clobber.
         self.loadedEpoch = Patch.shared.moduleEpoch
     }
@@ -218,6 +266,7 @@ public final class PatchViewPatchRegistry {
     func resetForTesting() {
         self.entries.removeAll()
         self.failedTypes.removeAll()
+        self.capabilityCheckedTypes.removeAll()
         self._typeSignalStorage.removeAll()
         self.loadedEpoch = nil
     }
@@ -397,6 +446,7 @@ public final class PatchViewPatchRegistry {
         guard epoch != loadedEpoch else { return }
         loadedEpoch = epoch
         failedTypes.removeAll()
+        capabilityCheckedTypes.removeAll()
         // Clear per-type signals alongside failedTypes: stale signal objects from the
         // previous module epoch must not be re-used. Views that re-read entryIfPatchable
         // after a module change will create fresh signals via the lazy accessor.
@@ -438,7 +488,16 @@ public final class PatchViewPatchRegistry {
         // SDK demotes to native (the dev's real ForEach) instead of empty-rendering (R2-#24/#48).
         var out: [String: PatchViewManifest.Entry] = [:]
         var refusedTypes: [String] = []
+        var belowMinOSTypes: [String] = []
+        let os = runningOS
         for entry in manifest.views {
+            // PER-VIEW OS gate: a body lowered from the AVAILABLE branch of an
+            // `if #available(…)` would show that branch on a device below it, where the native
+            // body shows the `else` — so on such a device the view stays native.
+            guard entry.meetsMinimumOS(os) else {
+                belowMinOSTypes.append(entry.type)
+                continue
+            }
             let req = entry.minVersion ?? manifest.schemaVersion
             // Route through the schema's own renderability predicate so BOTH bounds —
             // floor (`minSupportedVersion`) and ceiling (`version`) — stay in lockstep
@@ -460,6 +519,12 @@ public final class PatchViewPatchRegistry {
                 "PatchSDK v\(PatchViewIRSchema.version): \(refusedTypes.count) patched view(s) need a newer "
                 + "PatchViewIR schema — rendered natively. Update PatchSDK to render them OTA. "
                 + "Views: [\(refusedTypes.sorted().joined(separator: ", "))].")
+        }
+        if !belowMinOSTypes.isEmpty {
+            PatchRuntimeLog.warnOnce(
+                "PatchSDK: \(belowMinOSTypes.count) patched view(s) were lowered from an `if #available` branch "
+                + "newer than this device (\(os)) — rendered natively. "
+                + "Views: [\(belowMinOSTypes.sorted().joined(separator: ", "))].")
         }
         return out
     }
@@ -1491,10 +1556,14 @@ struct PatchedBodyIDSets: Sendable {
     /// still attaches; the view stays patched), so an `.animation`-using view never demotes
     /// for an unresolved value.
     let animationValueKeys: [String]
+    /// The OS-gated renderer constructs the tree uses (`PatchRenderCapabilities`). Unlike the
+    /// animation keys this IS a demote gate: a construct the running OS lacks (with no faithful
+    /// older rendition) renders the view's native body. OS-independent, so it caches with the tree.
+    let renderFeatures: Set<PatchRenderFeature>
 
     init(opaque: [String], token: [String], row: [String], action: [String],
          effect: [String], callback: [String] = [], button: [String],
-         animationValueKeys: [String]) {
+         animationValueKeys: [String], renderFeatures: Set<PatchRenderFeature> = []) {
         self.opaque = opaque
         self.token = token
         self.row = row
@@ -1503,6 +1572,7 @@ struct PatchedBodyIDSets: Sendable {
         self.callback = callback
         self.button = button
         self.animationValueKeys = animationValueKeys
+        self.renderFeatures = renderFeatures
     }
 }
 
@@ -1872,7 +1942,7 @@ public struct PatchedBodyHost: View {
     /// The LAST tree this host rendered successfully (decoded + all safety nets passed),
     /// retained so a later FAILURE pass shows the last-known-good patched content instead
     /// of a blank `EmptyView` (bug #50). On iOS 17+ a demote also bumps the Observation
-    /// signal, re-evaluating the thunk → the native branch; but on iOS 16 (no Observation)
+    /// signal, re-evaluating the thunk → the native branch; but on iOS 15/16 (no Observation)
     /// nothing forces that re-evaluation, so without this the screen would go BLANK until
     /// an unrelated state change re-rendered the parent. Showing the last good tree keeps
     /// the view populated on every OS while the demote propagates — never wrong NEW content
@@ -2022,7 +2092,7 @@ public struct PatchedBodyHost: View {
             } catch {
                 // Demote OUTSIDE this view-update pass; the next thunk evaluation takes the
                 // native branch (iOS 17+ via the Observation bump). This pass shows the last
-                // good tree if any (so the view doesn't go BLANK on iOS 16 — bug #50).
+                // good tree if any (so the view doesn't go BLANK on iOS 15/16 — bug #50).
                 let name = typeName
                 let ep = renderEpoch
                 Task { @MainActor in
@@ -2069,6 +2139,22 @@ public struct PatchedBodyHost: View {
         cachedMergedObj = mergedObjForCache
         } // end pre-merge cache miss
         } // end static-template cache else-branch
+
+        // OS CAPABILITY SAFETY NET: the tree may use a renderer construct this device's OS
+        // doesn't have (e.g. `NavigationStack` or `.scrollDisabled` on iOS 15) with no faithful
+        // older rendition. Rendering it would silently approximate the developer's view, so
+        // DEMOTE to the native body instead (logged once per view + construct set). On iOS 17+
+        // the demote re-evaluates the thunk via Observation; below that `Patch.thunkBody`
+        // pre-flights a view's first tree so it never routes here in the first place.
+        let unsupportedFeatures = PatchRenderCapabilities.unsupportedFeatures(
+            idSets.renderFeatures, on: PatchViewPatchRegistry.runningOS)
+        if !unsupportedFeatures.isEmpty {
+            Self.logCapabilityDemote(typeName: typeName, unsupported: unsupportedFeatures)
+            let name = typeName
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
+        }
 
         // MIXED-VIEW SAFETY NET: every opaque leaf in the tree must have a native
         // slot closure. If a patch introduced a leaf with no matching slot (i.e. it
@@ -2260,7 +2346,9 @@ public struct PatchedBodyHost: View {
                 let actionOK = Self.collectActionSlotIDs(child).allSatisfy { coveredActionIDs.contains($0) }
                 let effectOK = Self.collectEffectSlotIDs(child).allSatisfy { coveredEffectIDs.contains($0) }
                 let callbackOK = Self.collectCallbackSlotIDs(child).allSatisfy { coveredCallbackIDs.contains($0) }
-                if !(opaqueOK && tokenOK && rowOK && actionOK && effectOK && callbackOK) {
+                let capabilityOK = PatchRenderCapabilities.unsupportedFeatures(
+                    in: child, on: PatchViewPatchRegistry.runningOS).isEmpty
+                if !(opaqueOK && tokenOK && rowOK && actionOK && effectOK && callbackOK && capabilityOK) {
                     Task { @MainActor in
                         PatchViewPatchRegistry.shared.markFailed(typeName: geoName, forEpoch: geoEpoch)
                     }
@@ -2328,10 +2416,17 @@ public struct PatchedBodyHost: View {
         return render(tree, context: context)
     }
 
+    /// The native-demote diagnostic for an OS capability demote (once per distinct message).
+    static func logCapabilityDemote(typeName: String, unsupported: [PatchRenderFeature]) {
+        PatchRuntimeLog.warnOnce(
+            "PatchSDK: patched view \(typeName) uses \(unsupported.map(\.rawValue).joined(separator: ", ")), "
+            + "unavailable on \(PatchViewPatchRegistry.runningOS) — rendered natively.")
+    }
+
     /// The view to show on a FAILURE pass (decode error / uncovered slot, token, or row
     /// slot). On iOS 17+ the demote also bumps the Observation signal so the thunk re-
     /// evaluates to native; this rendered fallback covers the gap until then — and is the
-    /// ONLY thing keeping an iOS-16 device (no Observation invalidation) from showing a
+    /// ONLY thing keeping an iOS 15/16 device (no Observation invalidation) from showing a
     /// blank screen (bug #50). Renders the last-known-good tree if one exists, else an
     /// EmptyView (the first-ever eval failed, with nothing good to fall back to).
     private func demoteFallback() -> AnyView {
@@ -2592,7 +2687,8 @@ public struct PatchedBodyHost: View {
         walk(node)
         return PatchedBodyIDSets(opaque: opaque, token: token, row: row, action: action,
                                  effect: effect, callback: callback, button: button,
-                                 animationValueKeys: animation)
+                                 animationValueKeys: animation,
+                                 renderFeatures: PatchRenderCapabilities.requiredFeatures(in: node))
     }
 
     /// Every `.opaque` node id in the tree — the leaves the thunk must supply a
@@ -2905,6 +3001,15 @@ extension Patch {
         // JSON string-build when the instance's marshalled state is unchanged since a recent
         // render of THIS view type (the SwiftUI steady state). Writebacks stay live.
         let extraction = PatchInstanceInputs.extract(from: instance, typeName: typeName)
+        // OS CAPABILITY PRE-FLIGHT (below iOS/tvOS 17 only — see `needsCapabilityPreflight`):
+        // render this view's first tree of the epoch now and return nil (→ the native body, in
+        // THIS evaluation) if the OS can't render it faithfully. The decoded tree is stored in
+        // the same render cache `PatchedBodyHost` reads, so the host's first body eval reuses it.
+        if PatchViewPatchRegistry.needsCapabilityPreflight,
+           !capabilityPreflight(typeName: typeName, entry: entry, propsJSON: extraction.json,
+                                tokens: tokens()) {
+            return nil
+        }
         return PatchedBodyHost(typeName: typeName, entry: entry,
                                propsJSON: extraction.json,
                                writebacks: extraction.writebacks,
@@ -2914,6 +3019,50 @@ extension Patch {
                                actionSlots: actionSlots(),
                                effectSlots: effectSlots(),
                                callbackSlots: callbackSlots())
+    }
+
+    /// Returns false (and demotes `typeName` for the epoch) when the tree this view would render
+    /// FIRST — the live props, no guest state yet, the thunk's input-riding tokens, exactly the
+    /// input `PatchedBodyHost` builds on its first body eval — uses a construct the running OS
+    /// can't render faithfully. Runs once per view type per module epoch; any WASM/decode failure
+    /// returns true so the host handles it exactly as before (its own demote path).
+    @MainActor
+    func capabilityPreflight(typeName: String, entry: PatchViewManifest.Entry, propsJSON: String,
+                             tokens: [String: PatchHostToken]) -> Bool {
+        let registry = PatchViewPatchRegistry.shared
+        if registry.hasPassedCapabilityPreflight(typeName: typeName) { return true }
+        let epoch = moduleEpoch
+        var merged = PatchFlatJSON.merge(
+            base: propsJSON,
+            override: PatchedBodyHost.reconcileGuestOverride(guestState: "", baseline: "", currentProps: propsJSON))
+        if let tokenJSON = PatchedBodyHost.inputTokenJSON(from: tokens) {
+            merged = PatchFlatJSON.merge(base: merged, override: tokenJSON)
+        }
+        let cacheEntry: PatchedBodyCacheEntry
+        if let cached = PatchedBodyRenderCache.shared.lookup(
+            typeName: typeName, export: entry.export, input: merged, epoch: epoch) {
+            cacheEntry = cached
+        } else {
+            guard let emission = try? viewBodyEmission(state: merged, export: entry.export) else { return true }
+            cacheEntry = PatchedBodyCacheEntry(tree: emission.root, slotArgs: emission.slotArgs ?? [:],
+                                               idSets: PatchedBodyHost.collectAllIDs(emission.root))
+            PatchedBodyRenderCache.shared.store(typeName: typeName, export: entry.export, input: merged,
+                                                epoch: epoch, payload: cacheEntry)
+            if entry.isStructurallyStatic == true {
+                PatchedBodyStaticTemplateCache.shared.store(typeName: typeName, export: entry.export,
+                                                            epoch: epoch, payload: cacheEntry)
+            }
+        }
+        let unsupported = PatchRenderCapabilities.unsupportedFeatures(
+            cacheEntry.idSets.renderFeatures, on: PatchViewPatchRegistry.runningOS)
+        guard !unsupported.isEmpty else {
+            registry.markPassedCapabilityPreflight(typeName: typeName, forEpoch: epoch)
+            return true
+        }
+        PatchedBodyHost.logCapabilityDemote(typeName: typeName, unsupported: unsupported)
+        // Deferred like every other demote (never mutate registry signals mid body-evaluation).
+        Task { @MainActor in registry.markFailed(typeName: typeName, forEpoch: epoch) }
+        return false
     }
 
     /// Routes a CHILD-VIEW CALLBACK fired by a native slot's forwarding closure

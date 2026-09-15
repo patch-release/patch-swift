@@ -54,7 +54,7 @@ public struct AccessibilityBridge: Bridge {
                 // is a synchronous nonisolated `@Sendable` closure. Posting is
                 // fire-and-forget, so hop onto the main actor with `Task { @MainActor in
                 // … }` (capturing only the Sendable `String`). A Task is used rather
-                // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 16 floor.
+                // than `MainActor.assumeIsolated` (iOS 17+) to keep the iOS 15 floor.
                 Task { @MainActor in
                     UIAccessibility.post(notification: .announcement, argument: message)
                 }
