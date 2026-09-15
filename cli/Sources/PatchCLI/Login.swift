@@ -114,7 +114,9 @@ struct Login: ParsableCommand {
             }
             print("")
             print("  ✓ Publish token saved to \(configURL.lastPathComponent) — you can push now.")
-            print("  → Keep .Patch.yml out of version control; it holds a live credential.")
+            // The file now holds a live credential, so ACT rather than advise:
+            // the default next move is `git add .`.
+            Login.protectConfig(root: configURL.deletingLastPathComponent())
             print("  → For CI, set PATCH_API_KEY instead of committing the token.")
         case .expired, .timedOut:
             throw ValidationError("The browser confirmation wasn't completed in time. Re-run `patchcli login`.")
@@ -124,4 +126,31 @@ struct Login: ParsableCommand {
             throw ValidationError("Gave up polling after repeated errors: \(message)")
         }
     }
+
+    /// Keep the freshly-written token out of version control, and say plainly
+    /// what happened. Shared by `login` and `init` — both write a token.
+    ///
+    /// Never fatal: a `.gitignore` we couldn't write is a warning, not a reason
+    /// to fail a command that already succeeded in getting the token.
+    static func protectConfig(root: URL) {
+        // Already committed? An ignore rule won't help — git honours the index
+        // over .gitignore — and the token must be treated as compromised.
+        if GitIgnoreGuard.isTracked(root: root) {
+            print("")
+            print("  ⚠ \(GitIgnoreGuard.alreadyCommittedAdvice)")
+            return
+        }
+        switch GitIgnoreGuard.ensureIgnored(root: root) {
+        case .added(let url):
+            print("  ✓ Added .Patch.yml to \(url.lastPathComponent) — it holds a live credential.")
+        case .alreadyIgnored:
+            print("  ✓ .Patch.yml is already gitignored.")
+        case .notAGitRepo:
+            print("  → Not a git repo. When you create one, gitignore .Patch.yml — it holds a live credential.")
+        case .failed(let why):
+            print("  ⚠ Couldn't update .gitignore (\(why)).")
+            print("    Add `.Patch.yml` yourself — it holds a live credential.")
+        }
+    }
+
 }

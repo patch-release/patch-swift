@@ -177,3 +177,141 @@ enum CLISupport {
         }
     }
 }
+
+// MARK: - Keeping the publish token out of version control
+
+/// Guards against committing a live publish credential.
+///
+/// Before the credential split, `.Patch.yml` held only `app_key` — a PUBLIC
+/// identifier that also ships inside the app binary — so committing the file was
+/// harmless and nothing ever ignored it. It now also holds `publish_token`, which
+/// authorizes publishing code to every user of an app. The default path
+/// (`patchcli init` → `git add .`) would therefore commit a live secret, so the
+/// commands that WRITE a token add the ignore rule themselves rather than only
+/// advising it.
+enum GitIgnoreGuard {
+    static let entry = ".Patch.yml"
+
+    /// Outcome of `ensureIgnored`, so callers can print something honest rather
+    /// than claiming a protection that didn't happen.
+    enum Result {
+        case added(URL)
+        /// Already covered by an existing rule — nothing written.
+        case alreadyIgnored
+        /// Not a git repository (no `.git` at `root`), so there is nothing to
+        /// ignore into. Deliberately does NOT create a `.gitignore`: writing one
+        /// into a non-repo is litter, and into a subdirectory of someone else's
+        /// repo is worse.
+        case notAGitRepo
+        /// Couldn't read/write `.gitignore` — never fatal; the caller warns.
+        case failed(String)
+    }
+
+    /// Read-only counterpart to `ensureIgnored`, for callers that must not write
+    /// (notably `doctor`, which is contractually read-only and CI-safe).
+    enum State {
+        case ignored
+        case notIgnored
+        case notAGitRepo
+        case unknown(String)
+    }
+
+    static func ignoreState(root: URL) -> State {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root.appendingPathComponent(".git").path) else {
+            return .notAGitRepo
+        }
+        let url = root.appendingPathComponent(".gitignore")
+        guard fm.fileExists(atPath: url.path) else { return .notIgnored }
+        guard let existing = try? String(contentsOf: url, encoding: .utf8) else {
+            return .unknown("unreadable .gitignore")
+        }
+        return isCovered(existing) ? .ignored : .notIgnored
+    }
+
+    /// A real ignore rule for `.Patch.yml` — not a comment mentioning it, and not
+    /// a `!` negation (which explicitly UN-ignores and must never read as safe).
+    private static func isCovered(_ contents: String) -> Bool {
+        contents.split(whereSeparator: \.isNewline).contains { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("#") || t.hasPrefix("!") { return false }
+            return t == entry || t == "/\(entry)" || t == "\(entry)/"
+        }
+    }
+
+    /// Add `.Patch.yml` to `<root>/.gitignore` unless it is already ignored.
+    ///
+    /// Conservative by construction: it only ever APPENDS, never rewrites, and it
+    /// preserves the file's existing trailing-newline state so the diff is one
+    /// line. A `.gitignore` is often hand-curated — mangling it would be a far
+    /// worse outcome than a missing entry.
+    @discardableResult
+    static func ensureIgnored(root: URL) -> Result {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root.appendingPathComponent(".git").path) else {
+            return .notAGitRepo
+        }
+
+        let url = root.appendingPathComponent(".gitignore")
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+
+        // Match a real rule, not a substring: `.Patch.yml` must not be considered
+        // covered by a comment mentioning it, and `!.Patch.yml` is a NEGATION
+        // (explicitly un-ignoring it) which must not read as already-ignored.
+        if isCovered(existing) { return .alreadyIgnored }
+
+        let block = """
+            # Holds a live publish token (ppt_…) — the credential that authorizes
+            # shipping code to your users. Keep it out of version control.
+            \(entry)
+            """
+        // Separate from whatever precedes it, without introducing a blank line
+        // into a file that didn't have one.
+        var addition = ""
+        if !existing.isEmpty {
+            if !existing.hasSuffix("\n") { addition += "\n" }
+            addition += "\n"
+        }
+        addition += block + "\n"
+
+        do {
+            try (existing + addition).write(to: url, atomically: true, encoding: .utf8)
+            return .added(url)
+        } catch {
+            return .failed("\(error)")
+        }
+    }
+
+    /// True when git currently TRACKS `.Patch.yml` — i.e. the secret is already
+    /// committed and a `.gitignore` entry alone will not help (git ignores the
+    /// ignore file for paths already in the index).
+    ///
+    /// Best-effort: any git failure returns false rather than a false alarm.
+    static func isTracked(root: URL) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["git", "-C", root.path, "ls-files", "--error-unmatch", entry]
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// The remediation for an ALREADY-COMMITTED config. Untracking is not enough
+    /// on its own — the token is in history and must be treated as compromised.
+    static let alreadyCommittedAdvice = """
+        .Patch.yml is tracked by git, so your publish token is committed (and in \
+        history — anyone with repo access, past or present, can read it).
+
+          1. Revoke the token: console → Settings → CLI publish tokens → Revoke.
+          2. git rm --cached .Patch.yml && git commit -m "stop tracking .Patch.yml"
+          3. Run `patchcli login` for a fresh token.
+
+        For CI, set PATCH_API_KEY as a secret instead of committing the file.
+        """
+}

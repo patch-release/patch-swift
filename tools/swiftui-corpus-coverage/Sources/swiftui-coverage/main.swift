@@ -516,7 +516,10 @@ if perViewHash {
                     + "|E|" + String(describing: lv.effectSlots)
                     + "|I|" + String(describing: lv.inputs)
                     + "|S|" + String(describing: lv.stateModel)
-                out += "\(app)\t\(lv.viewName)\t\(isLowered ? 1 : 0)\t\(fnv1a(canon))\n"
+                // An entry's `availability` (its `if #available` thunk guard) is thunk-text only;
+                // drop the empty default so hashes stay comparable with pre-guard engines.
+                let canonForHash = canon.replacingOccurrences(of: "availability: [], ", with: "")
+                out += "\(app)\t\(lv.viewName)\t\(isLowered ? 1 : 0)\t\(fnv1a(canonForHash))\n"
             }
         }
     }

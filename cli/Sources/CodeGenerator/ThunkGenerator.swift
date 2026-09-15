@@ -137,6 +137,12 @@ public struct ThunkGenerator {
         /// (it needs no private access) — minimal in-file footprint. The associated names
         /// are surfaced to the developer in an actionable comment.
         case sameFileBecausePrivate(members: [String])
+        /// PRIVATE-ACCESS FORWARDING (the default for a view whose thunk reads private members):
+        /// the WHOLE thunk rides the generated file, with its private references rewritten to
+        /// internal `__patch_*` forwarders; the view's own file gets only `dynamic` + one compact,
+        /// stable `PATCH-ACCESS` forwarder extension listing exactly these `members`.
+        /// See `PatchAccessForwarding`.
+        case forwardedPrivateAccess(members: [String])
     }
 
     public struct Result {
@@ -175,6 +181,25 @@ public struct ThunkGenerator {
         /// HYBRID only: re-render `generatedFileContents` EXCLUDING the given view names
         /// (used to drop views whose declaring file had to be restored). nil outside hybrid.
         public var regenerateGeneratedFileExcluding: ((Set<String>) -> String)? = nil
+        /// HYBRID only: for each view that could NOT be forwarded (and so kept the legacy same-file
+        /// helper block), the blocking private member → why it can't be forwarded. Surfaced by
+        /// `patchcli prepare` so the developer sees exactly what forces generated code into a file.
+        public var forwardingBlockers: [String: [String: String]] = [:]
+        /// Each source file → the View type names whose `var body` got a `dynamic` inserted by THIS
+        /// run (recorded by `patchcli prepare` so `patchcli unprepare` removes only its own `dynamic`).
+        public var dynamicInsertedTypes: [URL: [String]] = [:]
+        /// HYBRID only: per view, the FILE-PRIVATE symbols (a `private struct` child view, a
+        /// `fileprivate enum` token, a file-scope `private let`) its thunk closures reference —
+        /// the subset of its `.sameFileBecausePrivate` names that are not its own members.
+        public var privateSymbolReferences: [String: [String]] = [:]
+        /// Every discovered View that got NO thunk, with the reason (duplicate name, generic
+        /// `where`, no locatable/`#if`-guarded body, a thunk that failed the parse gate). Its
+        /// body renders native. Reporting-only.
+        public var skippedViews: [String: String] = [:]
+        /// Every view the engine lowered during prepare (the SAME contract + cross-file bundle
+        /// the build uses) — lets `patchcli prepare` print the per-view compatibility summary
+        /// without re-lowering. Reporting-only.
+        public var loweredViews: [BodyLowering.LoweredView] = []
     }
 
     // MARK: - Public API
@@ -200,7 +225,26 @@ public struct ThunkGenerator {
     /// `sameFile == false` (and not `hybrid`), the OLDEST behavior: all thunks are emitted
     /// into one separate `PatchThunks.generated.swift` (`thunkFileContents`), where
     /// private members are unreachable.
-    public func prepare(sources: [SourceFile], sameFile: Bool = true, hybrid: Bool = false) -> Result {
+    ///
+    /// `nativeViews` (the `.Patch.yml` `native_views:` list, grown by `prepare --verify`) are
+    /// views proven to break the app build once prepared: they get NO thunk and NO `dynamic`
+    /// — a `dynamic` left on their body by an earlier run is REMOVED, restoring the original
+    /// source span — so they render exactly as the developer wrote them. Empty = unchanged
+    /// behavior (byte-identical output).
+    ///
+    /// `accessForwarding` (HYBRID only, default on): a view whose helpers read private members gets
+    /// a compact PATCH-ACCESS forwarder extension in its file instead of a same-file helper block.
+    ///
+    /// `thunkableFiles` (standardized absolute paths) restricts which files may receive a
+    /// `dynamic` keyword / host a thunked view: the build target's real compile set (see
+    /// `XcodeTargetSources`). A view declared in a file OUTSIDE it (another target, a local
+    /// package module, a file removed from the project) gets no thunk — a thunk for a type the
+    /// target doesn't compile can never build. `sources` must still be the WHOLE scanned set:
+    /// the cross-file lowering bundle is built from it (identical to the build's). nil = every
+    /// file is thunkable (the historical behavior).
+    public func prepare(sources: [SourceFile], sameFile: Bool = true, hybrid: Bool = false,
+                        nativeViews: Set<String> = [], accessForwarding: Bool = true,
+                        thunkableFiles: Set<String>? = nil) -> Result {
         // (1) GLOBAL discovery across all files. Collect View type names, count how
         // many top-level struct decls share each name (duplicates are unsafe to
         // thunk — `extension Name` would be ambiguous), and flag generic views with
@@ -215,6 +259,7 @@ public struct ThunkGenerator {
         // generated extension must live in the file holding the view's private members;
         // a struct's private members are file-scoped to where the struct is declared).
         var declaringFile: [String: URL] = [:]
+        var availability: [String: [String]] = [:]
         let parsed: [(file: SourceFile, tree: SourceFileSyntax)] = sources.map {
             ($0, Parser.parse(source: $0.text))
         }
@@ -224,6 +269,7 @@ public struct ThunkGenerator {
             for (name, n) in d.structCounts { structDeclCounts[name, default: 0] += n }
             genericWhereViews.formUnion(d.genericWhereViews)
             privateViewTypes.formUnion(d.privateViewTypes)
+            for (name, attrs) in d.availabilityAttributes { availability[name, default: []].append(contentsOf: attrs) }
             for name in d.structDeclaredNames where declaringFile[name] == nil {
                 declaringFile[name] = file.url
             }
@@ -234,9 +280,20 @@ public struct ThunkGenerator {
         // only via `extension X: View` has 0 struct decls of that name and stays
         // eligible — there's no ambiguity.) Bodies of non-eligible views are left
         // untouched (no `dynamic`, no thunk) — they simply render native.
+        let thunkablePaths = thunkableFiles.map { Set($0.map(Self.normalizedPath)) }
+        func isThunkable(_ url: URL) -> Bool {
+            guard let thunkablePaths else { return true }
+            return thunkablePaths.contains(Self.normalizedPath(url.path))
+        }
+        let assocTypeRiskViews = Self.inferredAssociatedTypeRiskViews(parsed.map { $0.tree }, viewNames: viewNames)
         let eligible = viewNames.filter {
             structDeclCounts[$0, default: 0] <= 1 && !genericWhereViews.contains($0)
+                && declaringFile[$0].map(isThunkable) ?? true
+                && !assocTypeRiskViews.contains($0)
+                && !nativeViews.contains($0)
         }
+        // Kept-native views whose body still carries a `dynamic` from an earlier prepare run.
+        let nativeKept = viewNames.intersection(nativeViews)
 
         // (2) Per file: insert `dynamic` before each eligible view body (skipping
         // bodies inside `#if` — their availability is config-dependent, so a thunk
@@ -245,18 +302,37 @@ public struct ThunkGenerator {
         // stripped) is what a same-file block is later appended to.
         var fileText: [URL: String] = [:]            // URL → current working text
         var fileInsertions: [URL: Int] = [:]
+        var dynamicInsertedTypes: [URL: [String]] = [:]
         var viewsWithBody = Set<String>()
         for (file, tree) in parsed {
             let collector = BodyCollector(viewNames: eligible)
-            collector.walk(tree)
+            // A file outside the target's compile set never gets `dynamic` or a thunk (its
+            // stale generated block, if any, is still stripped below).
+            if isThunkable(file.url) { collector.walk(tree) }
             for hit in collector.hits { viewsWithBody.insert(hit.type) }
             // Always start from the file with any prior generated SAME-FILE block stripped
             // (idempotent regeneration — never duplicate). Then splice `dynamic`.
-            let stripped = Self.stripSameFileBlock(from: file.text)
-            let toInsert = collector.hits.filter { !$0.alreadyDynamic }.map { $0.offset }
-            let withDynamic = toInsert.isEmpty
+            let stripped = PatchAccessForwarding.stripAllGeneratedBlocks(from: file.text)
+            let toInsertHits = collector.hits.filter { !$0.alreadyDynamic }
+            let toInsert = toInsertHits.map { $0.offset }
+            if !toInsertHits.isEmpty { dynamicInsertedTypes[file.url] = toInsertHits.map { $0.type } }
+            var withDynamic = toInsert.isEmpty
                 ? stripped : Self.insertDynamic(into: stripped, atUTF8Offsets: toInsert)
-            if stripped != file.text || !toInsert.isEmpty {
+            // Restore kept-native views: drop the `dynamic` a previous run inserted on their body.
+            // (The stripped generated block sits at the END of the file, so byte offsets taken
+            // from the original tree are still valid for everything before it.)
+            var removedDynamic = false
+            if !nativeKept.isEmpty {
+                let nativeCollector = BodyCollector(viewNames: nativeKept)
+                nativeCollector.walk(tree)
+                let ranges = nativeCollector.dynamicModifierRanges
+                if !ranges.isEmpty {
+                    // Both edit kinds are position-based; apply them together, last-first.
+                    withDynamic = Self.applyDynamicEdits(to: stripped, insertAt: toInsert, removeRanges: ranges)
+                    removedDynamic = true
+                }
+            }
+            if stripped != file.text || !toInsert.isEmpty || removedDynamic {
                 fileText[file.url] = withDynamic
             }
             fileInsertions[file.url] = toInsert.count
@@ -268,6 +344,17 @@ public struct ThunkGenerator {
         // type-checks when `body` is `dynamic`. A view with no findable body gets
         // no thunk. (Pared down per-view below by the build-safety validation.)
         var thunkViews = eligible.intersection(viewsWithBody).sorted()
+        // REPORTING-ONLY: why each discovered view got no thunk (renders native).
+        var skippedViews: [String: String] = [:]
+        for name in viewNames.subtracting(thunkViews) {
+            if structDeclCounts[name, default: 0] > 1 {
+                skippedViews[name] = "another top-level struct shares the name `\(name)`"
+            } else if genericWhereViews.contains(name) {
+                skippedViews[name] = "generic view with a `where` clause"
+            } else {
+                skippedViews[name] = "no patchable `var body: some View` found (e.g. inside `#if`)"
+            }
+        }
 
         // (4) MIXED-VIEW SLOTS + DESIGN-SYSTEM TOKENS: lower each thunk view's body
         // (same code path the engine uses at push) to find its SLOTABLE opaque leaves
@@ -307,10 +394,12 @@ public struct ThunkGenerator {
         // bodyHash and the SDK renders native (zero WASM). A view that doesn't lower here
         // gets no entry → its thunk bakes `nil` → the SDK fail-safes that view to WASM.
         var viewBaselineHashes: [String: String] = [:]
+        var allLowered: [BodyLowering.LoweredView] = []
         for (file, _) in parsed {
-            for lv in lowering.lowerAllViews(source: file.text, sameFileThunk: loweringContract,
-                                             crossFile: crossFile)
-            where thunkViews.contains(lv.viewName) {
+            let lowered = lowering.lowerAllViews(source: file.text, sameFileThunk: loweringContract,
+                                                 crossFile: crossFile)
+            allLowered.append(contentsOf: lowered)
+            for lv in lowered where thunkViews.contains(lv.viewName) {
                 let slotable = lv.opaqueLeaves.filter { $0.slotable && !$0.source.isEmpty }
                 // De-dup by id across files (a view's body lives in one place).
                 if viewSlots[lv.viewName] == nil { viewSlots[lv.viewName] = slotable }
@@ -335,15 +424,24 @@ public struct ThunkGenerator {
         // whole pipeline fail-safe — one bad view can never disable patching for the rest,
         // and a non-parsing thunk can never reach the developer's build.
         thunkViews = thunkViews.filter {
-            Self.viewThunkValidates(name: $0, slots: viewSlots[$0] ?? [],
+            let ok = Self.viewThunkValidates(name: $0, slots: viewSlots[$0] ?? [],
                                     tokens: viewTokens[$0] ?? [], rowSlots: viewRowSlots[$0] ?? [],
                                     actionSlots: viewActionSlots[$0] ?? [],
                                     effectSlots: viewEffectSlots[$0] ?? [],
                                     callbackSlots: viewCallbackSlots[$0] ?? [])
+            if !ok { skippedViews[$0] = "its generated thunk didn't parse cleanly (kept native)" }
+            return ok
+        }
+        func withReport(_ r: Result) -> Result {
+            var r = r
+            r.skippedViews = skippedViews
+            r.loweredViews = allLowered
+            r.dynamicInsertedTypes = dynamicInsertedTypes
+            return r
         }
 
         if hybrid {
-            return Self.renderHybrid(
+            return withReport(Self.renderHybrid(
                 parsed: parsed, fileText: fileText, declaringFile: declaringFile,
                 thunkViews: thunkViews, privateViewTypes: privateViewTypes, lowering: lowering,
                 crossFile: crossFile,
@@ -351,7 +449,9 @@ public struct ThunkGenerator {
                 viewActionSlots: viewActionSlots, viewEffectSlots: viewEffectSlots,
                 viewCallbackSlots: viewCallbackSlots,
                 baselineHashes: viewBaselineHashes,
-                totalInsertions: totalInsertions)
+                availability: availability,
+                totalInsertions: totalInsertions,
+                accessForwarding: accessForwarding))
         }
 
         if !sameFile {
@@ -367,9 +467,10 @@ public struct ThunkGenerator {
             let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
                 fileText[file.url].map { (file.url, $0) }
             }
-            return Result(modifiedFiles: modified, thunkFileContents: thunkFile,
+            return withReport(Result(modifiedFiles: modified,
+                          thunkFileContents: Self.applyAvailability(thunkFile, availability),
                           viewNames: thunkViews, dynamicInsertions: totalInsertions,
-                          sameFile: false)
+                          sameFile: false))
         }
 
         // (5) SAME-FILE mode: append each view's thunk extension to the file that
@@ -384,13 +485,15 @@ public struct ThunkGenerator {
             guard let target else { continue }
             viewsByFile[target, default: []].append(view)
         }
-        // Per-file imports the slot closures may need (third-party types in a view body).
-        // Carry the WHOLE-project import union to every block (cheap, `#if canImport`-
-        // guarded, de-duped against what the block already imports).
-        let imports = Self.collectImports(parsed.map { $0.tree })
+        // Imports for each block: ONLY the declaring file's OWN imports. Imports are
+        // FILE-scoped, so a block carrying the whole-project union injects modules the
+        // developer's file never imported — which breaks THEIR code, not just the thunk
+        // (real app: FoodTruck's `SubscriptionStoreView.swift` gained `import Combine`, making
+        // its own `Subscription` references `ambiguous for type lookup`). Every slot/token
+        // source in a same-file block comes from that same file, so its imports suffice.
         for (url, views) in viewsByFile {
             // Base text = the file with `dynamic` spliced + any prior block stripped.
-            let base = fileText[url] ?? Self.stripSameFileBlock(
+            let base = fileText[url] ?? PatchAccessForwarding.stripAllGeneratedBlocks(
                 from: parsed.first { $0.file.url == url }?.file.text ?? "")
             let block = Self.renderSameFileBlock(viewNames: views.sorted(), slots: viewSlots,
                                                  tokens: viewTokens, rowSlots: viewRowSlots,
@@ -398,17 +501,17 @@ public struct ThunkGenerator {
                                                  effectSlots: viewEffectSlots,
                                                  callbackSlots: viewCallbackSlots,
                                                  baselineHashes: viewBaselineHashes,
-                                                 extraImports: imports)
+                                                 extraImports: Self.fileImports(url, parsed))
             let trimmed = base.hasSuffix("\n") ? base : base + "\n"
-            fileText[url] = trimmed + "\n" + block
+            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability)
         }
 
         let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
             fileText[file.url].map { (file.url, $0) }
         }
-        return Result(modifiedFiles: modified, thunkFileContents: "",
+        return withReport(Result(modifiedFiles: modified, thunkFileContents: "",
                       viewNames: thunkViews, dynamicInsertions: totalInsertions,
-                      sameFile: true)
+                      sameFile: true))
     }
 
     // MARK: - HYBRID placement
@@ -443,7 +546,9 @@ public struct ThunkGenerator {
         viewEffectSlots: [String: [BodyLowering.EffectSlot]] = [:],
         viewCallbackSlots: [String: [BodyLowering.CallbackSlot]] = [:],
         baselineHashes: [String: String] = [:],
-        totalInsertions: Int
+        availability: [String: [String]] = [:],
+        totalInsertions: Int,
+        accessForwarding: Bool = true
     ) -> Result {
         var fileText = fileText
         // A `private`/`fileprivate struct X: View` can't be EXTENDED from the separate
@@ -469,13 +574,34 @@ public struct ThunkGenerator {
                 if let s = stmt.item.as(StructDeclSyntax.self), thunkViewSet.contains(s.name.text) {
                     privateNamesByView[s.name.text, default: []]
                         .formUnion(BodyLowering.inaccessibleMemberNames(of: s))
+                    // Members declared inside a `#if os(iOS) … #endif` member block are
+                    // invisible to the flat member scan above — but a slot that reads one is
+                    // just as file-scoped (real app: FoodTruck `#if os(iOS) @State private var
+                    // manageSubscriptionSheetIsPresented`, whose separate-file thunk failed with
+                    // `'…' is inaccessible due to 'private' protection level`).
+                    privateNamesByView[s.name.text, default: []]
+                        .formUnion(Self.ifConfigInaccessibleMemberNames(s.memberBlock.members,
+                                                                       allInaccessible: false))
                 } else if let e = stmt.item.as(ExtensionDeclSyntax.self) {
                     let name = Self.baseTypeName(e.extendedType)
                     guard thunkViewSet.contains(name) else { continue }
                     privateNamesByView[name, default: []]
                         .formUnion(Self.inaccessibleExtensionMemberNames(e))
+                    let extPrivate = e.modifiers.contains {
+                        $0.name.tokenKind == .keyword(.private) || $0.name.tokenKind == .keyword(.fileprivate)
+                    }
+                    privateNamesByView[name, default: []]
+                        .formUnion(Self.ifConfigInaccessibleMemberNames(e.memberBlock.members,
+                                                                       allInaccessible: extPrivate))
                 }
             }
+        }
+        // A private property WRAPPER's backing storage `_name` is just as file-scoped as `name`
+        // (real app: ACHNBrowserUI `@Namespace private var namespace` read as
+        // `_namespace.wrappedValue` in a slot → `'_namespace' is inaccessible due to 'private'`
+        // from Patch/Generated/). Placement-only: an extra name can only keep a view file-scoped.
+        for (view, names) in privateNamesByView {
+            privateNamesByView[view] = names.union(names.filter { !$0.hasPrefix("$") && !$0.hasPrefix("_") }.map { "_" + $0 })
         }
         // The engine's own diagnostic (separate-file lowering) — used to enrich the named
         // members when our emitted-source scan needs no private access but the engine still
@@ -491,7 +617,14 @@ public struct ThunkGenerator {
                 engineFlaggedPrivate[lv.viewName] = lv.inaccessibleReadNames
             }
         }
+        // FILE-PRIVATE SYMBOLS of each declaring file (types at any depth, file-scope values,
+        // other types' private members). A thunk closure naming one — a `private struct
+        // MixGainRow: View` child slotted as `AnyView(MixGainRow(…))` — compiles only in that
+        // file, exactly like a private member read, so it forces the same placement.
+        var filePrivateByURL: [URL: FilePrivateSymbols] = [:]
+        for (file, tree) in parsed { filePrivateByURL[file.url] = Self.filePrivateSymbols(in: tree) }
         var placements: [String: Placement] = [:]
+        var privateSymbolRefsByView: [String: [String]] = [:]
         var separateViews: [String] = []
         // view → the private member names that force same-file placement.
         var sameFileViews: [String: [String]] = [:]
@@ -534,6 +667,23 @@ public struct ThunkGenerator {
             // in a path our source list doesn't surface) — guarantees we never separate a
             // view that genuinely needs file-scoped access.
             var blocking = Set(referenced).union(engineFlaggedPrivate[view] ?? [])
+            // File-private TYPES / file-scope values / other types' private members named by
+            // the emitted sources (the view's own type name excluded — it's never private here).
+            let viewFile = declaringFile[view]
+                ?? parsed.first { $0.file.text.contains("struct \(view)") }?.file.url
+            if let viewFile, let symbols = filePrivateByURL[viewFile], !symbols.isEmpty {
+                var symbolRefs = Set<String>()
+                for src in sources {
+                    symbolRefs.formUnion(Self.filePrivateSymbolReferences(in: src, symbols: symbols))
+                }
+                symbolRefs.remove(view)
+                // A name that is ALSO the view's own private member stays reported as a member.
+                symbolRefs.subtract(privates)
+                if !symbolRefs.isEmpty {
+                    privateSymbolRefsByView[view] = symbolRefs.sorted()
+                    blocking.formUnion(symbolRefs)
+                }
+            }
             // Report bare names (drop the `$`-projection alias) for the developer comment.
             blocking = Set(blocking.map { $0.hasPrefix("$") ? String($0.dropFirst()) : $0 })
             if blocking.isEmpty {
@@ -546,6 +696,41 @@ public struct ThunkGenerator {
             }
         }
 
+        // (A2) PRIVATE-ACCESS FORWARDING (the default). For each view the member scan put
+        // same-file, try to move its WHOLE thunk to the generated file by retargeting every private
+        // reference in its rendered helper methods to an internal forwarder that lives in a compact
+        // PATCH-ACCESS block in the view's file. All-or-nothing per view; anything not provably
+        // forwardable keeps the legacy factored same-file block (and is reported by name).
+        var forwarded: [String: PatchAccessForwarding.Forwarded] = [:]
+        var forwardingBlockers: [String: [String: String]] = [:]
+        if accessForwarding {
+            let treeByURL = Dictionary(parsed.map { ($0.file.url, $0.tree) }, uniquingKeysWith: { a, _ in a })
+            let knownSelfTypedStatics = PatchAccessForwarding.selfTypedStaticMembers(trees: parsed.map { $0.tree })
+            for view in sameFileViews.keys.sorted() {
+                guard let url = declaringFile[view], let tree = treeByURL[url] else {
+                    forwardingBlockers[view] = ["<declaration>": "view's declaring file not found"]
+                    continue
+                }
+                let catalog = PatchAccessForwarding.catalog(
+                    viewName: view, declaringTree: tree,
+                    allPrivateMemberNames: privateNamesByView[view] ?? [],
+                    knownSelfTypedStatics: knownSelfTypedStatics)
+                let methods = Self.renderMethodsExtension(
+                    name: view, slots: viewSlots[view] ?? [],
+                    tokens: viewTokens[view] ?? [], rowSlots: viewRowSlots[view] ?? [],
+                    actionSlots: viewActionSlots[view] ?? [], effectSlots: viewEffectSlots[view] ?? [],
+                    callbackSlots: viewCallbackSlots[view] ?? [])
+                let outcome = PatchAccessForwarding.forward(methodsExtension: methods, catalog: catalog)
+                if let f = outcome.forwarded {
+                    forwarded[view] = f
+                    placements[view] = .forwardedPrivateAccess(members: f.members)
+                } else {
+                    forwardingBlockers[view] = outcome.blockers
+                }
+            }
+            for view in forwarded.keys { sameFileViews[view] = nil }
+        }
+
         let imports = Self.collectImports(parsed.map { $0.tree })
 
         // (B) THE DEDICATED GENERATED FILE. The body-replacement extension for every thunk
@@ -554,14 +739,15 @@ public struct ThunkGenerator {
         // methods are emitted into their own file (C); private view types get a FULL same-
         // file thunk (D). Empty when there are no separate/same-file-member thunk views.
         let generatedReplacementViews = thunkViews.filter { !sameFileFullSet.contains($0) }
-        let generatedFile = generatedReplacementViews.isEmpty ? "" : Self.renderGeneratedFolderFile(
+        let generatedFile = generatedReplacementViews.isEmpty ? "" : Self.applyAvailability(Self.renderGeneratedFolderFile(
             replacementViews: generatedReplacementViews,
             methodViews: separateViews.sorted(),
             slots: viewSlots, tokens: viewTokens, rowSlots: viewRowSlots,
             actionSlots: viewActionSlots, effectSlots: viewEffectSlots,
             callbackSlots: viewCallbackSlots,
             baselineHashes: baselineHashes,
-            extraImports: imports)
+            extraImports: imports,
+            forwardedMethodExtensions: forwarded.keys.sorted().map { forwarded[$0]!.rewrittenText }), availability)
 
         // (C+D) SAME-FILE BLOCKS, ONE per declaring file (a file may declare several views):
         //   (C) FACTORED helper methods (+ an actionable annotation) for private-MEMBER
@@ -583,27 +769,52 @@ public struct ThunkGenerator {
             guard let target else { continue }
             fullByFile[target, default: []].append(view)
         }
-        let sameFileFiles = Set(factoredByFile.keys).union(fullByFile.keys)
+        var accessByFile: [URL: [String]] = [:]
+        for view in forwarded.keys {
+            guard let target = declaringFile[view] else { continue }
+            accessByFile[target, default: []].append(view)
+        }
+        let sameFileFiles = Set(factoredByFile.keys).union(fullByFile.keys).union(accessByFile.keys)
         for url in sameFileFiles {
-            let base = fileText[url] ?? Self.stripSameFileBlock(
+            let base = fileText[url] ?? PatchAccessForwarding.stripAllGeneratedBlocks(
                 from: parsed.first { $0.file.url == url }?.file.text ?? "")
-            let block = Self.renderSameFileCombinedBlock(
+            // The PATCH-ACCESS forwarder block and (only for views that couldn't be forwarded) the
+            // legacy PATCH-THUNKS block are appended as ONE contiguous region — exactly where the
+            // single legacy block used to sit, with the same single blank line before it — so the
+            // native-shell fingerprint (which strips both marker pairs) is byte-identical to a file
+            // prepared by an older CLI.
+            let accessBlock = (accessByFile[url] ?? []).isEmpty ? "" : PatchAccessForwarding.renderBlock(
+                views: (accessByFile[url] ?? []).sorted().map { ($0, forwarded[$0]!.forwarders) })
+            let hasThunkBlock = !(factoredByFile[url] ?? []).isEmpty || !(fullByFile[url] ?? []).isEmpty
+            let trimmed = base.hasSuffix("\n") ? base : base + "\n"
+            guard hasThunkBlock else {
+                fileText[url] = trimmed + "\n" + Self.applyAvailability(accessBlock, availability)
+                continue
+            }
+            let legacyBlock = Self.renderSameFileCombinedBlock(
                 factoredViews: (factoredByFile[url] ?? []).sorted(),
                 fullViews: (fullByFile[url] ?? []).sorted(),
                 privateMembers: sameFileViews,
+                privateSymbols: privateSymbolRefsByView,
                 slots: viewSlots, tokens: viewTokens, rowSlots: viewRowSlots,
                 actionSlots: viewActionSlots, effectSlots: viewEffectSlots,
                 callbackSlots: viewCallbackSlots,
                 baselineHashes: baselineHashes,
-                extraImports: imports)
-            let trimmed = base.hasSuffix("\n") ? base : base + "\n"
-            fileText[url] = trimmed + "\n" + block
+                // The file's OWN imports only — see `fileImports` (imports are file-scoped;
+                // the project-wide union would leak into, and can break, the developer's code).
+                extraImports: Self.fileImports(url, parsed))
+            let block = accessBlock + (accessForwarding
+                ? PatchAccessForwarding.compactInFileThunkBlock(
+                    legacyBlock, factoredViews: factoredByFile[url] ?? [], fullViews: fullByFile[url] ?? [],
+                    blockers: forwardingBlockers)
+                : legacyBlock)
+            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability)
         }
 
         let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
             fileText[file.url].map { (file.url, $0) }
         }
-        return Result(modifiedFiles: modified, thunkFileContents: "",
+        var hybridResult = Result(modifiedFiles: modified, thunkFileContents: "",
                       viewNames: thunkViews, dynamicInsertions: totalInsertions,
                       sameFile: false,
                       generatedFileContents: generatedFile,
@@ -611,15 +822,22 @@ public struct ThunkGenerator {
                       viewDeclaringFile: declaringFile,
                       regenerateGeneratedFileExcluding: { excluded in
                           let reps = generatedReplacementViews.filter { !excluded.contains($0) }
-                          return reps.isEmpty ? "" : Self.renderGeneratedFolderFile(
+                          return reps.isEmpty ? "" : Self.applyAvailability(Self.renderGeneratedFolderFile(
                               replacementViews: reps,
                               methodViews: separateViews.sorted().filter { !excluded.contains($0) },
                               slots: viewSlots, tokens: viewTokens, rowSlots: viewRowSlots,
                               actionSlots: viewActionSlots, effectSlots: viewEffectSlots,
                               callbackSlots: viewCallbackSlots,
                               baselineHashes: baselineHashes,
-                              extraImports: imports)
+                              extraImports: imports,
+                              forwardedMethodExtensions: forwarded.keys.sorted()
+                                  .filter { !excluded.contains($0) }.map { forwarded[$0]!.rewrittenText }), availability)
                       })
+        hybridResult.forwardingBlockers = forwardingBlockers
+        // File-private symbols are reported only where they still force same-file placement — a
+        // forwarded view reaches them through its PATCH-ACCESS factory/forwarders.
+        hybridResult.privateSymbolReferences = privateSymbolRefsByView.filter { forwarded[$0.key] == nil }
+        return hybridResult
     }
 
     /// Render the dedicated generated-folder file: the `@_dynamicReplacement` body-
@@ -637,7 +855,8 @@ public struct ThunkGenerator {
         effectSlots: [String: [BodyLowering.EffectSlot]] = [:],
         callbackSlots: [String: [BodyLowering.CallbackSlot]] = [:],
         baselineHashes: [String: String] = [:],
-        extraImports: [String]
+        extraImports: [String],
+        forwardedMethodExtensions: [String] = []
     ) -> String {
         var out = """
         // PatchThunks.generated.swift — GENERATED BY `patchcli prepare`. DO NOT EDIT.
@@ -661,10 +880,12 @@ public struct ThunkGenerator {
         //
         // For each SwiftUI View in this target: an `@_dynamicReplacement(for: body)` that
         // routes the body through the Patch OTA renderer when a patch is active, else the
-        // original compiled `body`. Most views also have their `__patchSlots()`/
-        // `__patchTokens()`/`__patchRowSlots()` helpers here. A view whose thunk must read
-        // a `private`/`fileprivate` member keeps ONLY those helper methods in its own file
-        // (Swift access control is file-scoped) — its replacement still rides this file.
+        // original compiled `body`, plus its `__patchSlots()`/`__patchTokens()`/… helpers.
+        // A view whose helpers read `private`/`fileprivate` members reaches them through
+        // the `__patch_*` forwarders in a small PATCH-ACCESS extension in its own file
+        // (Swift access control is file-scoped). Only a `private` View TYPE — which no
+        // other file can extend — or a member that can't be forwarded keeps a compact
+        // thunk block in its file; `patchcli prepare` names each one and why.
         //
         // Regenerated wholesale on every `patchcli prepare`. Safe to delete this whole
         // folder — `patchcli prepare` recreates it (and re-inserts the `dynamic` keywords).
@@ -679,6 +900,7 @@ public struct ThunkGenerator {
         for imp in extraImports {
             out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
         }
+        out += Self.literalArgHelperDecl
         // The body-replacement extensions (every view).
         for name in replacementViews {
             out += "\n" + Self.renderReplacementExtension(name: name, baselineHash: baselineHashes[name])
@@ -690,6 +912,11 @@ public struct ThunkGenerator {
                 tokens: tokens[name] ?? [], rowSlots: rowSlots[name] ?? [],
                 actionSlots: actionSlots[name] ?? [], effectSlots: effectSlots[name] ?? [],
                 callbackSlots: callbackSlots[name] ?? [])
+        }
+        // Helper methods of PRIVATE-ACCESS-FORWARDED views: their private references already
+        // retargeted to the `__patch_*` forwarders in each view's PATCH-ACCESS block.
+        for ext in forwardedMethodExtensions {
+            out += "\n" + ext
         }
         out += "#endif\n"
         return out
@@ -734,6 +961,7 @@ public struct ThunkGenerator {
         factoredViews: [String],
         fullViews: [String],
         privateMembers: [String: [String]],
+        privateSymbols: [String: [String]] = [:],
         slots: [String: [BodyLowering.OpaqueLeaf]],
         tokens: [String: [BodyLowering.HostToken]],
         rowSlots: [String: [BodyLowering.IndexedRowSlot]],
@@ -754,13 +982,25 @@ public struct ThunkGenerator {
 
         """
         for name in factoredViews {
-            let members = (privateMembers[name] ?? []).joined(separator: ", ")
-            out += """
-            // \(name): helper methods kept here — its body reads private member(s): \(members).
-            //   To move this into Patch/Generated/, make those member(s) `internal` (drop
-            //   `private`/`fileprivate`) and re-run `patchcli prepare`.
+            let symbols = privateSymbols[name] ?? []
+            let memberNames = (privateMembers[name] ?? []).filter { !symbols.contains($0) }
+            if !memberNames.isEmpty || symbols.isEmpty {
+                let members = memberNames.joined(separator: ", ")
+                out += """
+                // \(name): helper methods kept here — its body reads private member(s): \(members).
+                //   To move this into Patch/Generated/, make those member(s) `internal` (drop
+                //   `private`/`fileprivate`) and re-run `patchcli prepare`.
 
-            """
+                """
+            }
+            if !symbols.isEmpty {
+                out += """
+                // \(name): helper methods kept here — they reference file-private type(s)/symbol(s): \(symbols.joined(separator: ", ")).
+                //   To move this into Patch/Generated/, make those `internal` (drop
+                //   `private`/`fileprivate`) and re-run `patchcli prepare`.
+
+                """
+            }
         }
         for name in fullViews {
             out += """
@@ -781,6 +1021,7 @@ public struct ThunkGenerator {
         for imp in extraImports {
             out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
         }
+        out += Self.literalArgHelperDecl
         // Private-MEMBER views: helper methods only (replacement rides the generated file).
         for name in factoredViews {
             out += "\n" + Self.renderMethodsExtension(
@@ -816,6 +1057,11 @@ public struct ThunkGenerator {
     /// scoped type; a submodule path keeps its full form). `@_exported`/`@testable`-attributed
     /// imports are still skipped (their semantics don't survive a re-emit and aren't needed
     /// for type lookup).
+    /// The imports of ONE parsed file (the same normalization as `collectImports`).
+    static func fileImports(_ url: URL, _ parsed: [(file: SourceFile, tree: SourceFileSyntax)]) -> [String] {
+        collectImports(parsed.filter { $0.file.url == url }.map { $0.tree })
+    }
+
     static func collectImports(_ trees: [SourceFileSyntax]) -> [String] {
         var seen = Set<String>(["SwiftUI", "PatchSDK", "PatchSwiftUI", "PatchRender"])
         var out: [String] = []
@@ -864,6 +1110,13 @@ public struct ThunkGenerator {
         /// `@_dynamicReplacement` body-replacement, which the hybrid path otherwise always
         /// routes separate.
         var privateViewTypes: Set<String> = []
+        /// `@available(…)` attributes (verbatim) declared on a top-level struct, or on a
+        /// top-level `extension X: View`, keyed by type name. A generated `extension X { … }`
+        /// is a separate declaration that does NOT inherit the struct's availability, so an
+        /// `@available(iOS 17, *) struct X: View` in an app with a lower deployment target
+        /// failed to build (`'X' is only available in iOS 17.0 or newer`) unless every
+        /// generated extension of `X` repeats these attributes (see `applyAvailability`).
+        var availabilityAttributes: [String: [String]] = [:]
     }
 
     /// Discover top-level View types in one file: structs declaring `: View`, plus
@@ -875,29 +1128,175 @@ public struct ThunkGenerator {
         for stmt in tree.statements {
             if let s = stmt.item.as(StructDeclSyntax.self) {
                 d.structCounts[s.name.text, default: 0] += 1
+                let avail = Self.availabilityAttributes(s.attributes)
+                if !avail.isEmpty { d.availabilityAttributes[s.name.text, default: []].append(contentsOf: avail) }
                 if declaresViewConformance(s.inheritanceClause) {
                     d.viewNames.insert(s.name.text)
                     d.structDeclaredNames.insert(s.name.text)
                     if s.genericParameterClause != nil, s.genericWhereClause != nil {
                         d.genericWhereViews.insert(s.name.text)
                     }
-                    // A `private`/`fileprivate struct X: View` can't be extended cross-file,
-                    // so its thunk must be SAME-FILE — flag it.
-                    if s.modifiers.contains(where: {
-                        $0.name.tokenKind == .keyword(.private)
-                            || $0.name.tokenKind == .keyword(.fileprivate)
-                    }) {
-                        d.privateViewTypes.insert(s.name.text)
-                    }
+                }
+                // A `private`/`fileprivate struct X` can't be extended cross-file, so if it is a
+                // View — declared here OR retroactively via `extension X: View` — its thunk must
+                // be SAME-FILE. Flag every private struct (only view names are ever consulted).
+                if s.modifiers.contains(where: {
+                    $0.name.tokenKind == .keyword(.private)
+                        || $0.name.tokenKind == .keyword(.fileprivate)
+                }) {
+                    d.privateViewTypes.insert(s.name.text)
                 }
             } else if let e = stmt.item.as(ExtensionDeclSyntax.self),
                       declaresViewConformance(e.inheritanceClause) {
                 let name = Self.baseTypeName(e.extendedType)
                 d.viewNames.insert(name)
+                let avail = Self.availabilityAttributes(e.attributes)
+                if !avail.isEmpty { d.availabilityAttributes[name, default: []].append(contentsOf: avail) }
                 if e.genericWhereClause != nil { d.genericWhereViews.insert(name) }
             }
         }
         return d
+    }
+
+    /// Views that must NOT get a thunk because ANY cross-file extension of them trips a Swift
+    /// compiler associated-type-inference bug that breaks the DEVELOPER'S file. Shape (the
+    /// Xcode widget template, verbatim — real apps: PlantWateringReminder, SubscriptionTracker):
+    ///
+    ///     struct Provider: TimelineProvider {
+    ///         func placeholder(in context: Context) -> SimpleEntry { … }       // infers Entry
+    ///         func getTimeline(…, completion: @escaping (Timeline<Entry>) -> ()) { … }
+    ///     }
+    ///     struct NextWateringWidgetView: View { var entry: Provider.Entry; … }
+    ///
+    /// Compiled alone this is fine; add `extension NextWateringWidgetView { … }` in a file the
+    /// compiler visits FIRST (the generated thunk file) and the widget file fails with
+    /// `reference to invalid associated type 'Entry' of type 'Provider'` — the extension forces
+    /// `Provider.Entry` to resolve while `Provider`'s own signatures still reference the bare,
+    /// not-yet-inferred `Entry`. Detected syntactically: a stored property typed `A.B` where `A`
+    /// is a project type that declares no nested type/typealias `B` (so `B` is an INFERRED
+    /// associated type) and `A`'s own declaration references `B` by its bare name. Such a view
+    /// renders native (no `dynamic`, no thunk) — the build never breaks.
+    /// Source-text convenience for the build/fingerprint (`BuildPipeline.thunkIneligibleViewNames`):
+    /// the same set `prepare` excludes, so a view prepare won't thunk is never auto-routed.
+    public static func inferredAssociatedTypeRiskViews(sources: [String]) -> Set<String> {
+        let trees = sources.map { Parser.parse(source: $0) }
+        let views = trees.reduce(into: Set<String>()) { $0.formUnion(discover(in: $1).viewNames) }
+        return inferredAssociatedTypeRiskViews(trees, viewNames: views)
+    }
+
+    static func inferredAssociatedTypeRiskViews(_ trees: [SourceFileSyntax], viewNames: Set<String>) -> Set<String> {
+        var declaredTypes = Set<String>()
+        var nestedNames: [String: Set<String>] = [:]
+        var bareRefs: [String: Set<String>] = [:]
+        final class TypeRefCollector: SyntaxVisitor {
+            var names = Set<String>()
+            override func visit(_ node: IdentifierTypeSyntax) -> SyntaxVisitorContinueKind {
+                names.insert(node.name.text); return .visitChildren
+            }
+        }
+        func record(_ name: String, _ members: MemberBlockSyntax) {
+            declaredTypes.insert(name)
+            for m in members.members {
+                if let t = m.decl.as(TypeAliasDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                if let t = m.decl.as(StructDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                if let t = m.decl.as(ClassDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                if let t = m.decl.as(EnumDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                if let t = m.decl.as(ActorDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                if let t = m.decl.as(AssociatedTypeDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+            }
+            let c = TypeRefCollector(viewMode: .sourceAccurate)
+            c.walk(members)
+            bareRefs[name, default: []].formUnion(c.names)
+        }
+        var viewStructs: [StructDeclSyntax] = []
+        for tree in trees {
+            for stmt in tree.statements {
+                if let d = stmt.item.as(StructDeclSyntax.self) {
+                    record(d.name.text, d.memberBlock)
+                    if viewNames.contains(d.name.text) { viewStructs.append(d) }
+                } else if let d = stmt.item.as(ClassDeclSyntax.self) {
+                    record(d.name.text, d.memberBlock)
+                } else if let d = stmt.item.as(EnumDeclSyntax.self) {
+                    record(d.name.text, d.memberBlock)
+                } else if let d = stmt.item.as(ActorDeclSyntax.self) {
+                    record(d.name.text, d.memberBlock)
+                } else if let e = stmt.item.as(ExtensionDeclSyntax.self) {
+                    let name = Self.baseTypeName(e.extendedType)
+                    guard !name.contains(".") else { continue }
+                    let c = TypeRefCollector(viewMode: .sourceAccurate)
+                    c.walk(e.memberBlock)
+                    bareRefs[name, default: []].formUnion(c.names)
+                    for m in e.memberBlock.members {
+                        if let t = m.decl.as(TypeAliasDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                        if let t = m.decl.as(StructDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                        if let t = m.decl.as(ClassDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                        if let t = m.decl.as(EnumDeclSyntax.self) { nestedNames[name, default: []].insert(t.name.text) }
+                    }
+                }
+            }
+        }
+        var risky = Set<String>()
+        for view in viewStructs {
+            for member in view.memberBlock.members {
+                guard let v = member.decl.as(VariableDeclSyntax.self) else { continue }
+                for binding in v.bindings {
+                    guard let type = binding.typeAnnotation?.type else { continue }
+                    final class MemberTypeCollector: SyntaxVisitor {
+                        var pairs: [(String, String)] = []
+                        override func visit(_ node: MemberTypeSyntax) -> SyntaxVisitorContinueKind {
+                            if let base = node.baseType.as(IdentifierTypeSyntax.self) {
+                                pairs.append((base.name.text, node.name.text))
+                            }
+                            return .visitChildren
+                        }
+                    }
+                    let mc = MemberTypeCollector(viewMode: .sourceAccurate)
+                    mc.walk(type)
+                    for (base, member) in mc.pairs
+                    where declaredTypes.contains(base)
+                        && !(nestedNames[base]?.contains(member) ?? false)
+                        && (bareRefs[base]?.contains(member) ?? false) {
+                        risky.insert(view.name.text)
+                    }
+                }
+            }
+        }
+        return risky
+    }
+
+    /// Canonical path for membership comparison (`/private/tmp` ≡ `/tmp`, `..` resolved).
+    public static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// The `@available(…)` attributes in an attribute list, verbatim (trimmed).
+    static func availabilityAttributes(_ attrs: AttributeListSyntax) -> [String] {
+        attrs.compactMap { element -> String? in
+            guard let a = element.as(AttributeSyntax.self),
+                  a.attributeName.trimmedDescription == "available" else { return nil }
+            return a.trimmedDescription
+        }
+    }
+
+    /// Prefix every generated `extension X {` line (a line that is EXACTLY that header —
+    /// the only shape the thunk renderers emit) with the `@available` attributes of `X`'s
+    /// declaration, so the extension is valid in an app whose deployment target is below
+    /// the view's availability. Pure text over the rendered output: slot/token ids, the
+    /// guest tree and every `bodyHash` are untouched, and a view with no `@available`
+    /// attribute renders byte-identically.
+    static func applyAvailability(_ text: String, _ availability: [String: [String]]) -> String {
+        guard !availability.isEmpty, !text.isEmpty else { return text }
+        var changed = false
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            guard line.hasPrefix("extension "), line.hasSuffix(" {") else { return String(line) }
+            let name = String(line.dropFirst("extension ".count).dropLast(" {".count))
+            guard let attrs = availability[name], !attrs.isEmpty else { return String(line) }
+            changed = true
+            var seen = Set<String>()
+            let unique = attrs.filter { seen.insert($0).inserted }
+            return (unique + [String(line)]).joined(separator: "\n")
+        }
+        return changed ? lines.joined(separator: "\n") : text
     }
 
     /// Top-level View type names in a file (convenience for tests).
@@ -935,6 +1334,158 @@ public struct ThunkGenerator {
         return out
     }
 
+    /// The `private`/`fileprivate` member names (bare + `$`-prefixed) declared inside `#if`
+    /// clauses of a member block, recursing into nested `#if`s. Members at the top level of
+    /// the block are NOT included (the flat scans cover those). `allInaccessible` marks every
+    /// member private (a `private extension`).
+    static func ifConfigInaccessibleMemberNames(_ members: MemberBlockItemListSyntax,
+                                                allInaccessible: Bool) -> Set<String> {
+        func isInaccessible(_ modifiers: DeclModifierListSyntax) -> Bool {
+            allInaccessible || modifiers.contains {
+                $0.name.tokenKind == .keyword(.private) || $0.name.tokenKind == .keyword(.fileprivate)
+            }
+        }
+        func collect(_ list: MemberBlockItemListSyntax, nested: Bool, into out: inout Set<String>) {
+            for member in list {
+                if let ifc = member.decl.as(IfConfigDeclSyntax.self) {
+                    for clause in ifc.clauses {
+                        if case .decls(let inner)? = clause.elements {
+                            collect(inner, nested: true, into: &out)
+                        }
+                    }
+                    continue
+                }
+                guard nested else { continue }
+                if let v = member.decl.as(VariableDeclSyntax.self), isInaccessible(v.modifiers) {
+                    for b in v.bindings {
+                        let name = b.pattern.trimmedDescription
+                        guard !name.isEmpty else { continue }
+                        out.insert(name); out.insert("$" + name)
+                    }
+                } else if let f = member.decl.as(FunctionDeclSyntax.self), isInaccessible(f.modifiers) {
+                    out.insert(f.name.text)
+                }
+            }
+        }
+        var out = Set<String>()
+        collect(members, nested: false, into: &out)
+        return out
+    }
+
+    // MARK: - File-private SYMBOLS (types + file-scope decls)
+
+    /// The symbols declared in ONE file that an extension in ANOTHER file (the separate
+    /// `Patch/Generated/PatchThunks.generated.swift`) cannot see, because Swift access control
+    /// is file-scoped. `privateNamesByView` only covers a view's own private MEMBERS; a thunk
+    /// closure can equally name a file-private TYPE (`AnyView(MixGainRow(…))` for a
+    /// `private struct MixGainRow: View` child), a nested private type (`Row(…)` for a
+    /// `private struct Row` inside the view), a `fileprivate enum Palette` design token, or a
+    /// file-scope `private let`/`private func`. Each of those compiles in the view's own file
+    /// but is `cannot find 'X' in scope` from the generated file — the customer's build break.
+    public struct FilePrivateSymbols: Sendable, Equatable {
+        /// `private`/`fileprivate` TYPE names (struct/class/enum/actor/protocol/typealias)
+        /// declared at file scope OR nested at any depth. Matched wherever the name is used
+        /// (a call `T(…)`, a type position `[T]`/`Foo<T>`, a qualified `Outer.T`).
+        public var typeNames: Set<String> = []
+        /// `private`/`fileprivate` file-scope VALUE declarations (global `let`/`var`/`func`).
+        /// Matched only as a FREE reference (`kSpacing`, `format(x)`) — a member selector
+        /// `item.format` names something else.
+        public var valueNames: Set<String> = []
+        /// `private`/`fileprivate` MEMBERS of OTHER types/extensions in the file (member →
+        /// declaring type base names), e.g. `extension Color { fileprivate static let brand }`.
+        /// Matched only as a qualified (`Color.brand`) or implicit (`.brand`) member access.
+        public var members: [String: Set<String>] = [:]
+        /// Every type name DECLARED in the file (any access). An implicit `.member` only
+        /// matches a private member of a type NOT declared here (an `extension Color { fileprivate
+        /// static let brand }`) — a local type's member is reached qualified, keeping common
+        /// implicit names (`.title`, `.large`) from over-matching.
+        public var localTypeNames: Set<String> = []
+        public var isEmpty: Bool { typeNames.isEmpty && valueNames.isEmpty && members.isEmpty }
+        public init() {}
+    }
+
+    static func isPrivateOrFileprivate(_ modifiers: DeclModifierListSyntax) -> Bool {
+        modifiers.contains {
+            $0.name.tokenKind == .keyword(.private) || $0.name.tokenKind == .keyword(.fileprivate)
+        }
+    }
+
+    /// Collect a file's file-private symbols (see `FilePrivateSymbols`).
+    public static func filePrivateSymbols(in tree: SourceFileSyntax) -> FilePrivateSymbols {
+        var out = FilePrivateSymbols()
+        // Walk a member block of type `owner` (nil = file scope). `inheritedPrivate` marks a
+        // `private extension` whose members are all file-private.
+        func walk(_ decl: DeclSyntax, owner: String?, inheritedPrivate: Bool) {
+            func typeDecl(_ name: String, _ modifiers: DeclModifierListSyntax, _ block: MemberBlockSyntax?) {
+                out.localTypeNames.insert(name)
+                // A type declared inside a `private extension X { … }` (or a private type) is
+                // file-private even without its own modifier — NewsApp's
+                // `private extension FavoritesView { struct Constants }`.
+                let isPrivate = inheritedPrivate || isPrivateOrFileprivate(modifiers)
+                if isPrivate { out.typeNames.insert(name) }
+                for m in block?.members ?? [] { walk(m.decl, owner: name, inheritedPrivate: false) }
+            }
+            if let s = decl.as(StructDeclSyntax.self) { typeDecl(s.name.text, s.modifiers, s.memberBlock); return }
+            if let c = decl.as(ClassDeclSyntax.self) { typeDecl(c.name.text, c.modifiers, c.memberBlock); return }
+            if let e = decl.as(EnumDeclSyntax.self) { typeDecl(e.name.text, e.modifiers, e.memberBlock); return }
+            if let a = decl.as(ActorDeclSyntax.self) { typeDecl(a.name.text, a.modifiers, a.memberBlock); return }
+            if let p = decl.as(ProtocolDeclSyntax.self) { typeDecl(p.name.text, p.modifiers, nil); return }
+            if let t = decl.as(TypeAliasDeclSyntax.self) { typeDecl(t.name.text, t.modifiers, nil); return }
+            if let x = decl.as(ExtensionDeclSyntax.self) {
+                let name = baseTypeName(x.extendedType).split(separator: ".").last.map(String.init) ?? ""
+                let priv = isPrivateOrFileprivate(x.modifiers)
+                for m in x.memberBlock.members { walk(m.decl, owner: name, inheritedPrivate: priv) }
+                return
+            }
+            if let ic = decl.as(IfConfigDeclSyntax.self) {
+                for clause in ic.clauses {
+                    guard let items = clause.elements?.as(MemberBlockItemListSyntax.self) else {
+                        if let stmts = clause.elements?.as(CodeBlockItemListSyntax.self) {
+                            for s in stmts { if let d = s.item.as(DeclSyntax.self) {
+                                walk(d, owner: owner, inheritedPrivate: inheritedPrivate) } }
+                        }
+                        continue
+                    }
+                    for m in items { walk(m.decl, owner: owner, inheritedPrivate: inheritedPrivate) }
+                }
+                return
+            }
+            var valueNames: [String] = []
+            var modifiers: DeclModifierListSyntax?
+            if let v = decl.as(VariableDeclSyntax.self) {
+                modifiers = v.modifiers
+                for b in v.bindings {
+                    if let id = b.pattern.as(IdentifierPatternSyntax.self) { valueNames.append(id.identifier.text) }
+                }
+            } else if let f = decl.as(FunctionDeclSyntax.self) {
+                modifiers = f.modifiers; valueNames = [f.name.text]
+            }
+            guard let modifiers, !valueNames.isEmpty,
+                  inheritedPrivate || isPrivateOrFileprivate(modifiers) else { return }
+            if let owner {
+                for n in valueNames { out.members[n, default: []].insert(owner) }
+            } else {
+                out.valueNames.formUnion(valueNames)
+            }
+        }
+        for stmt in tree.statements {
+            if let d = stmt.item.as(DeclSyntax.self) { walk(d, owner: nil, inheritedPrivate: false) }
+        }
+        return out
+    }
+
+    /// The file-private symbols (of `symbols`) that a thunk closure `source` references —
+    /// those force the closure to live SAME-FILE. A safe OVER-approximation: an unrelated
+    /// same-named identifier only keeps a view same-file (build-safe), never the reverse.
+    public static func filePrivateSymbolReferences(in source: String,
+                                                   symbols: FilePrivateSymbols) -> Set<String> {
+        guard !symbols.isEmpty else { return [] }
+        let tree = Parser.parse(source: "let __patch_probe = {\n\(source)\n}")
+        let scanner = FilePrivateSymbolRefScanner(symbols)
+        scanner.walk(tree)
+        return scanner.found
+    }
+
     static func declaresViewConformance(_ inh: InheritanceClauseSyntax?) -> Bool {
         guard let inh else { return false }
         return inh.inheritedTypes.contains { $0.type.trimmedDescription == "View" }
@@ -965,6 +1516,27 @@ public struct ThunkGenerator {
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    /// Insert `dynamic ` at `insertAt` offsets and delete the `removeRanges` byte ranges in one
+    /// pass (descending position, so earlier offsets stay valid).
+    static func applyDynamicEdits(to source: String, insertAt: [Int], removeRanges: [Range<Int>]) -> String {
+        enum Edit { case insert(Int), remove(Range<Int>) }
+        var edits: [(pos: Int, edit: Edit)] = insertAt.map { ($0, .insert($0)) }
+        edits += removeRanges.map { ($0.lowerBound, .remove($0)) }
+        var bytes = Array(source.utf8)
+        let token = Array("dynamic ".utf8)
+        for e in edits.sorted(by: { $0.pos > $1.pos }) {
+            switch e.edit {
+            case .insert(let off):
+                guard off >= 0, off <= bytes.count else { continue }
+                bytes.insert(contentsOf: token, at: off)
+            case .remove(let r):
+                guard r.lowerBound >= 0, r.upperBound <= bytes.count else { continue }
+                bytes.removeSubrange(r)
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     // MARK: - Per-view build-safety validation
 
     /// Validate that ONE view's generated thunk is BUILD-SAFE — the per-view isolation gate.
@@ -991,6 +1563,16 @@ public struct ThunkGenerator {
         // uses, plus a stub of the view type, so the extension parses in isolation. We only
         // assert it PARSES (no error tokens) — the type surface is supplied by the real app
         // at build; the harness/compile gates handle types.
+        // RESERVED-GUEST-IDENTIFIER NET: a host-side source carrying a guest-only identifier
+        // (`__geo_height`, `__numtok_…`, `_patchInputs`, …) parses fine but can never compile in
+        // the app — demote the view (no thunk) rather than write it. Mirrors the lowering's net,
+        // which also keeps the view out of the build + fingerprint strip.
+        let hostSources = BodyLowering.hostSideSources(
+            opaqueLeaves: slots, hostTokens: tokens, indexedRowSlots: rowSlots,
+            actionSlots: actionSlots, effectSlots: effectSlots, callbackSlots: callbackSlots)
+        if hostSources.contains(where: { !BodyLowering.reservedGuestIdentifiers(in: $0).isEmpty }) {
+            return false
+        }
         let thunk = renderExtension(name: name, slots: slots, tokens: tokens, rowSlots: rowSlots,
                                     actionSlots: actionSlots, effectSlots: effectSlots,
                                     callbackSlots: callbackSlots)
@@ -1063,6 +1645,7 @@ public struct ThunkGenerator {
         for imp in extraImports {
             out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
         }
+        out += Self.literalArgHelperDecl
 
         for name in viewNames {
             out += "\n" + renderExtension(name: name, slots: slots[name] ?? [],
@@ -1179,7 +1762,10 @@ public struct ThunkGenerator {
                 if leaf.stringArgs.isEmpty {
                     // Plain (non-parameterized) leaf — the source is rendered verbatim,
                     // ignoring the args.
-                    out += "        __s[\"\(leaf.id)\"] = { (_: [String]) in AnyView(\(leaf.source)) }\n"
+                    // SOLVER-FRIENDLY FORM: a fully-annotated closure signature (`-> AnyView`)
+                    // so the slot expression never has to be inferred jointly with the
+                    // dictionary-subscript assignment (see `renderMethodsExtension` note).
+                    out += Self.availabilityGuarded("        __s[\"\(leaf.id)\"] = { (_: [String]) -> AnyView in AnyView(\(leaf.source)) }\n", leaf.availability)
                 } else {
                     // Parameterized leaf — `leaf.source` is the TEMPLATE with each lifted
                     // string-literal arg replaced by a `\u{1}k\u{1}` placeholder. Render it
@@ -1188,7 +1774,16 @@ public struct ThunkGenerator {
                     // crash). The values arrive from the shipped tree's `slotArgs[id]`.
                     let n = leaf.stringArgs.count
                     let rendered = Self.renderParameterizedTemplate(leaf.source, argCount: n)
-                    out += "        __s[\"\(leaf.id)\"] = { (a: [String]) in a.count >= \(n) ? AnyView(\(rendered)) : AnyView(EmptyView()) }\n"
+                    // SOLVER-FRIENDLY FORM: explicit `-> AnyView` + a `guard` statement instead of
+                    // a `?:` ternary. A multi-statement closure with a fully-annotated signature is
+                    // type-checked on its own, statement by statement, AFTER the enclosing
+                    // `__s[id] = …` assignment — so the (possibly large) slot expression is never
+                    // solved in one constraint system together with the subscript, the `>=`
+                    // overload set and the ternary join. Same runtime behavior.
+                    out += Self.availabilityGuarded("        __s[\"\(leaf.id)\"] = { (a: [String]) -> AnyView in\n"
+                        + "            guard a.count >= \(n) else { return AnyView(EmptyView()) }\n"
+                        + "            return AnyView(\(rendered))\n"
+                        + "        }\n", leaf.availability)
                 }
             }
             out += "        return __s\n    }\n"
@@ -1208,23 +1803,25 @@ public struct ThunkGenerator {
         } else {
             out += "        var __t: [String: PatchHostToken] = [:]\n"
             for tok in tokens {
+                var entry = ""
+                defer { out += Self.availabilityGuarded(entry, tok.availability) }
                 switch tok.kind {
                 case .font:
-                    out += "        __t[\"\(tok.id)\"] = .font(\(tok.source))\n"
+                    entry = "        __t[\"\(tok.id)\"] = .font(\(tok.source))\n"
                 case .color:
-                    out += "        __t[\"\(tok.id)\"] = .color(\(tok.source))\n"
+                    entry = "        __t[\"\(tok.id)\"] = .color(\(tok.source))\n"
                 case .number:
                     // A numeric design token (`Theme.Radius.lg` → CGFloat) — resolved
                     // natively, carried as a Double. The SDK merges it into the guest's
                     // input JSON under the reserved `__numtok_<id>` key (the body reads it
                     // there). `Double(<src>)` widens CGFloat/Int uniformly.
-                    out += "        __t[\"\(tok.id)\"] = .number(Double(\(tok.source)))\n"
+                    entry = "        __t[\"\(tok.id)\"] = .number(Double(\(tok.source)))\n"
                 case .string:
                     // A host STRING token (an enum's computed-String `Text(…)` content like
                     // `confidence.label`) — resolved natively over `self`, carried as a
                     // String. The SDK merges it into the guest's input JSON under the
                     // reserved `__strtok_<id>` key (the Text content reads it there).
-                    out += "        __t[\"\(tok.id)\"] = .string(\(tok.source))\n"
+                    entry = "        __t[\"\(tok.id)\"] = .string(\(tok.source))\n"
                 }
             }
             out += "        return __t\n    }\n"
@@ -1302,7 +1899,7 @@ public struct ThunkGenerator {
             // verbatim — wrapped in a `{ content in AnyView(content.<mod>(…)) }` closure run over
             // `self`. The emitter proved it references no body-local and (with same-file placement)
             // can reach any private SELF member, so this compiles.
-            out += "        __e[\"\(slot.id)\"] = { (content: AnyView) -> AnyView in AnyView(\(slot.applySource)) }\n"
+            out += Self.availabilityGuarded("        __e[\"\(slot.id)\"] = { (content: AnyView) -> AnyView in AnyView(\(slot.applySource)) }\n", slot.availability)
         }
         out += "        return __e\n    }\n"
         return out
@@ -1333,7 +1930,7 @@ public struct ThunkGenerator {
             // in a `{ … }` closure run over `self`. The emitter proved it references no body-local
             // and no inaccessible member (same-file placement covers a private SELF read), so this
             // compiles.
-            out += "        __a[\"\(slot.id)\"] = { \(slot.source) }\n"
+            out += Self.availabilityGuarded("        __a[\"\(slot.id)\"] = { \(slot.source) }\n", slot.availability)
         }
         out += "        return __a\n    }\n"
         return out
@@ -1365,7 +1962,7 @@ public struct ThunkGenerator {
             // The slot source already has the closure arg replaced with the stable forwarder
             // (built by `tryRecordCallbackSlot`). Wrapped in `{ AnyView(<source>) }` so the
             // SDK's `([String]) -> AnyView` slot factory signature is satisfied.
-            out += "        __cb[\"\(slot.id)\"] = { AnyView(\(slot.slotSource)) }\n"
+            out += Self.availabilityGuarded("        __cb[\"\(slot.id)\"] = { () -> AnyView in AnyView(\(slot.slotSource)) }\n", slot.availability)
         }
         out += "        return __cb\n    }\n"
         return out
@@ -1390,6 +1987,14 @@ public struct ThunkGenerator {
         }
         out += "        var __r: [String: PatchRowSlot] = [:]\n"
         for slot in rowSlots {
+            let before = out.endIndex.utf16Offset(in: out)
+            defer {
+                if !slot.availability.isEmpty {
+                    let idx = String.Index(utf16Offset: before, in: out)
+                    let entry = String(out[idx...])
+                    out = String(out[..<idx]) + Self.availabilityGuarded(entry, slot.availability)
+                }
+            }
             // Each slot is its own immediately-invoked closure so the per-slot
             // `__coll` doesn't collide. `__coll` is the live collection; the factory
             // indexes it by offset (general over any Collection). A defensive bounds
@@ -1430,6 +2035,13 @@ public struct ThunkGenerator {
         return out
     }
 
+    /// Wrap one generated table entry (`__s[id] = …`, `__t[id] = …`, …) in the `#available`
+    /// conditions it was recorded under. An empty list returns the entry byte-identically.
+    static func availabilityGuarded(_ entry: String, _ availability: [String]) -> String {
+        guard !availability.isEmpty, !entry.isEmpty else { return entry }
+        return "        if \(availability.joined(separator: ", ")) {\n" + entry + "        }\n"
+    }
+
     /// Rewrite a PARAMETERIZED slot template into a Swift expression the thunk
     /// factory can evaluate: each `\u{1}k\u{1}` placeholder (the kth lifted
     /// string-literal arg) becomes `a[k]` (the runtime-supplied value). E.g.
@@ -1437,13 +2049,93 @@ public struct ThunkGenerator {
     /// The placeholders were written by the emitter's `opaqueCall` as bare
     /// identifiers, so a plain string replacement is exact (the sentinel `\u{1}`
     /// can't appear in real Swift source).
+    ///
+    /// A placeholder the lifter wrapped as `LocalizedStringKey(…)` renders `LocalizedStringKey(a[k])`.
+    /// A BARE placeholder (outside any string literal) renders `__patchLit(a[k])`: the lifter
+    /// lifts EVERY plain-string argument of a CUSTOM call as a bare placeholder, but the
+    /// original literal may have been initializing any `ExpressibleByStringLiteral` parameter —
+    /// `SearchField(placeholder: "Search…")` with `var placeholder: LocalizedStringKey` — where a
+    /// raw `a[k]` (a `String`) is `cannot convert value of type 'String' to expected argument type
+    /// 'LocalizedStringKey'` and breaks the app build. `__patchLit` (see `literalArgHelperDecl`)
+    /// is a String identity where a String fits and `T(stringLiteral:)` where it doesn't, so the
+    /// argument type-checks exactly where the literal did. Thunk text ONLY: the template (and so
+    /// every slot id, `stringArgs` and `bodyHash`) is unchanged.
     static func renderParameterizedTemplate(_ template: String, argCount: Int) -> String {
         var out = template
+        for k in 0..<argCount {
+            out = out.replacingOccurrences(of: "LocalizedStringKey(\u{1}\(k)\u{1})",
+                                           with: "LocalizedStringKey(a[\(k)])")
+        }
+        out = Self.wrapBarePlaceholders(out)
         for k in 0..<argCount {
             out = out.replacingOccurrences(of: "\u{1}\(k)\u{1}", with: "a[\(k)]")
         }
         return out
     }
+
+    /// Rewrite each `\u{1}k\u{1}` placeholder that sits OUTSIDE a string literal to
+    /// `__patchLit(\u{1}k\u{1})` (a later pass turns the inner placeholder into `a[k]`). A
+    /// placeholder inside quotes is left alone. If the quote structure can't be followed
+    /// (a raw `#"…"#` string) the template is returned unchanged — the historical rendering.
+    static func wrapBarePlaceholders(_ template: String) -> String {
+        guard template.contains("\u{1}") else { return template }
+        if template.contains("#\"") || template.contains("\"\"\"") { return template }
+        let chars = Array(template.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var inString = false
+        var interpolationDepth: [Int] = []   // paren depth at each open `\(` inside a string
+        var parenDepth = 0
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if inString {
+                if c == "\\", i + 1 < chars.count {
+                    if chars[i + 1] == "(" {
+                        interpolationDepth.append(parenDepth); parenDepth += 1; inString = false
+                        out.append(c); out.append(chars[i + 1]); i += 2; continue
+                    }
+                    out.append(c); out.append(chars[i + 1]); i += 2; continue
+                }
+                if c == "\"" { inString = false }
+                out.append(c); i += 1; continue
+            }
+            if c == "\"" { inString = true; out.append(c); i += 1; continue }
+            if c == "(" { parenDepth += 1 }
+            if c == ")" {
+                parenDepth -= 1
+                if let top = interpolationDepth.last, top == parenDepth {
+                    interpolationDepth.removeLast(); inString = true
+                }
+            }
+            if c == "\u{1}" {
+                // A placeholder: \u{1}<digits>\u{1}.
+                var j = i + 1
+                while j < chars.count, chars[j].properties.numericType != nil, chars[j].isASCII { j += 1 }
+                if j > i + 1, j < chars.count, chars[j] == "\u{1}" {
+                    out.append(contentsOf: "__patchLit(".unicodeScalars)
+                    for k in i...j { out.append(chars[k]) }
+                    out.append(")")
+                    i = j + 1; continue
+                }
+            }
+            out.append(c); i += 1
+        }
+        // Unbalanced quotes → don't trust the scan; keep the historical rendering.
+        return inString ? template : String(out)
+    }
+
+    /// The file-private helper every generated thunk file / same-file block declares for
+    /// parameterized slot args (see `renderParameterizedTemplate`). The non-generic overload
+    /// wins wherever a `String` is accepted (so `Image(systemName:)`, `String?` and
+    /// `S: StringProtocol` parameters resolve exactly as a raw `a[k]` did); the generic one
+    /// covers `LocalizedStringKey` / `LocalizedStringResource` / any other
+    /// `ExpressibleByStringLiteral` parameter whose literal type is `String`.
+    static let literalArgHelperDecl = """
+    @inline(__always) fileprivate func __patchLit(_ s: String) -> String { s }
+    @inline(__always) fileprivate func __patchLit<T: ExpressibleByStringLiteral>(_ s: String) -> T
+        where T.StringLiteralType == String { T(stringLiteral: s) }
+
+    """
 
     // MARK: - Same-file generated block
 
@@ -1485,6 +2177,7 @@ public struct ThunkGenerator {
         for imp in extraImports {
             out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
         }
+        out += Self.literalArgHelperDecl
         for name in viewNames {
             out += "\n" + renderExtension(name: name, slots: slots[name] ?? [],
                                           tokens: tokens[name] ?? [], rowSlots: rowSlots[name] ?? [],
@@ -1538,6 +2231,9 @@ private final class BodyCollector: SyntaxVisitor {
     private var ifConfigDepth = 0
     /// (offset of the `var` keyword, enclosing type name, already `dynamic`?).
     private(set) var hits: [(offset: Int, type: String, alreadyDynamic: Bool)] = []
+    /// Byte range of each hit's `dynamic` modifier INCLUDING its trailing trivia (so removing
+    /// it turns `dynamic var body` back into `var body`).
+    private(set) var dynamicModifierRanges: [Range<Int>] = []
 
     init(viewNames: Set<String>) {
         self.viewNames = viewNames
@@ -1580,6 +2276,9 @@ private final class BodyCollector: SyntaxVisitor {
         let offset = node.bindingSpecifier.positionAfterSkippingLeadingTrivia.utf8Offset
         let alreadyDynamic = node.modifiers.contains { $0.name.tokenKind == .keyword(.dynamic) }
         hits.append((offset, type, alreadyDynamic))
+        if let dyn = node.modifiers.first(where: { $0.name.tokenKind == .keyword(.dynamic) }) {
+            dynamicModifierRanges.append(dyn.positionAfterSkippingLeadingTrivia.utf8Offset..<dyn.endPosition.utf8Offset)
+        }
         return .visitChildren
     }
 
@@ -1590,5 +2289,48 @@ private final class BodyCollector: SyntaxVisitor {
               b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == "body",
               let t = b.typeAnnotation?.type else { return false }
         return t.trimmedDescription == "some View"
+    }
+}
+
+// MARK: - File-private symbol reference scanner
+
+/// Finds references to a file's `private`/`fileprivate` symbols in a thunk closure source:
+/// TYPE names in any expression or type position, file-scope VALUE names as free references,
+/// and other types' private MEMBERS as qualified/implicit member accesses.
+private final class FilePrivateSymbolRefScanner: SyntaxVisitor {
+    let symbols: ThunkGenerator.FilePrivateSymbols
+    private(set) var found = Set<String>()
+    init(_ symbols: ThunkGenerator.FilePrivateSymbols) {
+        self.symbols = symbols
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.baseName.text
+        if symbols.typeNames.contains(name) { found.insert(name) }
+        if let parent = node.parent?.as(MemberAccessExprSyntax.self), parent.declName.id == node.id {
+            // A member selector: `Owner.member` / `.member` (implicit) against a private member.
+            if let owners = symbols.members[name] {
+                if let base = parent.base {
+                    let baseName = base.trimmedDescription.split(separator: ".").last.map(String.init) ?? ""
+                    if owners.contains(baseName) { found.insert(name) }
+                } else if owners.contains(where: { !symbols.localTypeNames.contains($0) }) {
+                    found.insert(name)
+                }
+            }
+        } else if symbols.valueNames.contains(name) {
+            found.insert(name)
+        }
+        return .visitChildren
+    }
+
+    override func visit(_ node: IdentifierTypeSyntax) -> SyntaxVisitorContinueKind {
+        if symbols.typeNames.contains(node.name.text) { found.insert(node.name.text) }
+        return .visitChildren
+    }
+
+    override func visit(_ node: MemberTypeSyntax) -> SyntaxVisitorContinueKind {
+        if symbols.typeNames.contains(node.name.text) { found.insert(node.name.text) }
+        return .visitChildren
     }
 }

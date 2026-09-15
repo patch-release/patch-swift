@@ -64,6 +64,9 @@ struct Init: ParsableCommand {
     @Flag(name: .long, help: "Skip inserting the Patch startup code into App.swift.")
     var skipCode: Bool = false
 
+    @Flag(name: .long, help: "Skip the build verification after preparing views (it compiles the prepared project and keeps native any view whose generated code breaks the build).")
+    var noVerify: Bool = false
+
     mutating func run() throws {
         let root = URL(fileURLWithPath: path ?? FileManager.default.currentDirectoryPath).standardizedFileURL
         let fm = FileManager.default
@@ -222,6 +225,12 @@ struct Init: ParsableCommand {
         } else if manual {
             note("Skipped (--manual).")
         } else if let projectURL = Self.xcodeprojURL(root: root, detected: detected, fm: fm) {
+            // PatchSDK needs iOS 16+: say so up front (never change the developer's deployment target).
+            if let dt = XcodeTargetSources.deploymentTargetBelowSDKMinimum(projectURL: projectURL, target: targetName) {
+                note("⚠ \(targetName) deploys to iOS \(dt), but PatchSDK requires iOS \(XcodeTargetSources.sdkMinimumIOS)+. "
+                     + "The app won't build with PatchSDK until you raise the target's Minimum Deployment "
+                     + "to iOS \(XcodeTargetSources.sdkMinimumIOS) (Xcode: target → General). Patch won't change it for you.")
+            }
             do {
                 switch try XcodeProjectEditor.apply(projectURL: projectURL, targetName: targetName, fm: fm) {
                 case .alreadyPresent:
@@ -284,9 +293,13 @@ struct Init: ParsableCommand {
             manualSteps.append(Self.manualPrepareInstructions())
         } else {
             do {
+                // Verified by default: build the prepared project and keep native any view whose
+                // prepared code breaks it (bounded; `--no-verify` skips). Runs BEFORE the
+                // fingerprint snapshot below, so the registered shell already reflects it.
                 let n = try Prepare.execute(
                     root: root, excludes: cfg.exclude, target: targetName,
-                    assumeYes: assumeYes, thunksOnly: false, check: false, quiet: false)
+                    assumeYes: assumeYes, thunksOnly: false, check: false, quiet: false,
+                    verify: !noVerify)
                 if n == 0 {
                     note("No top-level SwiftUI views found yet — run `patchcli prepare` after you add views.")
                 }
@@ -492,6 +505,12 @@ struct Init: ParsableCommand {
                 ok("Reconnected existing app “\(app.name)” (\(app.bundleId)) — credentials saved in .Patch.yml.")
             } else {
                 ok("Registered “\(app.name)” (\(app.bundleId)) — credentials saved to .Patch.yml.")
+            }
+            // .Patch.yml now carries a live publish token, and the very next
+            // thing a developer does after `init` is `git add .`. Ignore it
+            // here rather than merely advising it.
+            if cfg.publishToken?.isEmpty == false {
+                Login.protectConfig(root: configURL.deletingLastPathComponent())
             }
             if app.publishToken == nil {
                 note("The backend did not return a publish token. Run `patchcli login` "

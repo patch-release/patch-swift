@@ -1,8 +1,8 @@
 {
   "generatedBy": "scripts/gen-cli-help.mjs",
   "cli": "patchcli",
-  "version": "1.7.0",
-  "commandCount": 20,
+  "version": "1.7.1",
+  "commandCount": 22,
   "commands": [
     {
       "name": "patchcli",
@@ -12,7 +12,9 @@
       "subcommands": [
         "setup",
         "init",
+        "login",
         "prepare",
+        "unprepare",
         "doctor",
         "build",
         "push",
@@ -26,7 +28,7 @@
         "compile",
         "overlay"
       ],
-      "help": "OVERVIEW: OTA code updates for native Swift iOS apps — auto-partitioning engine.\n\nUSAGE: patchcli <subcommand>\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information.\n\nSUBCOMMANDS:\n  setup                   Install the Swift→WebAssembly toolchain `patchcli\n                          release` needs (one-time).\n  init                    Set up this app for Patch: detect the project,\n                          register the app, add the SDK, insert startup code.\n  prepare                 Make this app's SwiftUI views patchable out of the\n                          box (dynamic-replacement thunks).\n  doctor                  Preflight: check (read-only) that this project is set\n                          up for OTA patches, with a fix hint per gap.\n  build                   Parse → classify → split → compile to a real .wasm\n                          module. Track F1.\n  push                    Upload the built .wasm to the backend (gated on\n                          fingerprint compatibility). Track F2.\n  release                 Release a patch to your users: build the .wasm then\n                          upload it in one shot (fingerprint-gated).\n  status                  Show the current deployment: version, rollout %,\n                          adoption, failure rate.\n  rollback                Roll back to the previous module (or --to <version>).\n  fingerprint             Compute / diff / register the native-shell\n                          fingerprint.\n  channels                List deployment channels for the configured app (+\n                          active module per channel).\n  whoami                  Print the configured app_id / workspace_id / base URL\n                          / channel from .Patch.yml.\n  analyze                 Analysis only, for CI. Reports OTA coverage; exits 1\n                          if the native shell changed.\n  compile                 Generate _wasm.swift for OTA-eligible code and\n                          compile it to a real .wasm module.\n  overlay                 Author + package an OTA resource overlay (colors /\n                          strings / images).\n\n  See 'patchcli help <subcommand>' for detailed help."
+      "help": "OVERVIEW: OTA code updates for native Swift iOS apps — auto-partitioning engine.\n\nUSAGE: patchcli <subcommand>\n\nOPTIONS:\n  --version               Show the version.\n  -h, --help              Show help information.\n\nSUBCOMMANDS:\n  setup                   Install the Swift→WebAssembly toolchain `patchcli\n                          release` needs (one-time).\n  init                    Set up this app for Patch: detect the project,\n                          register the app, add the SDK, insert startup code.\n  login                   Get a publish token for this project (opens your\n                          browser) and save it to .Patch.yml.\n  prepare                 Make this app's SwiftUI views patchable out of the\n                          box (dynamic-replacement thunks).\n  unprepare               Remove Patch's generated code, `dynamic` keywords and\n                          project wiring (the inverse of `prepare`).\n  doctor                  Preflight: check (read-only) that this project is set\n                          up for OTA patches, with a fix hint per gap.\n  build                   Parse → classify → split → compile to a real .wasm\n                          module. Track F1.\n  push                    Upload the built .wasm to the backend (gated on\n                          fingerprint compatibility). Track F2.\n  release                 Release a patch to your users: build the .wasm then\n                          upload it in one shot (fingerprint-gated).\n  status                  Show the current deployment: version, rollout %,\n                          adoption, failure rate.\n  rollback                Roll back to the previous module (or --to <version>).\n  fingerprint             Compute / diff / register the native-shell\n                          fingerprint.\n  channels                List deployment channels for the configured app (+\n                          active module per channel).\n  whoami                  Print the configured app_id / workspace_id / base URL\n                          / channel from .Patch.yml.\n  analyze                 Analysis only, for CI. Reports OTA coverage; exits 1\n                          if the native shell changed.\n  compile                 Generate _wasm.swift for OTA-eligible code and\n                          compile it to a real .wasm module.\n  overlay                 Author + package an OTA resource overlay (colors /\n                          strings / images).\n\n  See 'patchcli help <subcommand>' for detailed help."
     },
     {
       "name": "setup",
@@ -44,9 +46,19 @@
         "init"
       ],
       "overview": "Set up this app for Patch: detect the project, register the app, add the SDK, insert startup code.",
-      "usage": "patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code]",
+      "usage": "patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code] [--no-verify]",
       "subcommands": [],
-      "help": "OVERVIEW: Set up this app for Patch: detect the project, register the app, add\nthe SDK, insert startup code.\n\nUSAGE: patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code]\n\nARGUMENTS:\n  <path>                  Project directory (default: current directory).\n\nOPTIONS:\n  --target <target>       Build target. Optional: inferred from Package.swift /\n                          .xcodeproj / source layout when omitted.\n  --base-url <base-url>   Backend base URL to record in .Patch.yml (root or\n                          .../api/v1 — both work). Default: the live production\n                          API.\n  --force                 Overwrite an existing .Patch.yml and start fresh.\n  --manual                Skip all automation (browser registration, package\n                          add, code insertion); just write .Patch.yml and print\n                          the manual steps.\n  --no-open               Don't auto-open the browser for registration (the URL\n                          is printed instead).\n  --yes                   Apply proposed source-code changes without asking.\n  --skip-package          Skip adding the PatchSDK Swift package to the Xcode\n                          project.\n  --skip-code             Skip inserting the Patch startup code into App.swift.\n  --version               Show the version.\n  -h, --help              Show help information."
+      "help": "OVERVIEW: Set up this app for Patch: detect the project, register the app, add\nthe SDK, insert startup code.\n\nUSAGE: patchcli init [<path>] [--target <target>] [--base-url <base-url>] [--force] [--manual] [--no-open] [--yes] [--skip-package] [--skip-code] [--no-verify]\n\nARGUMENTS:\n  <path>                  Project directory (default: current directory).\n\nOPTIONS:\n  --target <target>       Build target. Optional: inferred from Package.swift /\n                          .xcodeproj / source layout when omitted.\n  --base-url <base-url>   Backend base URL to record in .Patch.yml (root or\n                          .../api/v1 — both work). Default: the live production\n                          API.\n  --force                 Overwrite an existing .Patch.yml and start fresh.\n  --manual                Skip all automation (browser registration, package\n                          add, code insertion); just write .Patch.yml and print\n                          the manual steps.\n  --no-open               Don't auto-open the browser for registration (the URL\n                          is printed instead).\n  --yes                   Apply proposed source-code changes without asking.\n  --skip-package          Skip adding the PatchSDK Swift package to the Xcode\n                          project.\n  --skip-code             Skip inserting the Patch startup code into App.swift.\n  --no-verify             Skip the build verification after preparing views (it\n                          compiles the prepared project and keeps native any\n                          view whose generated code breaks the build).\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "login",
+      "path": [
+        "login"
+      ],
+      "overview": "Get a publish token for this project (opens your browser) and save it to .Patch.yml.",
+      "usage": "patchcli login [--base-url <base-url>] [--no-open]",
+      "subcommands": [],
+      "help": "OVERVIEW: Get a publish token for this project (opens your browser) and save it\nto .Patch.yml.\n\nUSAGE: patchcli login [--base-url <base-url>] [--no-open]\n\nOPTIONS:\n  --base-url <base-url>   Backend base URL override.\n  --no-open               Don't auto-open the browser (the URL is printed\n                          instead).\n  --version               Show the version.\n  -h, --help              Show help information."
     },
     {
       "name": "prepare",
@@ -54,9 +66,19 @@
         "prepare"
       ],
       "overview": "Make this app's SwiftUI views patchable out of the box (dynamic-replacement thunks).",
-      "usage": "patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet]",
+      "usage": "patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet] [--verify] [--verify-timeout <verify-timeout>] [--report <report>]",
       "subcommands": [],
-      "help": "OVERVIEW: Make this app's SwiftUI views patchable out of the box\n(dynamic-replacement thunks).\n\nUSAGE: patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet]\n\nARGUMENTS:\n  <path>                  Project directory (default: the directory of\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --yes                   Apply source changes without asking.\n  --thunks-only           Only regenerate the thunk file; never edit existing\n                          sources. (For a build phase.)\n  --check                 Report views that aren't patch-ready (missing\n                          `dynamic`) and exit non-zero if any. (For CI /\n                          pre-push.)\n  --quiet                 Less output.\n  --version               Show the version.\n  -h, --help              Show help information."
+      "help": "OVERVIEW: Make this app's SwiftUI views patchable out of the box\n(dynamic-replacement thunks).\n\nUSAGE: patchcli prepare [<path>] [--yes] [--thunks-only] [--check] [--quiet] [--verify] [--verify-timeout <verify-timeout>] [--report <report>]\n\nARGUMENTS:\n  <path>                  Project directory (default: the directory of\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --yes                   Apply source changes without asking.\n  --thunks-only           Only regenerate the thunk file; never edit existing\n                          sources. (For a build phase.)\n  --check                 Report views that aren't patch-ready (missing\n                          `dynamic`) and exit non-zero if any. (For CI /\n                          pre-push.)\n  --quiet                 Less output.\n  --verify                After preparing, BUILD the project (xcodebuild, or\n                          swift build for a package) and keep native any view\n                          whose prepared code breaks the build — repeated until\n                          the build is clean. Kept-native views are recorded\n                          under `native_views:` in .Patch.yml.\n  --verify-timeout <verify-timeout>\n                          Per-build timeout in seconds for --verify. (default:\n                          600)\n  --report <report>       Also write the full per-view compatibility report\n                          (Markdown) to this path.\n  --version               Show the version.\n  -h, --help              Show help information."
+    },
+    {
+      "name": "unprepare",
+      "path": [
+        "unprepare"
+      ],
+      "overview": "Remove Patch's generated code, `dynamic` keywords and project wiring (the inverse of `prepare`).",
+      "usage": "patchcli unprepare [<path>] [--yes] [--dry-run] [--remove-sdk] [--keep-dynamic]",
+      "subcommands": [],
+      "help": "OVERVIEW: Remove Patch's generated code, `dynamic` keywords and project wiring\n(the inverse of `prepare`).\n\nRemoves the PATCH-ACCESS / PATCH-THUNKS blocks and the `dynamic` keywords\nprepare inserted, deletes Patch/Generated/ (and\nPatchUIKitThunks.generated.swift, .patch-backup copies), and unwires the\ngenerated files + PatchSwiftUI from the Xcode project / Package.swift. Add\n--remove-sdk to also remove the PatchSDK package and the injected\nPatch.configure startup code. Note: auto-prepare runs inside build/push/release\n— pass --no-prepare there (or set build.auto_prepare: false) if you want the\nproject to stay unprepared.\n\nUSAGE: patchcli unprepare [<path>] [--yes] [--dry-run] [--remove-sdk] [--keep-dynamic]\n\nARGUMENTS:\n  <path>                  Project directory (default: the directory of\n                          .Patch.yml, else CWD).\n\nOPTIONS:\n  --yes                   Apply without asking.\n  --dry-run               Only print what would change.\n  --remove-sdk            Also remove the PatchSDK package dependency and the\n                          injected `Patch.configure` code.\n  --keep-dynamic          Leave every `dynamic` keyword in place.\n  --version               Show the version.\n  -h, --help              Show help information."
     },
     {
       "name": "doctor",

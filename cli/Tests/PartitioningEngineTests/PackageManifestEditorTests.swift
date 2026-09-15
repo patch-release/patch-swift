@@ -10,7 +10,7 @@ final class PackageManifestEditorTests: XCTestCase {
 
     private func assertWired(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(
-            text.contains(".package(url: \"https://github.com/patch-release/patch-swift\", from: \"1.0.0\")"),
+            text.contains(".package(url: \"https://github.com/patch-release/patch-swift\", from: \"\(XcodeProjectEditor.minimumVersion)\")"),
             "package dependency missing:\n\(text)", file: file, line: line)
         XCTAssertTrue(
             text.contains(".product(name: \"PatchSDK\", package: \"patch-swift\")"),

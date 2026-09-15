@@ -1,14 +1,18 @@
 ---
 title: Running it yourself
-description: Serve patches from your own infrastructure — reference architectures for GCP, AWS and Azure.
+description: PatchSDK talks to any base URL, so you can serve modules yourself — reference architectures for GCP, AWS and Azure, and what static hosting cannot do.
 sidebar:
   order: 40
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside, CardGrid, Card, Tabs, TabItem, Steps, LinkCard } from '@astrojs/starlight/components';
 
-The engine and SDK are open source, and the SDK will talk to any base URL — so
-you can serve patches from infrastructure you control.
+Self-hosting Patch means serving OTA modules from infrastructure you control:
+the engine and SDK are open source, and `PatchConfiguration.apiBaseURL` accepts
+any base URL. What is not open source is the hosted control plane — rollouts,
+targeting, analytics, audit and team accounts — so a self-hosted deployment
+means building or forgoing those.
 
 This page is deliberately honest about what that gets you and what it doesn't.
 

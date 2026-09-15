@@ -132,6 +132,37 @@ final class DoctorTests: XCTestCase {
 
     // MARK: - Check 2: PatchSDK package
 
+    // MARK: - Check 2b: resolved PatchSDK version
+
+    private func writeResolved(_ version: String, in dir: URL) throws {
+        try write("""
+        { "originHash": "x", "version": 3, "pins": [
+          { "identity": "patch-swift", "kind": "remoteSourceControl",
+            "location": "https://github.com/patch-release/patch-swift",
+            "state": { "revision": "abc", "version": "\(version)" } } ] }
+        """, to: dir.appendingPathComponent("App.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"))
+    }
+
+    func testSDKVersionMatchingCLIIsPass() throws {
+        let dir = try makeTempDir("sdkver-eq")
+        try writeResolved(Patch.configuration.version, in: dir)
+        XCTAssertEqual(doctor().checkSDKVersion(root: dir).status, .pass)
+    }
+
+    func testSDKVersionOlderThanCLIIsWarn() throws {
+        let dir = try makeTempDir("sdkver-old")
+        try writeResolved("1.5.18", in: dir)
+        let check = doctor().checkSDKVersion(root: dir)
+        XCTAssertEqual(check.status, .warn)
+        XCTAssertTrue((check.detail ?? "").contains("older"), check.detail ?? "")
+    }
+
+    func testSDKVersionUnresolvedIsWarn() throws {
+        let dir = try makeTempDir("sdkver-none")
+        XCTAssertEqual(doctor().checkSDKVersion(root: dir).status, .warn)
+        XCTAssertNil(Doctor.resolvedPatchSDKVersion(root: dir))
+    }
+
     func testPackageXcodeprojWithSDKLinkedIsPass() throws {
         let dir = try makeTempDir("pkg-xcode-ok")
         let pbx = dir.appendingPathComponent("App.xcodeproj/project.pbxproj")

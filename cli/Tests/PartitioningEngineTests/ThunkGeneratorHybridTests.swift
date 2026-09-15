@@ -15,11 +15,15 @@ import PartitioningEngine
 ///     file-scoped) + an actionable comment NAMING those members. Its body-replacement
 ///     still rides the generated file (minimal in-file footprint).
 final class ThunkGeneratorHybridTests: XCTestCase {
-    private func run(_ files: [(name: String, text: String)]) -> ThunkGenerator.Result {
+    /// These tests pin the private-member SCAN and the same-file FALLBACK layout, so they run with
+    /// private-access forwarding OFF. (Forwarding is the default and is what normally happens to a
+    /// view the scan flags; it is covered — incl. multi-file swiftc type-checks of these same
+    /// fixtures — by `PatchAccessForwardingTests`.)
+    private func run(_ files: [(name: String, text: String)], accessForwarding: Bool = false) -> ThunkGenerator.Result {
         let sources = files.map {
             ThunkGenerator.SourceFile(url: URL(fileURLWithPath: "/x/\($0.name)"), text: $0.text)
         }
-        return ThunkGenerator().prepare(sources: sources, hybrid: true)
+        return ThunkGenerator().prepare(sources: sources, hybrid: true, accessForwarding: accessForwarding)
     }
     private func text(_ r: ThunkGenerator.Result, named name: String) -> String {
         r.modifiedFiles.first { $0.url.lastPathComponent == name }?.text ?? ""

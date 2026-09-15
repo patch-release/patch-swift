@@ -28,7 +28,9 @@ public enum XcodeProjectEditor {
     public static let packageURL = "https://github.com/patch-release/patch-swift"
     public static let packageName = "patch-swift"
     public static let productName = "PatchSDK"
-    public static let minimumVersion = "1.0.0"
+    // The SDK floor `init` writes. Keep it at the oldest SDK this CLI's generated thunks
+    // compile against (one tag ships both CLI and SDK since 1.7.0).
+    public static let minimumVersion = "1.7.0"
 
     public enum EditResult: Sendable, Equatable {
         case added

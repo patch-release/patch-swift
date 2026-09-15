@@ -1,0 +1,98 @@
+# robots.txt for docs.patchrelease.com
+# Astro copies public/ into dist/ verbatim, so this file is served at
+# https://docs.patchrelease.com/robots.txt.
+#
+# AI agents: a machine-readable index of these docs lives at
+# https://docs.patchrelease.com/llms.txt (full text:
+# https://docs.patchrelease.com/llms-full.txt).
+#
+# Everything here is allow-all. The named groups exist because a robots.txt
+# group for a named user-agent does NOT inherit from the "*" group — a crawler
+# that matches its own name reads only that group, so each one repeats
+# "Allow: /" explicitly.
+#
+# Agent tokens below are taken from the operators' own documentation:
+#   https://developers.openai.com/api/docs/bots
+#   https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler
+#   https://docs.perplexity.ai/docs/resources/perplexity-crawlers
+#   https://developers.google.com/search/docs/crawling-indexing/google-common-crawlers
+
+User-agent: *
+Allow: /
+
+# Advisory content signals (Cloudflare Content Signals Policy shape).
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+
+# ---------------------------------------------------------------------------
+# AI search indexers
+# ---------------------------------------------------------------------------
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: bingbot
+Allow: /
+
+User-agent: DuckAssistBot
+Allow: /
+
+# ---------------------------------------------------------------------------
+# Answer-time fetchers
+# ---------------------------------------------------------------------------
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Meta-ExternalFetcher
+Allow: /
+
+User-agent: MistralAI-User
+Allow: /
+
+# ---------------------------------------------------------------------------
+# Training / model-input crawlers
+# ---------------------------------------------------------------------------
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: Meta-ExternalAgent
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+Sitemap: https://docs.patchrelease.com/sitemap-index.xml

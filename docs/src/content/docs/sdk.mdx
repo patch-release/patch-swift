@@ -1,10 +1,11 @@
 ---
 title: SDK reference
-description: Configuring PatchSDK and the update lifecycle.
+description: "PatchSDK loads, verifies, hot-swaps and runs OTA modules on-device: configuration, start(), the imperative check/fetch/reload API, and native fallback."
 sidebar:
   order: 6
 sources:
   - sdk/Sources/PatchSDK/Patch.swift
+lastUpdated: 2026-09-14T21:00:00-04:00
 ---
 
 The `PatchSDK` Swift package loads, verifies, hot-swaps, and runs OTA modules on-device, with native fallback and telemetry. It's pure Swift on top of WasmKit — no extra runtime to bundle beyond the package.
@@ -15,7 +16,7 @@ The `PatchSDK` Swift package loads, verifies, hot-swaps, and runs OTA modules on
 
 ```swift title="Package.swift"
 dependencies: [
-  .package(url: "https://github.com/patch-release/patch-swift", from: "1.0.0"),
+  .package(url: "https://github.com/patch-release/patch-swift", from: "1.7.0"),
 ],
 targets: [
   .target(name: "MyApp", dependencies: [
@@ -23,6 +24,32 @@ targets: [
   ]),
 ]
 ```
+
+## Versions & compatibility
+
+From 1.7.0, `patchcli` and `PatchSDK` are released together from the same tag of `patch-swift` and carry the same version number. Keep both on the same version.
+
+| Pairing | Supported | What happens |
+| --- | --- | --- |
+| Same version | Yes | The tested combination. |
+| SDK newer than CLI (same major version) | Yes | The SDK still renders every older view format (view IR schema v1 onward), and the code `patchcli prepare` generates only calls SDK API that newer versions keep. |
+| SDK older than CLI | No | The view code `prepare` generates can call SDK API the older package doesn't have, so your app fails to compile. Or a patched view needs a newer view IR schema than the SDK renders: that view shows its native body instead of the patch, and the SDK logs which views it skipped. |
+| Different major version | No | SwiftPM `from:` never crosses a major version. |
+
+CLIs from before the version unification pair the same way: `patchcli` 1.6.41–1.6.48 works with PatchSDK 1.5.18 or 1.7.0.
+
+**Check what you have.** The CLI version is `patchcli --version`. The SDK version is the one SwiftPM resolved, recorded in `Package.resolved`. For an Xcode project that's `YourApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`; for a Swift package it sits next to `Package.swift`. Find the `patch-swift` entry:
+
+```sh title="Terminal"
+patchcli --version
+grep -A 8 '"patch-swift"' YourApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+```
+
+At runtime, `Patch.sdkVersion` holds the same value, and the SDK sends it with every update check.
+
+**Bring them in line.** Upgrade the CLI with `brew upgrade patchcli`. Update the SDK in Xcode with **File → Packages → Update to Latest Package Versions**, or with `swift package update patch-swift`. If Homebrew hasn't picked up the newest tag yet, pin the SDK to a version your CLI supports with `.package(url: "https://github.com/patch-release/patch-swift", exact: "<version>")` until it does: your CLI's own version, or `1.5.18` for a 1.6.x CLI.
+
+A CLI with no `patchcli login` command (check `patchcli --help`) can't fetch a publish token for you. Create one in the console under **Settings → CLI publish tokens** and set it as `PATCH_API_KEY`, or as `api_key:` in `.Patch.yml`. The app key won't work: the backend rejects it for publishing.
 
 ## Configure: PatchConfiguration
 

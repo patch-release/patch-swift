@@ -1,0 +1,120 @@
+---
+title: How Patch compares
+description: "Patch vs CodePush, Expo EAS Update and Shorebird: which stack each one patches, what stays native, the Apple basis, rollback, rollouts and open-source status."
+sidebar:
+  order: 39
+lastUpdated: 2026-08-22T09:00:00-04:00
+---
+
+Patch, CodePush, Expo EAS Update and Shorebird all ship code to an installed
+app without a new store binary, and they differ in one decisive way: which
+stack each one can patch. Patch patches native Swift and SwiftUI. CodePush and
+EAS Update patch a React Native JavaScript bundle. Shorebird patches Dart in a
+Flutter app.
+
+## The table
+
+Every row below is taken from the vendor's own documentation, linked in the
+section for that tool. A dash means the value was not verified against the
+vendor's own docs while this page was written — it is not a claim the tool
+lacks the feature.
+
+| | Patch | CodePush | Expo EAS Update | Shorebird |
+| --- | --- | --- | --- | --- |
+| Framework / language | Native Swift + SwiftUI | React Native (JavaScript) | React Native / Expo (JavaScript) | Flutter (Dart) |
+| What gets patched | Swift logic, `async`/`await`, SwiftUI view bodies — compiled to WebAssembly | "your JavaScript and images" | "non-native pieces (such as JS, styling, and images)" | "any Dart code in your application no matter of size" |
+| What stays native | OS-API code, and any native symbol/framework/entitlement not already in the signed binary | "changes which touch native code … cannot be distributed via CodePush" | "Change to native code or native dependencies" needs a new build | "does not support changing native code (e.g. Java/Kotlin on Android or Objective-C/Swift on iOS)" |
+| Stated Apple basis | Interpreted code under DPLA §3.3.1(B) (formerly §3.3.2) | — | "your updates need to follow the App Store and Play Store guidelines" | DPLA "section 3.3.1b"; "a custom Dart interpreter to comply with the interpreter-only restriction for updates on iOS" |
+| Rollback | `patchcli rollback`, fleet-wide, propagates on the next update check | Automatic client-side rollback of a crashing update | Revert / republish a previous update | — |
+| Channels & staged rollouts | Channels + `--rollout N` percentage bucketing + version/OS/cohort targeting | Staging/Production deployments; `promote … -r 20` percentage rollout | Channels/branches; per-update and branch-based rollouts | Tracks (stable / beta / staging); percentage rollout via tracks + app-side grouping |
+| Minimum OS | iOS 16+ | — | — | "the same versions of platforms that Flutter supports" |
+| Open-source SDK | Yes — MIT (engine Apache-2.0) | Repository archived 20 May 2025 | — | — |
+| Hosted service | Yes — Hobby free (100 devices), Startup $59/mo, Enterprise | Retired 31 March 2025 | Yes | Yes |
+
+## Can CodePush update a native Swift app?
+
+No — CodePush updates a React Native app's JavaScript bundle and images, not
+Swift. Microsoft's README states: "The CodePush plugin helps get product
+improvements in front of your end users instantly, by keeping your JavaScript
+and images synchronized with updates you release", and that "Any product
+changes which touch native code (e.g. modifying your
+`AppDelegate.m`/`MainActivity.java` file, adding a new plugin) cannot be
+distributed via CodePush." The hosted service is also gone: Microsoft states
+"Visual Studio App Center is scheduled for retirement on March 31, 2025", and
+the `react-native-code-push` repository records "This repository was archived
+by the owner on May 20, 2025." A standalone
+[code-push-server](https://github.com/microsoft/code-push-server) was published
+for self-hosting; that repository is archived too.
+
+If your app is React Native and you want to keep the CodePush workflow, the
+self-hosted server is the migration Microsoft points at. If your app is native
+Swift, CodePush was never able to patch it.
+
+Sources: [App Center retirement](https://learn.microsoft.com/en-us/appcenter/retirement) ·
+[react-native-code-push](https://github.com/microsoft/react-native-code-push).
+See also [Patch vs CodePush](https://patchrelease.com/codepush-alternative).
+
+## Can Expo EAS Update update a native Swift app?
+
+No — EAS Update serves updates to projects using the `expo-updates` library,
+which means React Native. Expo describes it as "a cloud service that serves
+updates for projects using the expo-updates library", and an app can "update
+its own non-native pieces (such as JS, styling, and images) over-the-air". Its
+FAQ lists "Change to native code or native dependencies" and "Anything that
+requires a new app binary version" as cases where you build instead.
+
+For a React Native or Expo team, EAS Update is the right tool and it is more
+mature at what it does: channels and branches, per-update and branch-based
+rollouts, and revert. Patch is for teams whose app is Swift, where there is no
+JavaScript bundle to replace.
+
+Sources: [EAS Update introduction](https://docs.expo.dev/eas-update/introduction/) ·
+[EAS Update rollouts](https://docs.expo.dev/eas-update/rollouts/).
+See also [Patch vs EAS Update](https://patchrelease.com/expo-eas-update-alternative).
+
+## Can Shorebird update a native Swift app?
+
+No — Shorebird patches Dart code in a Flutter app. Its FAQ states that
+Shorebird "can change any Dart code in your application no matter of size" and
+that it "does not support changing native code (e.g. Java/Kotlin on Android or
+Objective-C/Swift on iOS)". Shorebird is the one tool here that names Apple's
+clause: its FAQ quotes DPLA "3.3.1b" and states that "Shorebird uses a custom
+Dart interpreter to comply with the interpreter-only restriction for updates on
+iOS". Percentage rollouts are built on tracks: the guide
+describes "how you can implement a percentage-based patch rollout system using
+predefined tracks", with the app reading its group number and deciding between
+the beta and stable track.
+
+If your app is Flutter, Shorebird is the tool for it. Patch cannot patch Dart,
+and Shorebird cannot patch Swift.
+
+Sources: [Shorebird FAQ](https://docs.shorebird.dev/code-push/faq/) ·
+[Percentage-based rollouts](https://docs.shorebird.dev/code-push/guides/percentage-based-rollouts/).
+See also [Patch vs Shorebird](https://patchrelease.com/shorebird-alternative).
+
+## What does Patch do that the other three do not?
+
+Patch patches native Swift. The `patchcli` CLI compiles the Swift you changed
+to WebAssembly, and the PatchSDK runs that module in
+[WasmKit](https://github.com/swiftwasm/WasmKit) inside your signed binary.
+There is no JavaScript bridge, no web view and no cross-platform runtime, and
+the App Store binary is never modified. Code that touches an OS API stays
+native, and a patch that cannot run falls back to the signed binary. See
+[how it works](/how-it-works/) and [what Patch can & can't update](/coverage/).
+
+## Which one should I use?
+
+It follows from the stack, not from the feature list. React Native or Expo:
+use [EAS Update](https://docs.expo.dev/eas-update/introduction/), or a
+self-hosted CodePush server if you are migrating an existing CodePush app.
+Flutter: use [Shorebird](https://docs.shorebird.dev/). Native Swift and
+SwiftUI: none of those three can patch your app, and Patch is built for it.
+
+## Related
+
+- [OTA update tools compared](https://patchrelease.com/ota-update-tools-compared) — the same comparison on the marketing site
+- [Patch vs CodePush](https://patchrelease.com/codepush-alternative)
+- [Patch vs Expo EAS Update](https://patchrelease.com/expo-eas-update-alternative)
+- [Patch vs Shorebird](https://patchrelease.com/shorebird-alternative)
+- [Apple compliance](/apple-compliance/) — the DPLA clause and Guideline 2.5.2
+- [Pricing](https://patchrelease.com/pricing)

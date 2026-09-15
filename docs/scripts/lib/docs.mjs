@@ -99,6 +99,23 @@ export function readPages(dir = CONTENT) {
   });
 }
 
+// -- html -------------------------------------------------------------------
+
+// Labels read back out of built HTML arrive entity-encoded ("What Patch can
+// &amp; can't update"). Anything derived from them — llms.txt section headings
+// — has to be text again, or the encoding leaks into a plain-text file.
+// &amp; is decoded last so "&amp;lt;" cannot round-trip into "<".
+export function decodeEntities(text) {
+  return String(text)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#x0*27;/gi, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
 // -- sidebar ----------------------------------------------------------------
 
 // The built site is the most honest source of order/grouping (it is what a
@@ -119,9 +136,9 @@ function sidebarFromDist() {
     /<span class="large[^"]*"[^>]*>([^<]+)<\/span>|<a href="([^"]+)"[^>]*>\s*<span[^>]*>([^<]*)<\/span>/g;
   let m;
   while ((m = re.exec(pane))) {
-    if (m[1]) groups.push({ label: m[1].trim(), links: [] });
+    if (m[1]) groups.push({ label: decodeEntities(m[1].trim()), links: [] });
     else if (groups.length && m[2].startsWith('/')) {
-      groups[groups.length - 1].links.push({ href: m[2], label: m[3].trim() });
+      groups[groups.length - 1].links.push({ href: m[2], label: decodeEntities(m[3].trim()) });
     }
   }
   return groups.length ? groups : null;

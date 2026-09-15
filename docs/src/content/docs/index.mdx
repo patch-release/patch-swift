@@ -1,9 +1,10 @@
 ---
 title: Patch documentation
-description: Over-the-air code updates for native Swift iOS apps.
+description: "Patch ships over-the-air code updates to native Swift iOS apps: patchcli compiles changed Swift to WebAssembly, PatchSDK runs it on-device, no App Store review."
 sidebar:
   label: Introduction
   order: 0
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { CardGrid, LinkCard, Card, Aside } from '@astrojs/starlight/components';
@@ -30,13 +31,18 @@ cd MyApp && patchcli init
 
 Patch is the equivalent for **native Swift and SwiftUI** — no JavaScript bridge,
 no web views, no cross-platform runtime. CodePush and Expo/EAS Update patch a
-JavaScript bundle; Shorebird patches Dart. None of them touch native Swift.
+JavaScript bundle; Shorebird patches Dart. None of them touch native Swift. The
+side-by-side table is on [How Patch compares](/compare/), and the marketing site
+covers each one individually:
+[vs CodePush](https://patchrelease.com/codepush-alternative),
+[vs EAS Update](https://patchrelease.com/expo-eas-update-alternative),
+[vs Shorebird](https://patchrelease.com/shorebird-alternative).
 
 <Aside type="note" title="Is this allowed?">
-Yes — under the same provision of Apple's Developer Program License Agreement
-that Expo and CodePush have relied on for close to a decade. The signed binary is
-never modified and only interpreted code updates. See
-[Apple compliance](/apple-compliance/).
+Yes — under Apple's Developer Program License Agreement §3.3.1(B) (formerly
+§3.3.2), the interpreted-code provision. Shorebird's FAQ cites the same clause
+by number for Flutter. The signed binary is never modified and only interpreted
+code updates. See [Apple compliance](/apple-compliance/).
 </Aside>
 
 ## Open source
@@ -45,3 +51,13 @@ never modified and only interpreted code updates. See
   <LinkCard title="The packages" description="The SDK (MIT) and the engine (Apache-2.0) — both in patch-swift, what's in each, and how to build from source." href="/open-source/" />
   <LinkCard title="Running it yourself" description="Reference architectures for GCP, AWS and Azure, and what static hosting can't do." href="/self-hosting/" />
 </CardGrid>
+
+## Related
+
+- [FAQ](/faq/) — short answers about Apple's rules, coverage, rollback and pricing
+- [Glossary](/glossary/) — OTA update, native shell, fingerprint, host bridge, PMOD
+- [How Patch compares](/compare/) — Patch, CodePush, EAS Update and Shorebird
+- [Patch vs CodePush](https://patchrelease.com/codepush-alternative)
+- [Patch vs Expo EAS Update](https://patchrelease.com/expo-eas-update-alternative)
+- [Patch vs Shorebird](https://patchrelease.com/shorebird-alternative)
+- [OTA update tools compared](https://patchrelease.com/ota-update-tools-compared)

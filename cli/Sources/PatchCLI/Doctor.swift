@@ -102,8 +102,17 @@ struct Doctor: ParsableCommand {
             let (configCheck, config) = checkConfig(configURL: configURL)
             checks.append(configCheck)
 
+            // 1b) The config holds a live publish token — is it committed?
+            checks.append(checkConfigNotCommitted(root: root, config: config))
+
             // 2) PatchSDK package added + linked.
             checks.append(checkPackage(root: root, target: config?.target))
+
+            // 2b) The PatchSDK SwiftPM resolved is a version this CLI pairs with.
+            checks.append(checkSDKVersion(root: root))
+
+            // 2c) The app target's deployment target is at or above PatchSDK's minimum.
+            if let c = checkDeploymentTarget(root: root, target: config?.target) { checks.append(c) }
 
             // 3) Patch.configure + start() in @main App entry.
             checks.append(checkConfigureCall(root: root))
@@ -201,6 +210,72 @@ struct Doctor: ParsableCommand {
 
     // MARK: - Check 2: PatchSDK package added + linked
 
+    /// Is the publish token committed to git?
+    ///
+    /// `.Patch.yml` used to hold only `app_key` — public, baked into the app
+    /// binary — so committing it was harmless and most projects still do. It now
+    /// also holds `publish_token`, which authorizes shipping code to every user
+    /// of the app. A tracked file is therefore a LIVE LEAK to anyone with repo
+    /// access, including through history after the fact.
+    ///
+    /// Only fires when a token is actually present: flagging a token-free config
+    /// would be a false alarm, and plenty of projects legitimately commit one.
+    func checkConfigNotCommitted(root: URL, config: PatchConfig?) -> Check {
+        let title = "Publish token kept out of version control"
+        let hasToken = !(config?.publishToken ?? "").isEmpty
+        guard hasToken else {
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .pass,
+                detail: "No publish token in .Patch.yml (nothing secret to leak).",
+                fix: nil)
+        }
+        if GitIgnoreGuard.isTracked(root: root) {
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .fail,
+                detail: ".Patch.yml is TRACKED by git — your publish token is committed.",
+                fix: "Revoke it in the console, `git rm --cached .Patch.yml`, then `patchcli login`.")
+        }
+        // REPORT ONLY. doctor is documented as read-only and safe to run in CI
+        // or on someone else's checkout, so it must not write the .gitignore
+        // line itself — `init` and `login` already do that at the moment they
+        // write the token. Breaking the read-only contract to save one command
+        // is a bad trade.
+        switch GitIgnoreGuard.ignoreState(root: root) {
+        case .ignored:
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .pass,
+                detail: ".Patch.yml is gitignored and untracked.",
+                fix: nil)
+        case .notIgnored:
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .warn,
+                detail: ".Patch.yml holds a publish token and is NOT gitignored — one `git add .` commits it.",
+                fix: "Add `.Patch.yml` to .gitignore (or re-run `patchcli login`, which does it for you).")
+        case .notAGitRepo:
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .pass,
+                detail: "Not a git repository — nothing to leak into.",
+                fix: nil)
+        case .unknown(let why):
+            return Check(
+                id: "config-vcs",
+                title: title,
+                status: .warn,
+                detail: ".Patch.yml holds a token and .gitignore couldn't be read (\(why)).",
+                fix: "Check that `.Patch.yml` is gitignored.")
+        }
+    }
+
     func checkPackage(root: URL, target: String?) -> Check {
         let fm = FileManager.default
         let id = "package"
@@ -270,6 +345,103 @@ struct Doctor: ParsableCommand {
                      fix: "Run `patchcli doctor` from your app's project root, or `patchcli init` to set it up.")
     }
 
+    // MARK: - Check 2b: resolved PatchSDK version vs this CLI
+
+    /// The pairing rule (docs: SDK reference → Versions & compatibility): the SDK
+    /// must be the CLI's version or newer, on the same major. An OLDER SDK can fail
+    /// to compile the thunks `prepare` generates (new `thunkBody` arguments) or
+    /// demote views stamped with a newer IR schema. A NEWER SDK works, but the CLI
+    /// should be upgraded to match. Offline: reads Package.resolved only.
+    /// ⚠ when the configured Xcode target deploys below PatchSDK's minimum iOS version — the app
+    /// then can't `import PatchSDK` (every generated thunk file fails to compile). Warn only: raising
+    /// a deployment target is the developer's product decision, so doctor never changes it. nil
+    /// (check omitted) when there's no Xcode project / target / readable iOS deployment target.
+    func checkDeploymentTarget(root: URL, target: String?) -> Check? {
+        guard let target, !target.isEmpty else { return nil }
+        let projects = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+            .filter { $0.hasSuffix(".xcodeproj") }.sorted()
+        for name in projects {
+            let url = root.appendingPathComponent(name)
+            guard let dt = XcodeTargetSources.iOSDeploymentTarget(projectURL: url, target: target) else { continue }
+            let min = XcodeTargetSources.sdkMinimumIOS
+            let title = "Deployment target supports PatchSDK (iOS \(min)+)"
+            if XcodeTargetSources.versionPrecedes(dt, min) {
+                return Check(id: "deployment-target", title: title, status: .warn,
+                             detail: "Target \(target) deploys to iOS \(dt), below PatchSDK's minimum iOS \(min) — "
+                                 + "the app won't compile once PatchSDK is imported (`module 'PatchSDK' has a minimum deployment target of iOS \(min)`).",
+                             fix: "Raise \(target)'s iOS Deployment Target to \(min) or later (Xcode: target → General → Minimum Deployments).")
+            }
+            return Check(id: "deployment-target", title: title, status: .pass,
+                         detail: "Target \(target) deploys to iOS \(dt).", fix: nil)
+        }
+        return nil
+    }
+
+    func checkSDKVersion(root: URL) -> Check {
+        let id = "sdk-version"
+        let title = "PatchSDK version pairs with this CLI"
+        let cliVersion = Patch.configuration.version
+
+        guard let (resolvedURL, sdkVersion) = Self.resolvedPatchSDKVersion(root: root) else {
+            return Check(id: id, title: title, status: .warn,
+                         detail: "No Package.resolved pins patch-swift yet (packages not resolved, or pinned to a branch/revision).",
+                         fix: "Resolve packages in Xcode (File → Packages → Resolve Package Versions), then re-run doctor.")
+        }
+        func parts(_ v: String) -> [Int]? {
+            let p = v.split(separator: ".").prefix(3).map { Int($0.prefix { $0.isNumber }) }
+            return p.count == 3 && !p.contains(where: { $0 == nil }) ? p.map { $0! } : nil
+        }
+        let where_ = resolvedURL.path.replacingOccurrences(of: root.path + "/", with: "")
+        guard let s = parts(sdkVersion), let c = parts(cliVersion) else {
+            return Check(id: id, title: title, status: .warn,
+                         detail: "Couldn't compare PatchSDK \(sdkVersion) (\(where_)) with patchcli \(cliVersion).", fix: nil)
+        }
+        if s[0] != c[0] || s.lexicographicallyPrecedes(c) {
+            return Check(id: id, title: title, status: .warn,
+                         detail: "PatchSDK \(sdkVersion) (\(where_)) is older than patchcli \(cliVersion)"
+                             + (s[0] != c[0] ? " and on a different major version" : "")
+                             + " — generated view code may not compile, and views needing a newer IR schema render natively.",
+                         fix: "Update the package to \(cliVersion) or newer (Xcode: File → Packages → Update to Latest Package Versions).")
+        }
+        if c.lexicographicallyPrecedes(s) {
+            return Check(id: id, title: title, status: .warn,
+                         detail: "PatchSDK \(sdkVersion) (\(where_)) is newer than patchcli \(cliVersion). Supported, but CLI and SDK are released together.",
+                         fix: "`brew upgrade patchcli` to \(sdkVersion).")
+        }
+        return Check(id: id, title: title, status: .pass,
+                     detail: "PatchSDK \(sdkVersion) == patchcli \(cliVersion).", fix: nil)
+    }
+
+    /// The `patch-swift` pin's version from the first Package.resolved found:
+    /// `*.xcworkspace/xcshareddata/swiftpm/`, `*.xcodeproj/project.xcworkspace/
+    /// xcshareddata/swiftpm/`, then the root (a Package.swift project). Handles the
+    /// v1 (`object.pins[].package/state.version`) and v2/v3 (`pins[].identity`) formats.
+    static func resolvedPatchSDKVersion(root: URL) -> (URL, String)? {
+        let fm = FileManager.default
+        let entries = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+        var candidates: [URL] = []
+        for e in entries.sorted() where e.hasSuffix(".xcworkspace") {
+            candidates.append(root.appendingPathComponent("\(e)/xcshareddata/swiftpm/Package.resolved"))
+        }
+        for e in entries.sorted() where e.hasSuffix(".xcodeproj") {
+            candidates.append(root.appendingPathComponent("\(e)/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"))
+        }
+        candidates.append(root.appendingPathComponent("Package.resolved"))
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let pins = (obj["pins"] as? [[String: Any]])
+                ?? ((obj["object"] as? [String: Any])?["pins"] as? [[String: Any]]) ?? []
+            for pin in pins {
+                let name = ((pin["identity"] ?? pin["package"]) as? String)?.lowercased()
+                let loc = ((pin["location"] ?? pin["repositoryURL"]) as? String) ?? ""
+                guard name == "patch-swift" || loc.contains("patch-release/patch-swift") else { continue }
+                if let v = (pin["state"] as? [String: Any])?["version"] as? String { return (url, v) }
+            }
+        }
+        return nil
+    }
+
     // MARK: - Check 3: Patch.configure + start() in the @main App entry
 
     func checkConfigureCall(root: URL) -> Check {
@@ -335,7 +507,8 @@ struct Doctor: ParsableCommand {
 
         let result = ThunkGenerator().prepare(sources: sources.map {
             ThunkGenerator.SourceFile(url: $0.url, text: $0.text)
-        })
+        }, nativeViews: PatchConfig.nativeViewNames(near: root),
+           thunkableFiles: Prepare.targetCompileSet(root: root, target: config?.target, sources: sources))
 
         guard !result.viewNames.isEmpty else {
             // No SwiftUI views at all — prepare is a no-op, not a failure.

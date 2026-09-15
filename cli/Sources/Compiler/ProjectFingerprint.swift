@@ -968,7 +968,10 @@ public struct ProjectFingerprinter {
         // its unqualified type name and can't disambiguate) → those views render native.
         let collidingBases = Set(exportBaseCounts.filter { $0.value > 1 }.keys)
         // [R2-#95] Views prepare won't thunk (same-named non-View struct / generic-where).
+        // + views `.Patch.yml` keeps native (`native_views:`, recorded by `prepare --verify`):
+        // prepare gives them no thunk, so they must not be stripped as auto-routed.
         let thunkIneligible = BuildPipeline.thunkIneligibleViewNames(sources: fileSources.map(\.source))
+            .union(PatchConfig.nativeViewNames(near: projectDir))
 
         // Per file: the auto-routed view names + their native surface; and the view names
         // that did NOT auto-route (to disambiguate same-named bodies, exactly as before).
@@ -1333,7 +1336,10 @@ public struct ProjectFingerprinter {
             }
         }
         let collidingBases = Set(exportBaseCounts.filter { $0.value > 1 }.keys)
+        // + views `.Patch.yml` keeps native (`native_views:`, recorded by `prepare --verify`):
+        // prepare gives them no thunk, so they must not be stripped as auto-routed.
         let thunkIneligible = BuildPipeline.thunkIneligibleViewNames(sources: fileSources.map(\.source))
+            .union(PatchConfig.nativeViewNames(near: projectDir))
         // PASS 2 — collect lifted-literal ranges for any view that:
         //   (a) is EMITTED to WASM (not excluded by the hard gates), AND
         //   (b) has at least one parameterized opaque leaf with lifted string-literal ranges.
@@ -1448,8 +1454,13 @@ public struct ProjectFingerprinter {
         // developer could legitimately type in a comment), AND require a matching END —
         // otherwise a stray `// PATCH-THUNKS-BEGIN …` comment would eat every following
         // real native line. `stripPatchScaffolding` re-checks both conditions itself.
-        let isPrepared = text.contains(ThunkGenerator.sameFileBeginMarker)
-            && text.contains(ThunkGenerator.sameFileEndMarker)
+        // The PATCH-ACCESS forwarder block (private-access forwarding, the default placement for a
+        // view whose thunk reads private members) is the same kind of regenerated scaffolding and
+        // replaced the legacy block in exactly the same position — so it gates the strip identically.
+        let isPrepared = (text.contains(ThunkGenerator.sameFileBeginMarker)
+                            && text.contains(ThunkGenerator.sameFileEndMarker))
+            || (text.contains(PatchAccessForwarding.beginMarker)
+                && text.contains(PatchAccessForwarding.endMarker))
         let hasSlotLiterals = !(slotLiteralRanges ?? []).isEmpty
         let hasNativeSurface = !(nativeSurfaceSuffix ?? "").isEmpty
         // SELF-REFERENTIAL FINGERPRINT LITERAL: `patchcli init` bakes the native-shell
@@ -1546,8 +1557,24 @@ public struct ProjectFingerprinter {
         // dropped from the hash (a FALSE-STABLE). We ALSO require a matching END line to
         // exist: if a begin marker has no closing end (a truncated paste), strip NOTHING for
         // the block — never let an unbounded block eat real source to EOF.
-        let beginMarker = ThunkGenerator.sameFileBeginMarker
-        let endMarker = ThunkGenerator.sameFileEndMarker
+        // Two generated block kinds, each stripped with the same exact-marker + must-terminate rule:
+        // the legacy/fallback PATCH-THUNKS block, and the PATCH-ACCESS private-member forwarder block
+        // (which replaced it in the same position). Stripping both yields exactly the text an older
+        // CLI's single-block file stripped to, so migrating a project doesn't churn its fingerprint.
+        var remaining = lines
+        for (beginMarker, endMarker) in [
+            (ThunkGenerator.sameFileBeginMarker, ThunkGenerator.sameFileEndMarker),
+            (PatchAccessForwarding.beginMarker, PatchAccessForwarding.endMarker),
+        ] {
+            remaining = stripMarkedBlocks(remaining, begin: beginMarker, end: endMarker)
+        }
+        return remaining.map(stripInsertedDynamicModifier).joined(separator: "\n")
+    }
+
+    /// Drop every `begin…end` (inclusive) block from `lines`, matching the EXACT marker lines. Only
+    /// active when some begin marker is followed by an end marker (so a stray/unterminated begin can
+    /// never eat real source to EOF).
+    static func stripMarkedBlocks(_ lines: [String], begin beginMarker: String, end endMarker: String) -> [String] {
         func isBegin(_ trimmed: Substring) -> Bool { trimmed == beginMarker[...] }
         func isEnd(_ trimmed: Substring) -> Bool { trimmed == endMarker[...] }
         // Pre-scan: only treat a begin marker as a real block opener if a matching end
@@ -1559,19 +1586,20 @@ public struct ProjectFingerprinter {
             if isBegin(trimmed) { sawBegin = true }
             else if sawBegin && isEnd(trimmed) { hasTerminatedBlock = true; break }
         }
+        guard hasTerminatedBlock else { return lines }
         var out: [String] = []
         out.reserveCapacity(lines.count)
         var inThunkBlock = false
         for line in lines {
             let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
-            if hasTerminatedBlock, isBegin(trimmed) { inThunkBlock = true; continue }
+            if isBegin(trimmed) { inThunkBlock = true; continue }
             if inThunkBlock {
                 if isEnd(trimmed) { inThunkBlock = false }
                 continue
             }
-            out.append(stripInsertedDynamicModifier(line))
+            out.append(line)
         }
-        return out.joined(separator: "\n")
+        return out
     }
 
     /// Remove the `dynamic` modifier `patchcli prepare` inserts before a patchable

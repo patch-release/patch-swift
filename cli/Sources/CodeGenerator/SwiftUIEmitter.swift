@@ -155,6 +155,23 @@ struct Emitter {
     /// CANNOT reference these (`'$x' is inaccessible due to 'private'`). A leaf that
     /// references one is therefore not slotable. Set by `BodyLowering`.
     var inaccessibleNames: Set<String> = []
+    /// NON-VIEW BUILDER CONTENT names (`BodyLowering.nonViewBuilderContentNames`, per-file +
+    /// cross-file): members declared `some ToolbarContent`/`@ToolbarContentBuilder`/… and types
+    /// conforming to `ToolbarContent`/`ChartContent`/…. Content naming one is NOT a `View`, so it
+    /// is never slotted as `AnyView(<src>)` (uncompilable). Set by `BodyLowering`.
+    var nonViewBuilderNames: Set<String> = []
+    /// The subset of `nonViewBuilderNames` declared as members of THIS view's own struct decl.
+    /// A name that IS one of the view's own members is judged by THIS set only (its real
+    /// declaration), so an unrelated `var content: some ChartContent` elsewhere in the project
+    /// can never mark this view's `var content: some View` as non-View. Set by `BodyLowering`.
+    var selfNonViewBuilderMemberNames: Set<String> = []
+
+    /// Whether a referenced NAME is non-View builder content (see `nonViewBuilderNames`).
+    func isNonViewBuilderName(_ name: String) -> Bool {
+        if BodyLowering.builtinNonViewContentTypes.contains(name) { return true }
+        if selfMemberNames.contains(name) { return selfNonViewBuilderMemberNames.contains(name) }
+        return nonViewBuilderNames.contains(name)
+    }
     /// ALL of the view's OWN member names (stored + computed properties, methods, and
     /// `$`-projected forms) — regardless of access. A reference to a self member in a
     /// slot closure RESOLVES (it's `self.<name>`), so such a name must NOT be treated as
@@ -644,6 +661,28 @@ struct Emitter {
         // that ALSO has a non-availability term (`#available(…) && flag`) is NOT this
         // simple form — it falls through to the normal handling (which slots it).
         if Self.isSoleAvailabilityCondition(ifExpr.conditions) {
+            // Everything recorded while emitting the AVAILABLE branch (slots, tokens, row/action/
+            // effect/callback slots) is only valid under this availability: the thunk evaluates
+            // those native sources unconditionally, so an app whose deployment target is below it
+            // failed `'X' is only available in iOS 17.0 or newer`. Tag them; `ThunkGenerator` wraps
+            // each entry in the same `if #available`. Thunk-text only (no id/tree/hash change).
+            let cond = ifExpr.conditions.first.map { $0.condition.trimmedDescription } ?? ""
+            let snap = (opaqueLeaves.count, hostTokens.count, indexedRowSlots.count,
+                        actionSlots.count, effectSlots.count, callbackSlots.count)
+            defer {
+                func tag<T>(_ items: inout [T], from start: Int, _ path: WritableKeyPath<T, [String]>) {
+                    guard !cond.isEmpty, items.count > start else { return }
+                    for i in start..<items.count where !items[i][keyPath: path].contains(cond) {
+                        items[i][keyPath: path].insert(cond, at: 0)
+                    }
+                }
+                tag(&opaqueLeaves, from: snap.0, \.availability)
+                tag(&hostTokens, from: snap.1, \.availability)
+                tag(&indexedRowSlots, from: snap.2, \.availability)
+                tag(&actionSlots, from: snap.3, \.availability)
+                tag(&effectSlots, from: snap.4, \.availability)
+                tag(&callbackSlots, from: snap.5, \.availability)
+            }
             let thenNodes = emitItems(ifExpr.body.statements)
             if thenNodes.count == 1 { return thenNodes[0] }
             return "N.group([\n" + thenNodes.map { indent($0) }.joined(separator: ",\n") + "\n])"
@@ -1174,6 +1213,14 @@ struct Emitter {
         // Modifier chain: `<base>.<mod>(args)`
         if let member = call.calledExpression.as(MemberAccessExprSyntax.self),
            let base = member.base {
+            // A modifier applied THROUGH optional chaining (`repository.description
+            // .map(Text.init)?.lineLimit(nil)`): the base `…?` is not an expression on its own,
+            // so emitting it as a separate node slotted `AnyView(x.map(Text.init)?)` — "optional
+            // chain has no effect" / invalid Swift in the app build (GitHubSearchWithSwiftUI).
+            // Slot the whole chained call instead (an `Optional<some View>` is a View).
+            if base.is(OptionalChainingExprSyntax.self) {
+                return opaqueExprLifted(ExprSyntax(call), labelHint: member.declName.baseName.text)
+            }
             // Snapshot opaque leaves AND host tokens so that if we end up slotting the
             // WHOLE expression (below), we discard any sub-leaves/sub-tokens recorded
             // while emitting the now-subsumed base — keeping both consistent with the
@@ -2713,19 +2760,87 @@ struct Emitter {
         // reserved geo input for an out-of-scope constant and tokenize it. (Set even on
         // the rare post-lowering demote below; the only cost is the guest binding unused
         // `__geo_*` vars, which are discarded — demote-safe.)
+        //
+        // HOST-SIDE SCOPE GATE (the customer's `cannot find '__geo_height' in scope` Xcode
+        // error). The child statements are lowered from a DETACHED, proxy-REWRITTEN copy of the
+        // closure, so everything the child lowering records for the HOST side (a native slot's
+        // source, a token expression, a row/action/effect/callback source, a lifted literal's
+        // byte range) is derived from that copy — NOT the original syntax. `__geo_*` is only
+        // bound inside the WASM guest, and the proxy itself is a closure-local the self-scoped
+        // thunk can never reach, so a host record that touches geometry can't compile.
+        // Snapshot the whole emitter (a value type) first; if ANY host record added while
+        // lowering the reader references geometry (or a lifted-literal range can't be mapped
+        // back to the original file), ROLL BACK every side effect and keep the WHOLE
+        // GeometryReader as ONE native slot taken from the ORIGINAL syntax (the proxy is bound
+        // inside that slot's own closure, so it compiles).
+        let beforeReader = self
         usesGeometry = true
         let rowNodes = emitItems(rewrittenStmts)
-        guard !rowNodes.isEmpty else { return opaqueExpr(ExprSyntax(call), labelHint: "GeometryReader") }
+        guard !rowNodes.isEmpty else {
+            self = beforeReader
+            return opaqueExpr(ExprSyntax(call), labelHint: "GeometryReader")
+        }
         // After lowering, the proxy name MUST be fully gone (every use rewritten). If a
         // live `proxy` reference survived (an unmapped form the rewriter passed through),
         // demote — a guest referencing the unbound `proxy` would fail the whole module.
         let childList = rowNodes.count == 1 ? rowNodes[0]
             : "N.group([\n" + rowNodes.map { indent($0) }.joined(separator: ",\n") + "\n])"
         if Self.guestExprReferences(childList, name: proxyName) {
+            self = beforeReader
+            return opaqueExpr(ExprSyntax(call), labelHint: "GeometryReader")
+        }
+        if !reconcileGeometryReaderHostRecords(since: beforeReader, proxyName: proxyName, rewriter: rewriter) {
+            self = beforeReader
             return opaqueExpr(ExprSyntax(call), labelHint: "GeometryReader")
         }
         let id = "geo_" + Self.stableHash64(call.trimmedDescription)
         return "N.geometryReader(id: \"\(id)\", [\n\(indent(childList))\n])"
+    }
+
+    /// The GeometryReader HOST-SIDE SCOPE GATE (see `emitGeometryReader`). Examines every host
+    /// record the reader's child lowering appended since `snapshot`:
+    ///   * returns false (the caller rolls back + slots the whole reader natively) when any
+    ///     host-side source references a reserved `__geo_*` input or the proxy name — that
+    ///     source came from the rewritten copy and can never compile over `self`;
+    ///   * otherwise REMAPS each new leaf's lifted-literal byte ranges from the detached,
+    ///     rewritten copy's coordinates back to the ORIGINAL file (the rewrite only swapped
+    ///     proxy chains, whose length deltas the rewriter recorded), returning false when a
+    ///     range can't be mapped (never hand the fingerprint a wrong range).
+    /// Records with no geometry reference are textually identical to the original syntax
+    /// (the rewriter touches nothing else), so their ids/sources are unchanged.
+    private mutating func reconcileGeometryReaderHostRecords(since snapshot: Emitter, proxyName: String,
+                                                            rewriter: GeometryProxyRewriter) -> Bool {
+        let newLeaves = Array(opaqueLeaves.dropFirst(snapshot.opaqueLeaves.count))
+        let sources = BodyLowering.hostSideSources(
+            opaqueLeaves: newLeaves,
+            hostTokens: Array(hostTokens.dropFirst(snapshot.hostTokens.count)),
+            indexedRowSlots: Array(indexedRowSlots.dropFirst(snapshot.indexedRowSlots.count)),
+            actionSlots: Array(actionSlots.dropFirst(snapshot.actionSlots.count)),
+            effectSlots: Array(effectSlots.dropFirst(snapshot.effectSlots.count)),
+            callbackSlots: Array(callbackSlots.dropFirst(snapshot.callbackSlots.count)))
+        for src in sources {
+            if BodyLowering.reservedGuestIdentifiers(in: src).contains(where: { $0.hasPrefix("__geo_") }) {
+                return false
+            }
+            if src.contains(proxyName), BodyLowering.identifierReferences(in: src).contains(proxyName) {
+                return false
+            }
+        }
+        guard newLeaves.contains(where: { !$0.stringArgRanges.isEmpty }) else { return true }
+        var remapped: [BodyLowering.OpaqueLeaf] = []
+        for leaf in newLeaves {
+            guard !leaf.stringArgRanges.isEmpty else { remapped.append(leaf); continue }
+            var ranges: [Range<Int>] = []
+            for r in leaf.stringArgRanges {
+                guard let o = rewriter.originalRange(forRewritten: r) else { return false }
+                ranges.append(o)
+            }
+            remapped.append(.init(id: leaf.id, source: leaf.source, slotable: leaf.slotable,
+                                  label: leaf.label, stringArgs: leaf.stringArgs,
+                                  stringArgRanges: ranges))
+        }
+        opaqueLeaves = Array(opaqueLeaves.prefix(snapshot.opaqueLeaves.count)) + remapped
+        return true
     }
 
     // MARK: Path (declarative shape — literal scalar commands or slot)
@@ -3458,6 +3573,10 @@ struct Emitter {
         "task", "onAppear", "onDisappear", "refreshable", "onSubmit",
         "onTapGesture", "gesture", "onLongPressGesture",
         "onReceive", "onChange",
+        // `.toolbar { … }` whose content is NON-View builder content (`some ToolbarContent`) —
+        // requested ONLY by `emitToolbar`'s non-View branch (a plain-View toolbar still lowers
+        // to IR items). It installs native toolbar items; it watches no guest-owned state.
+        "toolbar",
     ]
 
     /// Try to record a NATIVE EFFECT-MODIFIER SLOT for an undispatchable effect modifier. Returns the
@@ -3993,7 +4112,31 @@ struct Emitter {
         }
         guard unlabeled.count == 1, call.trailingClosure == nil,
               let only = unlabeled.first else { return nil }
+        // A `ShapeStyle` that none of the color/style forms above resolved is NOT a view: a
+        // leading-dot style (`.background(.quaternary)`, `.quaternary.opacity(0.5)`) or a
+        // `.gradient` (`tint.gradient`). Emitting it as a view child made the thunk slot it as
+        // `AnyView(.quaternary)` / `AnyView(tint.gradient)` — a hard compile error in the app
+        // (FoodTruck, Pow). Returning nil slots the WHOLE modifier natively instead.
+        if Self.isProvablyShapeStyleNotView(only.expression) { return nil }
         return emitExpr(only.expression)
+    }
+
+    /// True for an argument expression that can only be a `ShapeStyle` value, never a `View`:
+    /// a member/call chain rooted in an implicit member (`.quaternary`, `.tint.opacity(0.3)`),
+    /// or one whose outermost member is `.gradient` (`AnyGradient`).
+    static func isProvablyShapeStyleNotView(_ expr: ExprSyntax) -> Bool {
+        if let m = expr.as(MemberAccessExprSyntax.self), m.declName.baseName.text == "gradient" { return true }
+        var cur: ExprSyntax? = expr
+        while let e = cur {
+            if let call = e.as(FunctionCallExprSyntax.self) { cur = call.calledExpression; continue }
+            if let m = e.as(MemberAccessExprSyntax.self) {
+                guard let base = m.base else { return true }   // chain rooted in `.member`
+                cur = base
+                continue
+            }
+            return false
+        }
+        return false
     }
 
     /// Outcome of resolving a data-capable container's children (`List`/`Form`/
@@ -5668,6 +5811,25 @@ struct Emitter {
         if let trailing = call.trailingClosure { closure = trailing }
         else { closure = call.arguments.first?.expression.as(ClosureExprSyntax.self) }
         guard let body = closure else { return nil }
+        // NON-VIEW TOOLBAR CONTENT (`.toolbar { nativeToolbar }` over a `@ToolbarContentBuilder
+        // var nativeToolbar: some ToolbarContent`, a `struct EditorToolbar: ToolbarContent`, a
+        // conditional `ToolbarItem`, a `ToolbarSpacer`…): the IR's bare-content item would wrap
+        // it in `AnyView(…)`, which does not compile (ToolbarContent is not a View). Keep the
+        // WHOLE `.toolbar { … }` modifier NATIVE via a `nativeEffectSlot` — the thunk re-applies
+        // `content.toolbar { … }` over `self` (the base content still lowers). If that effect
+        // slot isn't reachable (a body-local/private read), decline → the caller slots the whole
+        // modified expression natively (a `View`, so it compiles) or the view demotes.
+        // (A top-level PLAIN `ToolbarItem(…) { … }` / `ToolbarItemGroup` statement is excluded —
+        // `emitToolbarItem` lowers it to an `IRToolbarItem` exactly as before.)
+        if body.statements.contains(where: { stmt in
+            if case .expr(let e) = stmt.item, Self.isToolbarItemCall(e) { return false }
+            return isNonViewBuilderContentItem(stmt.item)
+        }) {
+            if let slotID = tryRecordEffectSlot(call, name: "toolbar") {
+                return "\(base).nativeEffectSlot(id: \"\(slotID)\")"
+            }
+            return nil
+        }
         // Toolbar content is an ACTIONS-LIST context: a bare `.toolbar { Button { … } }` puts
         // its Buttons in the toolbar's item list, where the renderer can't attach a native
         // slot — an undispatchable Button there must demote the view, not ship dead.
@@ -5715,6 +5877,94 @@ struct Emitter {
         if let trailing = call.trailingClosure { content = emitItems(trailing.statements) }
         guard !content.isEmpty else { return nil }
         return "IRToolbarItem(placement: \"\(placement)\", content: \(nodeList(content)))"
+    }
+
+    /// True iff a builder-closure STATEMENT is NON-VIEW builder content: a reference to a
+    /// `nonViewBuilderNames` member (`nativeToolbar`, `self.nativeToolbar`, `clipToolbar()`), a
+    /// call to a non-View content type (`EditorToolbar()`, `ToolbarItem { … }`, `ToolbarSpacer()`)
+    /// — directly, under a modifier chain, or inside an `if`/`switch`/`#if`/`Group`/`ForEach`
+    /// wrapper. Only the statement's SHAPE is inspected (never argument/closure-body
+    /// identifiers), so a plain `Button { save() }` is never misread. Syntactic + name-based.
+    func isNonViewBuilderContentItem(_ item: CodeBlockItemSyntax.Item) -> Bool {
+        switch item {
+        case .expr(let e): return isNonViewBuilderContentExpr(e)
+        case .stmt(let s):
+            if let es = s.as(ExpressionStmtSyntax.self) { return isNonViewBuilderContentExpr(es.expression) }
+            return false
+        case .decl(let d):
+            guard let ic = d.as(IfConfigDeclSyntax.self) else { return false }
+            return ic.clauses.contains { clause in
+                (clause.elements?.as(CodeBlockItemListSyntax.self)).map {
+                    $0.contains { isNonViewBuilderContentItem($0.item) }
+                } ?? false
+            }
+        }
+    }
+
+    func isNonViewBuilderContentExpr(_ expr: ExprSyntax) -> Bool {
+        func refName(_ e: ExprSyntax) -> String? {
+            if let d = e.as(DeclReferenceExprSyntax.self) { return d.baseName.text }
+            if let m = e.as(MemberAccessExprSyntax.self),
+               let b = m.base?.as(DeclReferenceExprSyntax.self), b.baseName.text == "self" {
+                return m.declName.baseName.text
+            }
+            if let g = e.as(GenericSpecializationExprSyntax.self) { return refName(g.expression) }
+            return nil
+        }
+        func anyItem(_ items: CodeBlockItemListSyntax?) -> Bool {
+            items?.contains { isNonViewBuilderContentItem($0.item) } ?? false
+        }
+        if let n = refName(expr) { return isNonViewBuilderName(n) }
+        if let call = expr.as(FunctionCallExprSyntax.self) {
+            if let n = refName(call.calledExpression) {
+                if isNonViewBuilderName(n) { return true }
+                if n == "Group" || n == "ForEach" {
+                    let closures = [call.trailingClosure].compactMap { $0 }
+                        + call.additionalTrailingClosures.map(\.closure)
+                        + call.arguments.compactMap { $0.expression.as(ClosureExprSyntax.self) }
+                    return closures.contains { anyItem($0.statements) }
+                }
+                return false
+            }
+            // A modifier chained on content (`ToolbarItem { … }.hidden(x)`) — inspect the base.
+            if let m = call.calledExpression.as(MemberAccessExprSyntax.self), let base = m.base,
+               !(base.as(DeclReferenceExprSyntax.self)?.baseName.text == "self") {
+                return isNonViewBuilderContentExpr(base)
+            }
+            return false
+        }
+        if let m = expr.as(MemberAccessExprSyntax.self), let base = m.base {
+            return isNonViewBuilderContentExpr(base)
+        }
+        if let i = expr.as(IfExprSyntax.self) {
+            if anyItem(i.body.statements) { return true }
+            switch i.elseBody {
+            case .ifExpr(let e)?: return isNonViewBuilderContentExpr(ExprSyntax(e))
+            case .codeBlock(let b)?: return anyItem(b.statements)
+            case nil: return false
+            }
+        }
+        if let sw = expr.as(SwitchExprSyntax.self) {
+            return sw.cases.contains { c in
+                c.as(SwitchCaseSyntax.self).map { anyItem($0.statements) } ?? false
+            }
+        }
+        if let ic = expr.as(IfConfigDeclSyntax.self) {
+            return ic.clauses.contains { anyItem($0.elements?.as(CodeBlockItemListSyntax.self)) }
+        }
+        return false
+    }
+
+    /// Whether a slot SOURCE is (or wraps, via `Group { … }`) non-View builder content — the
+    /// generic `AnyView(<source>)` build-safety net behind the `.toolbar` special case.
+    func sourceIsNonViewBuilderContent(_ source: String) -> Bool {
+        let tree = Parser.parse(source: "let __patch_probe = \(source)")
+        for stmt in tree.statements {
+            guard let v = stmt.item.as(VariableDeclSyntax.self),
+                  let value = v.bindings.first?.initializer?.value else { continue }
+            return isNonViewBuilderContentExpr(value)
+        }
+        return false
     }
 
     /// True iff `expr` is a `ToolbarItem(...)` / `ToolbarItemGroup(...)` call.
@@ -6895,9 +7145,16 @@ struct Emitter {
         // `#if`-containing fragment, or a Void-returning action would emit uncompilable Swift.
         // If not wrappable, force NON-slotable so the view demotes to native (faithful) rather
         // than ship a broken wrap.
-        let slotable = (slotable && stringArgs.isEmpty && !source.isEmpty)
+        var slotable = (slotable && stringArgs.isEmpty && !source.isEmpty)
             ? Self.isAnyViewWrappableSource(source)
             : slotable
+        // NON-VIEW BUILDER CONTENT (`nativeToolbar: some ToolbarContent`, a `ChartContent`
+        // helper, `ToolbarItem { … }`) can't be `AnyView`-wrapped → force non-slotable (the
+        // view demotes to native) rather than emit `AnyView(nativeToolbar)`.
+        if slotable, !nonViewBuilderNames.isEmpty || source.contains("Toolbar"),
+           sourceIsNonViewBuilderContent(source) {
+            slotable = false
+        }
         opaqueLeaves.append(.init(id: id, source: source, slotable: slotable, label: label,
                                   stringArgs: stringArgs, stringArgRanges: stringArgRanges))
     }
@@ -7881,6 +8138,20 @@ struct Emitter {
     /// the modifier or demotes (faithful over a wrong-type guess).
     private func tokenExprTypeProvable(_ expr: ExprSyntax,
                                        kind: BodyLowering.HostToken.Kind) -> Bool {
+        // PROVABLY-NOT-A-TOKEN shapes the member/call admissions below would otherwise trust
+        // (real apps, each an Xcode build failure in the generated `__patchTokens()`):
+        //   * `.background(Text("Continue").font(.title2).foregroundColor(.white))` →
+        //     `.color(Text(…)…)` "cannot convert value of type 'Text' to expected 'Color'"
+        //     (DesignRemakes; SketchElements' `WebImage(url:).resizable(…).indicator(…)`);
+        //   * `.background(.quaternary)` / `.tertiary` / `.quaternary.opacity(0.5)` → a
+        //     `HierarchicalShapeStyle`, "member 'quaternary' in 'Color' produces result of type
+        //     'some ShapeStyle'" (FoodTruck, Pow);
+        //   * `.background(model.color.gradient)` → `AnyGradient` (FoodTruck).
+        // Each is a hard compile error today, so rejecting them (→ the modifier native-slots,
+        // exactly like an unprovable bare name) changes no view that currently builds.
+        if (kind == .color || kind == .font), Self.tokenExprIsProvablyNotColorOrFont(expr, kind: kind) {
+            return false
+        }
         // A bare identifier: provable ONLY when its declared type matches the token kind.
         if let ref = expr.as(DeclReferenceExprSyntax.self) {
             let name = ref.baseName.text
@@ -7918,6 +8189,93 @@ struct Emitter {
             return call.calledExpression.is(MemberAccessExprSyntax.self)
         }
         // Anything else (a literal, an operator expr, etc.) isn't a provable color/font token.
+        return false
+    }
+
+    /// SwiftUI `ShapeStyle` statics that are NOT `Color` members (so `.color(.x)` can't compile).
+    /// `.primary`/`.secondary` are deliberately absent — `Color.primary`/`Color.secondary` exist.
+    /// Only the hierarchical levels with no `Color` counterpart — names an app is not in the
+    /// habit of re-declaring on `Color` (unlike `.background`/`.foreground`, which design systems
+    /// routinely add as `extension Color { static let background … }`, where `.color(.background)`
+    /// compiles and must keep lowering).
+    static let nonColorShapeStyleStatics: Set<String> = ["tertiary", "quaternary", "quinary"]
+
+    /// View modifiers that `Color` does not re-declare with a `Color` result: once one appears
+    /// in the chain the value is `some View`, never a `Color`/`Font`.
+    static let viewOnlyModifierNames: Set<String> = [
+        "font", "fontWeight", "fontDesign", "bold", "italic", "monospaced", "foregroundColor",
+        "foregroundStyle", "resizable", "renderingMode", "interpolation", "antialiased",
+        "aspectRatio", "scaledToFit", "scaledToFill", "indicator", "lineLimit",
+        "multilineTextAlignment", "tint", "accentColor", "clipped", "onTapGesture", "onAppear",
+        "onDisappear", "disabled", "hidden", "labelsHidden", "textCase", "kerning", "tracking",
+        "underline", "strikethrough", "imageScale", "symbolRenderingMode", "transition",
+        "animation", "zIndex", "allowsHitTesting", "contentShape", "layoutPriority",
+        "buttonStyle", "listRowBackground", "navigationTitle", "toolbar", "sheet", "alert",
+        "environment", "environmentObject", "accessibilityLabel", "accessibilityHidden",
+        "compositingGroup", "drawingGroup", "clipShape", "position", "minimumScaleFactor",
+        "truncationMode", "lineSpacing", "id", "tag", "onReceive", "onChange", "task", "placeholder",
+        "cancelOnDisappear", "transaction", "matchedGeometryEffect", "saturation", "grayscale",
+        "colorMultiply", "colorInvert", "luminanceToAlpha", "hueRotation", "blendMode"
+    ]
+
+    /// SwiftUI (and the two ubiquitous image-loading libraries') VIEW constructors — a chain
+    /// rooted in one of these is a view, never a `Color`/`Font`.
+    static let viewConstructorNames: Set<String> = [
+        "Text", "Image", "Label", "Button", "VStack", "HStack", "ZStack", "LazyVStack", "LazyHStack",
+        "LazyVGrid", "LazyHGrid", "Group", "ScrollView", "List", "Form", "NavigationView",
+        "NavigationStack", "NavigationLink", "AsyncImage", "ProgressView", "Spacer", "Divider",
+        "Toggle", "TextField", "SecureField", "GeometryReader", "EmptyView", "AnyView", "Link",
+        "Menu", "Picker", "Section", "TextEditor", "Slider", "Stepper", "DatePicker", "Gauge",
+        "WebImage", "KFImage", "VideoPlayer", "Map", "ShareLink", "ControlGroup", "GroupBox",
+        "ViewThatFits", "TimelineView", "Canvas", "SpriteView", "SceneView"
+    ]
+
+    /// True iff `expr` can structurally be proven NOT to produce a `Color` (for a color token)
+    /// or a `Font` (for a font token) — see the call site in `tokenExprTypeProvable`.
+    static func tokenExprIsProvablyNotColorOrFont(_ expr: ExprSyntax, kind: BodyLowering.HostToken.Kind) -> Bool {
+        if let t = expr.as(TernaryExprSyntax.self) {
+            return tokenExprIsProvablyNotColorOrFont(t.thenExpression, kind: kind)
+                || tokenExprIsProvablyNotColorOrFont(t.elseExpression, kind: kind)
+        }
+        if let tup = expr.as(TupleExprSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
+            return tokenExprIsProvablyNotColorOrFont(only.expression, kind: kind)
+        }
+        if let f = expr.as(ForceUnwrapExprSyntax.self) { return tokenExprIsProvablyNotColorOrFont(f.expression, kind: kind) }
+        if let o = expr.as(OptionalChainingExprSyntax.self) { return tokenExprIsProvablyNotColorOrFont(o.expression, kind: kind) }
+        // Walk the member/call chain from the outside in.
+        var cur: ExprSyntax? = expr
+        var outermost = true
+        var called = false
+        while let e = cur {
+            if let call = e.as(FunctionCallExprSyntax.self) {
+                if let ref = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+                    // The chain's root is a constructor/free call.
+                    return viewConstructorNames.contains(ref.baseName.text)
+                }
+                cur = call.calledExpression
+                called = true
+                continue
+            }
+            if let member = e.as(MemberAccessExprSyntax.self) {
+                let name = member.declName.baseName.text
+                // Only a CALLED modifier (`.font(.title2)`): a stored/computed design-token
+                // property that merely shares a modifier's name (`Theme.tint`) stays trusted.
+                // Color tokens only: `Font` DOES declare `bold()`/`italic()`/`monospaced()`/…
+                // returning `Font`, so `.font(.subheadline.bold())` must keep lowering.
+                if called, kind == .color, viewOnlyModifierNames.contains(name) { return true }
+                called = false
+                if kind == .color {
+                    // `x.gradient` (the OUTERMOST member) is an `AnyGradient`.
+                    if outermost, name == "gradient" { return true }
+                    // `.quaternary` / `.quaternary.opacity(…)` — an implicit hierarchical style root.
+                    if member.base == nil, nonColorShapeStyleStatics.contains(name) { return true }
+                }
+                outermost = false
+                cur = member.base
+                continue
+            }
+            return false
+        }
         return false
     }
 
@@ -8710,11 +9068,40 @@ final class GeometryProxyRewriter: SyntaxRewriter {
     private(set) var unmappable = false
     init(proxyName: String) { self.proxyName = proxyName; super.init() }
 
+    /// Each proxy chain replaced, in the DETACHED pre-rewrite block's byte coordinates:
+    /// `(offset, oldLength, newLength)` of the trimmed chain → reserved identifier.
+    private(set) var replacements: [(offset: Int, oldLength: Int, newLength: Int)] = []
+    /// original-file offset minus detached-block offset of the statement list (see `rewrite`).
+    private var originalBase = 0
+
     func rewrite(_ stmts: CodeBlockItemListSyntax) -> CodeBlockItemListSyntax {
         // Wrap → rewrite → unwrap so we operate on the statement list as a unit.
         let block = CodeBlockSyntax(statements: stmts)
+        // The wrapped copy is a NEW root: its byte offsets differ from the original file's by a
+        // constant up to the first replacement. Remember it so a byte range recorded against the
+        // rewritten tree can be mapped back (`originalRange(forRewritten:)`).
+        originalBase = stmts.position.utf8Offset - block.statements.position.utf8Offset
+        replacements = []
         let out = rewrite(Syntax(block)).as(CodeBlockSyntax.self)
         return out?.statements ?? stmts
+    }
+
+    /// Map a byte range in the REWRITTEN statements' coordinates back to the ORIGINAL file.
+    /// nil when the range overlaps a replaced proxy chain (it has no original counterpart).
+    func originalRange(forRewritten r: Range<Int>) -> Range<Int>? {
+        var delta = 0          // cumulative (newLength - oldLength) of replacements before `r`
+        for rep in replacements.sorted(by: { $0.offset < $1.offset }) {
+            let start = rep.offset + delta          // replacement start in rewritten coordinates
+            let end = start + rep.newLength
+            if end <= r.lowerBound {
+                delta += rep.newLength - rep.oldLength
+            } else if start >= r.upperBound {
+                break
+            } else {
+                return nil
+            }
+        }
+        return (r.lowerBound - delta + originalBase)..<(r.upperBound - delta + originalBase)
     }
 
     /// The reserved identifier a proxy member chain maps to, or nil if it's not a
@@ -8764,6 +9151,8 @@ final class GeometryProxyRewriter: SyntaxRewriter {
             // POSTFIX `/` — a compile error. Carrying the trivia keeps `height / 2`'s
             // spacing as `__geo_height / 2`.
             if let reserved = reservedName(forMember: node.declName.baseName.text, base: base) {
+                replacements.append((node.positionAfterSkippingLeadingTrivia.utf8Offset,
+                                     node.trimmedLength.utf8Length, reserved.utf8.count))
                 let token = TokenSyntax.identifier(reserved,
                                                    leadingTrivia: node.leadingTrivia,
                                                    trailingTrivia: node.trailingTrivia)

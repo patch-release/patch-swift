@@ -1,13 +1,17 @@
 ---
 title: Webhooks & error-spike alerts
-description: Events and error-spike alerts.
+description: Patch sends signed POSTs for release.pushed, rollout.changed, rollback and error_spike, so Slack or on-call hears about a release without polling a dashboard.
 sidebar:
   order: 16
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Webhooks push workspace events to your own systems in real time — post a release to Slack, page on-call when error rates spike, or kick off a downstream job. Patch sends a signed `POST` to every HTTPS endpoint you register that's subscribed to the event. They're managed by a workspace **owner** or **admin**, in the console under **Settings → Webhooks** or over the API.
+A Patch webhook is an HTTPS endpoint you register to receive workspace events in
+real time — post a release to Slack, page on-call when an error rate spikes, or
+kick off a downstream job. Patch sends a signed `POST` to every registered
+endpoint subscribed to the event. They're managed by a workspace **owner** or **admin**, in the console under **Settings → Webhooks** or over the API.
 
 ## Events
 

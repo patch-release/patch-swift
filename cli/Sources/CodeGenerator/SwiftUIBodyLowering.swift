@@ -438,6 +438,12 @@ public struct BodyLowering {
     /// content-stable `id` the emitted tree carries — so the engine (push) and the
     /// thunk generator (build) agree on the id without sharing state.
     public struct OpaqueLeaf: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         public let id: String
         /// The leaf's Swift source — rendered natively in the slot closure. When the
         /// leaf is PARAMETERIZED (`stringArgs` non-empty) this is the TEMPLATE: the
@@ -486,6 +492,12 @@ public struct BodyLowering {
     /// FNV hash, so the engine (push) and thunk generator (build) agree with no shared
     /// state — exactly like `OpaqueLeaf`.
     public struct HostToken: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         /// A token's value tier. `color`/`font` are applied by the SDK RENDERER from
         /// the thunk's `__patchTokens()` (the tree carries `.hostToken(id)`/
         /// `.fontToken(id)`). A `number` (a design-system `CGFloat`/`Double` constant
@@ -549,6 +561,74 @@ public struct BodyLowering {
     /// generator, and the SDK so they agree with no shared state.
     public static func rowCountInputKey(_ id: String) -> String { "__rowcount_" + id }
 
+    // MARK: - Reserved GUEST identifiers (must never reach host-side generated Swift)
+
+    /// Identifier prefixes that exist ONLY inside the WASM guest module: the reserved input
+    /// bindings the guest emitter declares from the input JSON (`__geo_*` GeometryReader
+    /// values, `__numtok_`/`__strtok_` host tokens, `__rowcount_` row counts), the guest
+    /// runtime's JSON helpers (`_patchInputs`, `_patchScan*`, `_patchRead*`, …) and the
+    /// guest-side probe/let names (`__patch_*`). None of them is in scope in the developer's
+    /// app, so a host-side slot/token/row/action/effect/callback source containing one is
+    /// a guaranteed `cannot find '…' in scope` Xcode error. NOTE the host thunk's own
+    /// helpers are `__patchSlots`/`__patchTokens`/… (no `_` after `patch`, double leading
+    /// underscore) — distinct from every prefix here under the identifier-boundary match.
+    public static let reservedGuestIdentifierPrefixes: [String] = [
+        "__geo_", "__numtok_", "__strtok_", "__rowcount_", "__patch_",
+        "_patchInputs", "_patchScan", "_patchRead", "_patchFind", "_patchEmit",
+        "_patchArray", "_patchObject", "_patchDict", "_patchValueStart", "_patchTrimRange",
+        "_patchBytesEq", "_patchDecodeEscape", "_patchRange", "_patchTruncUTF8",
+        "_patchUpdate_", "_patchDispatchValue",
+    ]
+
+    /// The reserved guest identifiers (full identifier text, e.g. `__geo_height`) that occur
+    /// in `source` at an identifier boundary. Empty for any source a developer could have
+    /// written (the prefixes are engine-private). Cheap byte scan — no parse.
+    public static func reservedGuestIdentifiers(in source: String) -> [String] {
+        guard source.contains("_") else { return [] }
+        let bytes = Array(source.utf8)
+        func isIdent(_ b: UInt8) -> Bool {
+            (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || b == 0x5F
+                || b >= 0x80
+        }
+        var found: [String] = []
+        let prefixes = reservedGuestIdentifierPrefixes.map { Array($0.utf8) }
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x5F, i == 0 || !isIdent(bytes[i - 1]) {
+                for p in prefixes where i + p.count <= bytes.count && bytes[i..<(i + p.count)].elementsEqual(p) {
+                    var j = i + p.count
+                    while j < bytes.count, isIdent(bytes[j]) { j += 1 }
+                    let name = String(decoding: bytes[i..<j], as: UTF8.self)
+                    if !found.contains(name) { found.append(name) }
+                    i = j - 1
+                    break
+                }
+            }
+            i += 1
+        }
+        return found
+    }
+
+    /// Every HOST-SIDE Swift source the build-time thunk would emit for these records (slot
+    /// closures, token expressions, row-slot collection/row sources, action/effect/callback
+    /// bodies). Shared by the emitter's GeometryReader scope gate, the lowering's
+    /// reserved-identifier net, and `ThunkGenerator`'s per-view validation.
+    public static func hostSideSources(opaqueLeaves: [OpaqueLeaf], hostTokens: [HostToken],
+                                       indexedRowSlots: [IndexedRowSlot], actionSlots: [ActionSlot],
+                                       effectSlots: [EffectSlot], callbackSlots: [CallbackSlot]) -> [String] {
+        var out: [String] = []
+        out.append(contentsOf: opaqueLeaves.map(\.source))
+        out.append(contentsOf: hostTokens.map(\.source))
+        for rs in indexedRowSlots {
+            out.append(rs.collectionSource)
+            out.append(rs.rowClosureText ?? rs.rowSource)
+        }
+        out.append(contentsOf: actionSlots.map(\.source))
+        out.append(contentsOf: effectSlots.map(\.applySource))
+        out.append(contentsOf: callbackSlots.map(\.slotSource))
+        return out
+    }
+
     /// A PER-ROW INDEXED NATIVE-ACTION SLOT — the lowering of a `ForEach` over a
     /// BODY-LOCAL collection the guest can't reconstruct, whose rows are a custom child
     /// view carrying a PER-ROW native action closure (`AccountChip(...) { schedule.
@@ -571,6 +651,12 @@ public struct BodyLowering {
     /// the cross-file thunk (no body-local besides `loopVar`, no inaccessible member); an
     /// unprovable shape stays a plain native slot instead (demote-safe).
     public struct IndexedRowSlot: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         public let id: String
         public let collectionSource: String
         public let loopVar: String
@@ -607,6 +693,12 @@ public struct BodyLowering {
     /// (the same `act<hash>` id the dispatch path derives from the call slice), so the engine
     /// (push) and thunk generator (build) agree with no shared state — exactly like `OpaqueLeaf`.
     public struct ActionSlot: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         public let id: String
         /// The action closure BODY source (`{ deleteSubscription(subscription) }`'s inner
         /// statements) — emitted RAW in the thunk's `__patchActionSlots()` as `{ <source> }`,
@@ -639,6 +731,12 @@ public struct BodyLowering {
     /// slice), so the engine (push) and thunk generator (build) agree with no shared state — exactly
     /// like `OpaqueLeaf`/`ActionSlot`.
     public struct EffectSlot: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         public let id: String
         /// The MODIFIER-APPLICATION source over a `content` placeholder — e.g.
         /// `content.task { await self.load() }`. The thunk's `__patchEffectSlots()` emits a
@@ -670,6 +768,12 @@ public struct BodyLowering {
     ///     so an edit to the callback body registers as a WASM change (fingerprint-stable; OTA).
     ///   • `label` — human-readable diagnostic string.
     public struct CallbackSlot: Sendable, Equatable {
+        /// `#available(…)` conditions (outermost first) enclosing the body position this entry
+        /// was recorded at — an `if #available(iOS 17, *) { … }` branch the emitter resolved by
+        /// taking the available branch. The thunk wraps the entry in the same `if #available`
+        /// so an app whose deployment target is below it still compiles. Thunk-text only: not
+        /// part of the id, the guest tree or `bodyHash`. Empty for almost every entry.
+        public var availability: [String] = []
         public let id: String
         /// The full child-view call with the closure arg replaced by the stable forwarding closure.
         /// This is emitted verbatim as the body of `__patchCallbackSlots()[id]`.
@@ -984,8 +1088,13 @@ public struct BodyLowering {
                               crossFileReactiveCollectionShapeCatalog: [String: [StructField]] = [:],
                               crossFileComputedMemberCatalog: [String: [String: HostToken.Kind]] = [:],
                               crossFileObservableClassNames: Set<String> = [],
-                              crossFileModelClassNames: Set<String> = []) -> [LoweredView] {
+                              crossFileModelClassNames: Set<String> = [],
+                              crossFileNonViewBuilderNames: Set<String> = []) -> [LoweredView] {
         let tree = Parser.parse(source: source)
+        // NON-VIEW BUILDER CONTENT (`some ToolbarContent` / `@ToolbarContentBuilder` members,
+        // `ToolbarContent`/`ChartContent`-conforming types): never `AnyView`-wrappable.
+        let nonViewBuilderNames = Self.nonViewBuilderContentNames(in: tree)
+            .union(crossFileNonViewBuilderNames)
         // Source-wide FLAT-struct catalog (type name → flat scalar/string fields). A
         // `[SomeStruct]` view input is `.structArray`-reconstructable only when its
         // element struct is in here (every stored field scalar — see `flatStructFields`).
@@ -1045,6 +1154,12 @@ public struct BodyLowering {
         // NON-OPTIONAL @Model members — the @Model object never crosses to WASM.
         let mergedModelClassNames = Self.modelClassNames(in: tree)
             .union(crossFileModelClassNames)
+        // SEPARATE-file thunk contract only: the file's private TYPE + file-scope VALUE names
+        // (never computed for the default same-file contract — zero cost / zero change there).
+        let filePrivateFreeNames: Set<String> = sameFileThunk ? [] : {
+            let syms = ThunkGenerator.filePrivateSymbols(in: tree)
+            return syms.typeNames.union(syms.valueNames)
+        }()
         var out: [LoweredView] = []
         for view in allViews(in: tree) {
             guard let bodyExpr = bodyExpression(of: view.decl) else { continue }
@@ -1093,8 +1208,13 @@ public struct BodyLowering {
             // members from the extension, so a leaf/token reading one is NOT slotable
             // (it would not compile: `'$x' is inaccessible due to 'private'`) → the read
             // forces the view native.
+            // A FILE-PRIVATE TYPE / file-scope value (`private struct Row: View`, `private let
+            // kSpacing`) is equally invisible to the separate-file extension, so it blocks too.
             emitter.inaccessibleNames = sameFileThunk
-                ? [] : Self.inaccessibleMemberNames(of: view.decl)
+                ? [] : Self.inaccessibleMemberNames(of: view.decl).union(filePrivateFreeNames)
+            emitter.nonViewBuilderNames = nonViewBuilderNames
+            emitter.selfNonViewBuilderMemberNames = nonViewBuilderNames.isEmpty
+                ? [] : Self.nonViewBuilderContentNames(in: Syntax(view.decl))
             // The view's own members — so an `if let <selfProp>` shadow doesn't make a
             // self-member reference in another leaf look like a blocking body-local.
             emitter.selfMemberNames = Self.allMemberNames(of: view.decl)
@@ -1328,6 +1448,20 @@ public struct BodyLowering {
                 && !treeReferencesInputs
                 && !emitter.usesGeometry
                 && stateModel?.isInteractive != true
+            // RESERVED-GUEST-IDENTIFIER NET (prove-or-demote): a host-side source the thunk
+            // would emit (slot/token/row/action/effect/callback) must never contain an
+            // identifier that only exists inside the WASM guest (`__geo_*`, `__numtok_…`,
+            // `_patchInputs`, …) — it is a guaranteed `cannot find … in scope` in the app build.
+            // The emitter's own gates (e.g. the GeometryReader host-scope gate) prevent every
+            // known path; this is the belt-and-braces net for any future one. A leak DEMOTES the
+            // view through the existing unresolved-symbol channel, so the build excludes it, the
+            // fingerprint keeps its body hashed, and `ThunkGenerator` drops its thunk — all three
+            // agree. Empty for every correct view (no behavior change).
+            let leakedGuestIdentifiers = Self.hostSideSources(
+                opaqueLeaves: emitter.opaqueLeaves, hostTokens: emitter.hostTokens,
+                indexedRowSlots: emitter.indexedRowSlots, actionSlots: emitter.actionSlots,
+                effectSlots: emitter.effectSlots, callbackSlots: emitter.callbackSlots)
+                .flatMap { Self.reservedGuestIdentifiers(in: $0) }
             out.append(LoweredView(viewName: view.name, report: report,
                                    guestBody: guestBody, inputs: inputs,
                                    stateModel: stateModel,
@@ -1338,8 +1472,11 @@ public struct BodyLowering {
                                    effectSlots: emitter.effectSlots,
                                    callbackSlots: emitter.callbackSlots,
                                    referencesUnmarshalledInput: referencesUnmarshalled,
-                                   referencesUnresolvedSymbol: !scopeResult.isCompilable,
-                                   unresolvedSymbols: scopeResult.unresolved,
+                                   referencesUnresolvedSymbol: !scopeResult.isCompilable
+                                       || !leakedGuestIdentifiers.isEmpty,
+                                   unresolvedSymbols: leakedGuestIdentifiers.isEmpty ? scopeResult.unresolved
+                                       : scopeResult.unresolved + leakedGuestIdentifiers.filter {
+                                           !scopeResult.unresolved.contains($0) },
                                    inaccessibleReadNames: inaccessibleReads,
                                    blockingReadNames: blockingReads,
                                    swiftDataBlockers: swiftDataBlockers,
@@ -1564,6 +1701,96 @@ public struct BodyLowering {
             }
         }
         return out
+    }
+
+    /// Result-builder CONTENT protocols that are NOT `View` — a value of one of these can never
+    /// be spliced into `AnyView(…)` (`'some ToolbarContent' does not conform to 'View'`).
+    static let nonViewContentProtocols: Set<String> = [
+        "ToolbarContent", "CustomizableToolbarContent", "ChartContent", "TableColumnContent",
+        "TableRowContent", "AccessibilityRotorContent", "Commands", "Scene",
+        "WidgetConfiguration",
+    ]
+    /// The matching non-View RESULT-BUILDER attributes.
+    static let nonViewContentBuilders: Set<String> = [
+        "ToolbarContentBuilder", "ChartContentBuilder", "TableColumnBuilder", "TableRowBuilder",
+        "AccessibilityRotorContentBuilder", "CommandsBuilder", "SceneBuilder", "WidgetBundleBuilder",
+    ]
+    /// SwiftUI's own non-View toolbar content types (besides `ToolbarItem`/`ToolbarItemGroup`).
+    static let builtinNonViewContentTypes: Set<String> = [
+        "ToolbarItem", "ToolbarItemGroup", "ToolbarSpacer", "ToolbarTitleMenu", "DefaultToolbarItem",
+    ]
+
+    /// The NON-VIEW BUILDER CONTENT names declared in a file, at ANY nesting depth (struct,
+    /// extension, enum…): (a) a type that conforms to a `nonViewContentProtocols` protocol
+    /// (`struct EditorToolbar: ToolbarContent`); (b) a `var`/`func` whose declared type / return
+    /// type names one (`var nativeToolbar: some ToolbarContent`) or that carries a non-View
+    /// result-builder attribute (`@ToolbarContentBuilder`). Purely syntactic, name-based.
+    public static func nonViewBuilderContentNames(in tree: SourceFileSyntax) -> Set<String> {
+        nonViewBuilderContentNames(in: Syntax(tree))
+    }
+
+    static func nonViewBuilderContentNames(in tree: Syntax) -> Set<String> {
+        final class Collector: SyntaxVisitor {
+            var names = Set<String>()
+            init() { super.init(viewMode: .sourceAccurate) }
+            func typeMentionsNonView(_ t: TypeSyntax?) -> Bool {
+                guard let t else { return false }
+                return t.tokens(viewMode: .sourceAccurate).contains {
+                    BodyLowering.nonViewContentProtocols.contains($0.text)
+                }
+            }
+            /// A MEMBER counts only via an OPAQUE/EXISTENTIAL type (`some ToolbarContent`,
+            /// `any ChartContent`) — never a concrete type that merely shares a name (an app's
+            /// own `struct Scene` model must not flag `var current: Scene`).
+            func opaqueMentionsNonView(_ t: TypeSyntax?) -> Bool {
+                guard let t, let some = t.as(SomeOrAnyTypeSyntax.self) else { return false }
+                return typeMentionsNonView(some.constraint)
+            }
+            func hasNonViewBuilder(_ attrs: AttributeListSyntax) -> Bool {
+                attrs.contains {
+                    guard let a = $0.as(AttributeSyntax.self) else { return false }
+                    let name = a.attributeName.trimmedDescription
+                        .split(separator: "<").first.map(String.init) ?? ""
+                    return BodyLowering.nonViewContentBuilders.contains(name)
+                }
+            }
+            func inherits(_ inh: InheritanceClauseSyntax?) -> Bool {
+                inh?.inheritedTypes.contains { typeMentionsNonView($0.type) } ?? false
+            }
+            override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+                if inherits(node.inheritanceClause) { names.insert(node.name.text) }
+                return .visitChildren
+            }
+            override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+                if inherits(node.inheritanceClause) { names.insert(node.name.text) }
+                return .visitChildren
+            }
+            override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+                if inherits(node.inheritanceClause) { names.insert(node.name.text) }
+                return .visitChildren
+            }
+            override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+                let builder = hasNonViewBuilder(node.attributes)
+                for b in node.bindings {
+                    guard let id = b.pattern.as(IdentifierPatternSyntax.self),
+                          id.identifier.text != "body" else { continue }
+                    if builder || opaqueMentionsNonView(b.typeAnnotation?.type) {
+                        names.insert(id.identifier.text)
+                    }
+                }
+                return .skipChildren
+            }
+            override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+                if hasNonViewBuilder(node.attributes)
+                    || opaqueMentionsNonView(node.signature.returnClause?.type) {
+                    names.insert(node.name.text)
+                }
+                return .skipChildren
+            }
+        }
+        let c = Collector()
+        c.walk(tree)
+        return c.names
     }
 
     static func inaccessibleMemberNames(of s: StructDeclSyntax) -> Set<String> {
@@ -3329,6 +3556,12 @@ public struct BodyLowering {
         /// is `@Model`). A type declared in 2+ files is dropped (ambiguous, conservative). Enables
         /// cross-file resolution — the @Model class is almost always in a separate file.
         public let modelClassNames: Set<String>
+        /// PROJECT-WIDE NON-VIEW BUILDER CONTENT names (see `nonViewBuilderContentNames`): types
+        /// conforming to `ToolbarContent`/`ChartContent`/… and members declared `some
+        /// ToolbarContent`/`@ToolbarContentBuilder`/…. Such content must never be wrapped in
+        /// `AnyView(…)`. An over-approximating name set (no ambiguity drop) — a false hit only
+        /// keeps that content native, which always compiles.
+        public let nonViewBuilderNames: Set<String>
         /// Explicit memberwise init with a default for `modelClassNames` so existing call sites
         /// that don't supply it (e.g. older tests) continue to compile unchanged — they implicitly
         /// get an empty set, which means no @Model scalar projection. This is the safe default:
@@ -3341,7 +3574,8 @@ public struct BodyLowering {
                     structs: [String: [StructField]],
                     enums: [String: ViewInput.EnumElement],
                     observableClassNames: Set<String>,
-                    modelClassNames: Set<String> = []) {
+                    modelClassNames: Set<String> = [],
+                    nonViewBuilderNames: Set<String> = []) {
             self.stringFields = stringFields
             self.scalarFields = scalarFields
             self.collectionFields = collectionFields
@@ -3351,6 +3585,7 @@ public struct BodyLowering {
             self.enums = enums
             self.observableClassNames = observableClassNames
             self.modelClassNames = modelClassNames
+            self.nonViewBuilderNames = nonViewBuilderNames
         }
         public static let empty = CrossFileBundle(stringFields: [:], scalarFields: [:],
                                                   collectionFields: [:], reactiveShapes: [:],
@@ -3390,7 +3625,10 @@ public struct BodyLowering {
             structs: catalogs.structs,
             enums: catalogs.enums,
             observableClassNames: Self.crossFileObservableClassNames(sources: sources),
-            modelClassNames: Self.crossFileModelClassNames(sources: sources))
+            modelClassNames: Self.crossFileModelClassNames(sources: sources),
+            nonViewBuilderNames: sources.reduce(into: Set<String>()) {
+                $0.formUnion(Self.nonViewBuilderContentNames(in: Parser.parse(source: $1)))
+            })
     }
 
     /// Lower all views in `source` with a cross-file `bundle` — the convenience the build + the
@@ -3418,7 +3656,8 @@ public struct BodyLowering {
                                   crossFileReactiveCollectionShapeCatalog: bundle.reactiveShapes,
                                   crossFileComputedMemberCatalog: bundle.computedMembers,
                                   crossFileObservableClassNames: bundle.observableClassNames,
-                                  crossFileModelClassNames: bundle.modelClassNames)
+                                  crossFileModelClassNames: bundle.modelClassNames,
+                                  crossFileNonViewBuilderNames: bundle.nonViewBuilderNames)
         // Early-exit: if the bundle has no cross-file struct/enum catalogs, or no view demoted,
         // skip pass 2 entirely (the common path — no allocation overhead).
         let demoterNames = pass1.filter { $0.referencesUnmarshalledInput }.map(\.viewName)
@@ -3437,7 +3676,8 @@ public struct BodyLowering {
                                   crossFileReactiveCollectionShapeCatalog: bundle.reactiveShapes,
                                   crossFileComputedMemberCatalog: bundle.computedMembers,
                                   crossFileObservableClassNames: bundle.observableClassNames,
-                                  crossFileModelClassNames: bundle.modelClassNames)
+                                  crossFileModelClassNames: bundle.modelClassNames,
+                                  crossFileNonViewBuilderNames: bundle.nonViewBuilderNames)
         // MERGE: for each view, use pass-1 result UNLESS it demoted AND pass 2 produced a
         // non-demoting result. This is the inertness invariant in code — a view that ALREADY
         // lowers in pass 1 is NEVER replaced with a pass-2 result (even if pass 2 also lowers).

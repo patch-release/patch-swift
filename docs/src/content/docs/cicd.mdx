@@ -1,11 +1,17 @@
 ---
 title: CI/CD
-description: Release from GitHub Actions and other CI.
+description: "Run patchcli release from CI: gate pull requests on the native-shell fingerprint, ship the patch on merge, and keep publish tokens off developer machines."
 sidebar:
   order: 11
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
-For production, run `patchcli release` from CI so deploys are reproducible, auditable, and free of long-lived credentials on developer machines. The shape of a pipeline:
+A Patch CI pipeline does two things: it gates pull requests on the native-shell
+fingerprint, and it runs `patchcli release` on merge so deploys are
+reproducible, auditable, and free of long-lived credentials on developer
+machines. Publishing authenticates with a publish token (`ppt_…`) held as a
+repository secret — never the app key that ships inside your binary. The shape
+of a pipeline:
 
 1. **Analyze (gate):** on pull requests, run `patchcli analyze ./Sources --check-fingerprint`. If the native shell changed, fail the job — that change must ship through the App Store.
 2. **Release:** on merge to `main`, run `patchcli release` with the swift.org WASM SDK to build the module and push it behind the fingerprint check, then start a staged rollout.

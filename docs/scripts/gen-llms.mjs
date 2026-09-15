@@ -14,7 +14,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { ROOT, DIST, readPages, sidebarGroups } from './lib/docs.mjs';
+import { ROOT, DIST, readPages, sidebarGroups, decodeEntities } from './lib/docs.mjs';
 
 const argv = process.argv.slice(2);
 const outIdx = argv.indexOf('--out');
@@ -86,13 +86,44 @@ for (const s of sections) {
 // llms-full.txt is the same tree with the page bodies inlined. The bodies are
 // MDX; strip the machinery (imports/exports, JSX tags) but keep the prose and
 // fenced code, which is what a model actually needs.
-const demdx = (body) =>
+const attr = (attrs, name) => {
+  const m = attrs.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`));
+  return m ? decodeEntities(m[1]) : '';
+};
+
+const absolute = (href) => {
+  if (/^https?:\/\//i.test(href)) return href;
+  return SITE + (href.startsWith('/') ? href : `/${href}`);
+};
+
+// A <LinkCard> IS the link — deleting the tag deleted the only pointer to the
+// page it advertised (index.mdx lost four). Render it as a list item instead.
+const linkCards = (body) =>
+  body.replace(/<LinkCard\b([\s\S]*?)\/>/g, (_m, attrs) => {
+    const title = attr(attrs, 'title');
+    const href = attr(attrs, 'href');
+    if (!title || !href) return '';
+    const description = attr(attrs, 'description');
+    return `- [${title}](${absolute(href)})${description ? `: ${description}` : ''}`;
+  });
+
+// An <Aside title="…"> carries a real heading — index.mdx's "Is this allowed?"
+// question, and the answer under it. Keep the title, drop the tag.
+const asides = (body) =>
   body
+    .replace(/<Aside\b[^>]*\btitle="([^"]*)"[^>]*>/g, (_m, title) => `**${decodeEntities(title)}**\n`)
+    .replace(/<Aside\b[^>]*>/g, '')
+    .replace(/<\/Aside>/g, '');
+
+const demdx = (body) =>
+  asides(linkCards(body))
     .replace(/^\s*import\s+[^\n]*\n/gm, '')
     .replace(/^\s*export\s+(const|let|default)\s[^\n]*\n/gm, '')
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-    .replace(/^<[A-Z][^\n]*>\s*$/gm, '')
-    .replace(/^<\/[A-Z][^\n]*>\s*$/gm, '')
+    // Leading whitespace is normal — these tags are indented inside <CardGrid>,
+    // <Steps> and <Tabs>. Without \s* the indented ones survived as raw JSX.
+    .replace(/^\s*<[A-Z][^\n]*>\s*$/gm, '')
+    .replace(/^\s*<\/[A-Z][^\n]*>\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
@@ -113,6 +144,10 @@ const targets = [
   [join(OUT, 'llms-full.txt'), full],
 ];
 
+// These files are read as plain text by coding agents, so an HTML entity or a
+// raw JSX tag in the output is a defect, not a cosmetic issue.
+const LEAKS = ['&amp;', '<LinkCard', '<Aside'];
+
 if (CHECK) {
   let bad = 0;
   for (const [file, content] of targets) {
@@ -121,9 +156,15 @@ if (CHECK) {
       console.error(`!! ${relative(ROOT, file)} is ${cur === null ? 'missing' : 'stale'} — run \`npm run gen:llms\``);
       bad++;
     }
+    for (const leak of LEAKS) {
+      if (content.includes(leak)) {
+        console.error(`!! ${relative(ROOT, file)} contains ${leak} — it must be plain text`);
+        bad++;
+      }
+    }
   }
   if (bad) process.exit(1);
-  console.log('llms.txt / llms-full.txt are up to date.');
+  console.log('llms.txt / llms-full.txt are up to date and free of markup.');
 } else {
   mkdirSync(OUT, { recursive: true });
   for (const [file, content] of targets) writeFileSync(file, content);

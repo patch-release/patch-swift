@@ -1,14 +1,21 @@
 ---
 title: What Patch can & can't update
-description: What an OTA patch can and cannot change.
+description: What an OTA patch can and cannot change in a SwiftUI app, with coverage measured on a real validation corpus and the one permanent binary-symbol wall.
 sidebar:
   order: 4
 sources:
   - cli/Sources/CodeGenerator/SwiftUIEmitter.swift
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import coverage from '../../data/coverage.json';
 import { Aside } from '@astrojs/starlight/components';
+
+An OTA patch can change SwiftUI structure, state and interaction, plus Swift
+logic and `async`/`await`, in the app your users already have installed. It
+cannot introduce a native symbol, framework or entitlement that is not already
+compiled and signed into that binary. This page is the map of that boundary,
+with per-app coverage measured on a real validation corpus.
 
 <Aside type="note" title="These numbers are generated, not written">
 Everything below is imported from `src/data/coverage.json`, which is derived from
@@ -121,3 +128,10 @@ Be precise here, because it's the most common misconception. An **existing** `MK
 If a change lives entirely inside your app's **existing** linked frameworks, declared entitlements, and SwiftUI view bodies, an OTA patch can ship it. If it requires a **new** native symbol, framework, or privacy entitlement that isn't in the signed binary — or it rewrites compiled native code that isn't a `View.body` — it needs an App Store release. That second set is tiny, and it's the same boundary Apple's review process draws. When Patch isn't sure a change is safe, it keeps the code native and renders the bundled fallback, so an update can **never** break your app.
 
 New here? Start with the [Quick Start](/quickstart/) or have an AI assistant [set Patch up for you](/ai-setup/).
+
+## Related
+
+- [How it works](/how-it-works/) — the partitioning and packaging pipeline
+- [FAQ](/faq/) — what a patch can and cannot change, in short form
+- [Glossary](/glossary/) — mixed view, demote-to-native, binary-symbol wall
+- [Hotfix a Swift app over the air](https://patchrelease.com/blog/hotfix-swift-app-over-the-air)

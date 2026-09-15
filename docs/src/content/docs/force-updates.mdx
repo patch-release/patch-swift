@@ -1,13 +1,19 @@
 ---
 title: Force updates
-description: Require a patch before the app continues.
+description: Mark a release mandatory and the SDK reports isMandatory, so your app can require the patch before the user continues. Native changes still need the App Store.
 sidebar:
   order: 10
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Some fixes can't wait for the next natural launch — a critical tax bug, a broken eligibility rule. Mark a release **mandatory** and the SDK surfaces an `isMandatory` flag so you can require the update before the user continues. The pattern mirrors EAS / Expo-Updates' "Update available → Download now."
+A force update is a Patch release marked **mandatory**, so your app can require
+the patch before the user continues. Some fixes can't wait for the next natural
+launch — a critical tax bug, a broken eligibility rule. The flag rides through
+the update check and surfaces as `UpdateInfo.isMandatory`; you decide what UI to
+show. The pattern mirrors EAS / Expo-Updates' "Update available → Download
+now."
 
 ## Mark a release mandatory
 
@@ -54,3 +60,10 @@ ContentView().task {
 <Aside type="caution" title="Scope">
 Force updates apply to the OTA module only — they hot-swap WASM logic, not native code. A change to the native shell still requires an App Store release (the fingerprint gate enforces this). Keep mandatory updates within Apple's Developer Program License Agreement and Review Guidelines.
 </Aside>
+
+## Related
+
+- [Staged rollouts & A/B](/rollouts/) — percentages, adoption, and rollback
+- [SDK reference](/sdk/) — `checkForUpdate`, `fetchUpdate`, `reloadAsync`
+- [Instant rollback for an iOS release](https://patchrelease.com/blog/instant-rollback-ios-release)
+- [The iOS hotfix playbook](https://patchrelease.com/blog/ios-hotfix-playbook)

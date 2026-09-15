@@ -1,13 +1,17 @@
 ---
 title: Release targeting
-description: Target releases by version, cohort, and device.
+description: Limit a release to a device cohort by app version, OS version and cohort label; targeting composes with the rollout percentage, and both must pass.
 sidebar:
   order: 9
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-A release can be limited to a **device cohort** by app version and OS version. Targeting answers "*which* devices are even eligible for this release" — and it composes **with** the rollout %: a device must satisfy the targeting constraints **and** fall inside the rollout bucket before it's served the module. Use it to ship a fix only where it applies — for example, a fix that depends on an API added in app 2.1 on iOS 16.
+Release targeting decides which devices are even eligible for a Patch release:
+minimum and maximum app version, minimum OS version, and a named cohort. It is
+set at push time and stored on the release. Targeting composes **with** the
+rollout %: a device must satisfy the targeting constraints **and** fall inside the rollout bucket before it's served the module. Use it to ship a fix only where it applies — for example, a fix that depends on an API added in app 2.1 on iOS 16.
 
 ## Set targeting at push time
 

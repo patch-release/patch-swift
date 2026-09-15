@@ -390,7 +390,7 @@ final class PBXThunkIntegrationTests: XCTestCase {
         XCTAssertEqual(outcome, .added)
         XCTAssertTrue(text.contains(".product(name: \"PatchSwiftUI\", package: \"patch-swift\")"),
                       "PatchSwiftUI product not added to the target")
-        XCTAssertTrue(text.contains(".package(url: \"https://github.com/patch-release/patch-swift\", from: \"1.0.0\")"),
+        XCTAssertTrue(text.contains(".package(url: \"https://github.com/patch-release/patch-swift\", from: \"\(XcodeProjectEditor.minimumVersion)\")"),
                       "patch-swift package dependency not added")
         // Landed in Demo, not the test target.
         let testPart = text.components(separatedBy: ".testTarget").last!

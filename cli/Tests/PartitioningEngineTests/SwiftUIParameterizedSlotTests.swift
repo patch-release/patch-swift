@@ -175,7 +175,7 @@ final class SwiftUIParameterizedSlotTests: XCTestCase {
     // MARK: - 2. THUNK FACTORY: parameterized + plain
 
     /// The generated thunk's `__patchSlots()` is a FACTORY map; a parameterized leaf
-    /// renders `{ (a: [String]) in a.count >= 1 ? AnyView(Foo(text: a[0], size: 28)) : AnyView(EmptyView()) }`.
+    /// renders `{ (a: [String]) -> AnyView in guard a.count >= 1 else { … }; return AnyView(Foo(text: a[0], size: 28)) }`.
     func testThunkEmitsParameterizedFactory() throws {
         let source = """
         import SwiftUI
@@ -190,14 +190,17 @@ final class SwiftUIParameterizedSlotTests: XCTestCase {
         let text = r.modifiedFiles.first?.text ?? ""
         XCTAssertTrue(text.contains("func __patchSlots() -> [String: ([String]) -> AnyView]"),
                       "slot map is a factory ABI: \(text)")
-        XCTAssertTrue(text.contains("(a: [String]) in a.count >= 1 ? AnyView(Foo(text: a[0], size: 28))"),
+        XCTAssertTrue(text.contains("(a: [String]) -> AnyView in\n            guard a.count >= 1 else { return AnyView(EmptyView()) }\n            return AnyView(Foo(text: __patchLit(a[0]), size: 28))"),
                       "parameterized factory substitutes a[0] for the lifted string: \(text)")
-        XCTAssertTrue(text.contains(": AnyView(EmptyView())"),
+        XCTAssertTrue(text.contains("return AnyView(EmptyView())"),
                       "arg-count guard demotes to EmptyView (never crash): \(text)")
         // The FACTORY line must not bake the literal — it rides a[0]. (The original
         // `body` is still present in the file's `else { body }` branch, so the literal
         // legitimately appears elsewhere; assert only the factory closure is clean.)
-        let factoryLine = text.split(separator: "\n").first { $0.contains("__s[") } ?? ""
+        // The factory closure now spans a few lines (typed signature + guard + return).
+        let lines = text.split(separator: "\n").map(String.init)
+        let start = lines.firstIndex { $0.contains("__s[") } ?? 0
+        let factoryLine = lines[start..<min(start + 4, lines.count)].joined(separator: "\n")
         XCTAssertFalse(factoryLine.contains("\"Settings\""),
                        "the literal is NOT baked into the factory closure (it rides a[0]): \(factoryLine)")
     }
@@ -206,7 +209,7 @@ final class SwiftUIParameterizedSlotTests: XCTestCase {
     func testRenderParameterizedTemplateSubstitution() {
         let template = "Foo(a: \u{1}0\u{1}, n: 3, b: \u{1}1\u{1})"
         let out = ThunkGenerator.renderParameterizedTemplate(template, argCount: 2)
-        XCTAssertEqual(out, "Foo(a: a[0], n: 3, b: a[1])")
+        XCTAssertEqual(out, "Foo(a: __patchLit(a[0]), n: 3, b: __patchLit(a[1]))")
     }
 
     /// The generated GUEST source assigns `emission.slotArgs = [...]` with the

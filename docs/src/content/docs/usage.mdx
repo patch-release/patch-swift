@@ -1,13 +1,19 @@
 ---
 title: Usage & analytics
-description: Device and adoption metrics.
+description: "Per-app release health derived from device events: active devices, adoption, error rate and a daily time series, broken down by version, channel and OS."
 sidebar:
   order: 14
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The SDK reports download, activation, and error events for every device (see [Telemetry](/sdk/)). The console's **Usage** page rolls those events into release-health analytics so you can answer "is this release healthy and adopted?" at a glance. Everything is a read-only aggregate over device events — no extra wiring beyond the SDK, and every query is scoped to your own workspace.
+Patch usage analytics are read-only aggregates over the device events PatchSDK
+already reports: download, activation and error, per device (see
+[Telemetry](/sdk/)). The console's **Usage** page rolls those events into
+release health so you can answer "is this release healthy and adopted?" at a
+glance. There is no extra wiring beyond the SDK, and every query is scoped to
+your own workspace.
 
 ## Endpoints
 

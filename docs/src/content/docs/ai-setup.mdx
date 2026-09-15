@@ -1,13 +1,21 @@
 ---
 title: Set up with AI
-description: Prompts for setting Patch up with an AI assistant.
+description: Copy-paste prompts that have Claude Code, Cursor or Copilot install patchcli, run patchcli init, and wire PatchSDK into your Xcode project for you.
 sidebar:
   order: 2
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Already using an AI coding assistant — Claude Code, Cursor, Windsurf, GitHub Copilot, or similar? Hand it the prompt below and it will set Patch up in your app for you. Under the hood it follows the exact same [Quick Start](/quickstart/) flow: install `patchcli`, run `patchcli init` (which registers the app, adds the PatchSDK package, injects `Patch.configure(…)`, and makes your SwiftUI views patchable), then show you how to ship an update with `patchcli release`.
+An AI coding assistant can install Patch for you: hand it one of the prompts on
+this page and it runs the documented onboarding itself. The prompts drive the
+same [Quick Start](/quickstart/) flow — install `patchcli`, run `patchcli init`
+(which registers the app, adds the PatchSDK package, injects
+`Patch.configure(…)`, and makes your SwiftUI views patchable), then ship an
+update with `patchcli release`. There is nothing AI-specific to install; the
+assistant is only driving the CLI. Claude Code, Cursor, Windsurf and GitHub
+Copilot all work.
 
 <Aside type="note" title="Open your iOS project first">
 Point your assistant at the directory that contains your `.xcodeproj` / `.xcworkspace` before pasting, so it runs in the right place. `patchcli init` is safe to re-run — it skips any step that's already done.
@@ -102,7 +110,7 @@ https://docs.patchrelease.com/llms.txt). Follow the real flow:
    prepare these edits so I'm
    ready either way:
    - In Xcode I'll add the Swift package
-     https://github.com/patch-release/patch-swift (product PatchSDK, from 1.0.0)
+     https://github.com/patch-release/patch-swift (product PatchSDK, from 1.7.0)
      via File → Add Package Dependencies… — or add it to my Package.swift if I
      have one; show me the Package.swift dependency + target lines.
    - In my @main App struct, add "import PatchSDK" and, in init(), call:
@@ -128,3 +136,11 @@ reverts instantly. Don't invent flags or steps — only use what's in the docs.
 <Aside type="note" title="Tip">
 Whichever variant you use, the assistant is just driving the documented `patchcli` commands — there's nothing AI-specific to install. If you'd rather do it yourself, the [Quick Start](/quickstart/) walks through the same steps by hand, and [Manual setup](/quickstart/#manual-setup-the-fallback) lists the fallback for unusual projects.
 </Aside>
+
+## Related
+
+- [https://docs.patchrelease.com/llms.txt](https://docs.patchrelease.com/llms.txt) — the docs page index, in plain text for agents
+- [https://docs.patchrelease.com/llms-full.txt](https://docs.patchrelease.com/llms-full.txt) — every docs page inlined as one plain-text file
+- [Quick Start](/quickstart/) — the same steps by hand
+- [CLI reference](/cli/) — every command and flag, captured from the binary
+- [FAQ](/faq/) — the questions an assistant is most likely to get wrong

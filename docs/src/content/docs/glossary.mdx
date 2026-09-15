@@ -1,0 +1,254 @@
+---
+title: Glossary
+description: "Definitions of the terms Patch uses: OTA update, native shell, fingerprint, PMOD, WasmKit, host bridge, channel, staged rollout, demote-to-native, thunk."
+sidebar:
+  order: 6
+lastUpdated: 2026-08-22T09:00:00-04:00
+---
+
+Patch borrows vocabulary from three places: mobile release engineering, the
+WebAssembly toolchain, and Apple's developer agreements. Each term below is
+defined once, standalone, in the sense Patch uses it. Short answers to product
+questions are on the [FAQ](/faq/).
+
+## What is an OTA update?
+
+An OTA (over-the-air) update is a code change delivered to an app already
+installed on a device, without submitting a new binary to the App Store. With
+Patch the delivered artifact is a WebAssembly module compiled from the Swift you
+changed; the signed App Store binary stays exactly as Apple reviewed it, and
+the module runs inside it.
+
+## What is a hotfix?
+
+A hotfix is a small, urgent correction to code already in production — a
+crash, a wrong price, a broken eligibility rule — shipped on its own rather
+than waiting for the next scheduled release. Patch's purpose is to make a
+hotfix to a native Swift app a release you run from a terminal instead of a
+submission you wait on.
+
+## What is a patch, and how is it different from a release?
+
+A patch is the WebAssembly module that carries your changed code. A release is
+the act of publishing one to a channel with a rollout percentage, targeting and
+release notes — what `patchcli release` performs, and the row you see in the
+console's Rollouts view. One build can be released more than once: to staging
+first, then to production.
+
+## What is a channel?
+
+A channel is a named update stream — `production`, `staging`, `beta`, or any
+string you choose. A build subscribes to one channel in `PatchConfiguration`
+and receives only releases pushed to it, so an internal beta and production run
+in parallel from one codebase. `status` and `rollback` are channel-scoped too.
+See [Deployment channels](/channels/).
+
+## What is a staged rollout?
+
+A staged rollout is a release served to a percentage of eligible devices rather
+than all of them, so a problem is found on a slice of the fleet. Patch buckets
+each device deterministically from its device id and the release, so a device
+that is in stays in as you raise the percentage. See
+[Staged rollouts & A/B](/rollouts/).
+
+## What is a rollback?
+
+A rollback re-activates the previous module for a channel, undoing a release
+across the fleet. Devices pick it up on their next update check, and a device
+already running the withdrawn release is told to deactivate and fall back. It
+is one command — `patchcli rollback` — and needs no App Store submission.
+
+## What is a cohort, and what is targeting?
+
+Targeting decides which devices are even eligible for a release: minimum and
+maximum app version, minimum OS version, and a named cohort. A cohort is a
+label a device reports — set by your app, or derived by the backend from a
+stable hash of the device id. Targeting composes with the rollout percentage:
+both must pass. See [Release targeting](/targeting/).
+
+## What is a force update?
+
+A force update is a release marked mandatory, so your app can require it before
+the user continues. The flag rides through the update check and surfaces as
+`UpdateInfo.isMandatory`; you decide what UI to show. It applies to the OTA
+module only — a native change still needs an App Store release. See
+[Force updates](/force-updates/).
+
+## What is the native shell?
+
+The native shell is the compiled Swift inside your signed App Store binary: the
+code the engine kept native, plus the SDK, the linked frameworks, the
+entitlements and the Info.plist. A patch is not a whole app — it is a fragment
+that calls into symbols the shell already contains, which is why the shell's
+identity has to be pinned.
+
+## What is a native-shell fingerprint?
+
+A native-shell fingerprint is a deterministic SHA-256 hash over everything that
+fixes the signed binary's layout — native Swift sources, the SDK and WasmKit
+versions, bridge definitions, Info.plist, entitlements, linked frameworks, the
+deployment target and the compiler version. A device reports its build's
+fingerprint on every update check, and the backend serves a patch only when the
+fingerprints match. See [The compatibility fingerprint](/fingerprint/).
+
+## What is WebAssembly?
+
+WebAssembly (Wasm) is a portable binary instruction format with a defined
+sandbox: a module has its own linear memory and can reach the outside world
+only through imports its host explicitly provides. Patch compiles the
+OTA-eligible parts of your Swift to a WebAssembly module, which is why a patch
+cannot invent a capability your app does not already have.
+
+## What is WasmKit?
+
+[WasmKit](https://github.com/swiftwasm/WasmKit) is a WebAssembly runtime written
+in Swift. PatchSDK embeds it, so the module a patch delivers is executed by an
+interpreter compiled into your app rather than by anything downloaded or
+dynamically loaded. It is the reason a patch is interpreted code rather than
+native machine code.
+
+## What is Embedded Swift?
+
+Embedded Swift is a language subset that compiles without the Swift runtime's
+reflection and metadata machinery, producing very small binaries. Patch's
+default packaging tier uses it: the module carries no Foundation or ICU, and
+Foundation values such as `Decimal`, `Date` and JSON are satisfied by host
+bridges into the native shell's real Foundation instead.
+
+## What is a PMOD container?
+
+A PMOD container is the file format a Patch build ships: one default WebAssembly
+sub-module plus optional additive sub-modules, packaged together. The SDK
+instantiates each sub-module as its own WasmKit instance and routes calls to
+the right one. Sub-modules are kept separate rather than merged because two
+Swift modules cannot share one linear memory.
+
+## What is dynamic replacement, and what is a thunk?
+
+Dynamic replacement is the Swift mechanism — the one Xcode Previews uses — that
+lets a marked `dynamic` function be substituted at runtime. `patchcli prepare`
+marks each `var body: some View` `dynamic` and generates a thunk: a small
+`@_dynamicReplacement(for: body)` function that asks the SDK whether a patched
+body exists and renders it, with the original native body as the fallback.
+Thunks are generated into `Patch/Generated/`. A view's `private` members are
+reached through a small `PATCH-ACCESS` forwarder extension in the view's own
+file.
+
+## What is a mixed view?
+
+A mixed view is a SwiftUI view whose body is only partly lowerable. Rather than
+demoting the whole view, the engine lowers the parts it can and leaves the rest
+as native slots — a custom child view or an unsupported modifier is passed
+whole to the renderer by the build-time thunk. The structure ships over the
+air; the slotted leaves render natively.
+
+## What is demote-to-native?
+
+Demote-to-native is the engine's default answer whenever it cannot prove a
+change is safe to run as WebAssembly: the function or view body stays in the
+signed binary and runs from there. It happens at build time — with a
+per-view diagnostic naming what blocked it — and again on-device if a module
+fails to verify or activate. Coverage is what is at stake, never correctness.
+
+## What is a host bridge?
+
+A host bridge is a host function the SDK exposes to the WebAssembly module so
+guest code can use a capability the module itself does not contain — networking,
+`UserDefaults`, the keychain, date and locale formatting, regular expressions.
+The bridge calls code already linked into your signed binary, so it can never
+widen what the app is able to do.
+
+## What is the binary-symbol wall?
+
+The binary-symbol wall is the one hard limit on what an OTA patch can reach: it
+cannot introduce a native symbol, framework or entitlement absent from the
+signed binary, and it cannot rewrite the compiled body of native code that is
+not a patchable `View.body`. This is a property of code signing, not a backlog
+item. See [What Patch can & can't update](/coverage/).
+
+## What is interpreted code under DPLA §3.3.1(B)?
+
+Interpreted code, in the sense of Apple's Developer Program License Agreement
+§3.3.1(B) (formerly §3.3.2), is downloaded code an app runs through an
+interpreter it already contains — permitted provided it does not change the
+app's primary purpose, does not create a store or storefront for other code,
+and does not bypass the sandbox or code signing. See
+[Apple compliance](/apple-compliance/).
+
+## What is App Review Guideline 2.5.2?
+
+App Review Guideline 2.5.2 is the review rule that apps "should be self-contained
+in their bundles, and may not read or write data outside the designated
+container area, nor may they download, install, or execute code which
+introduces or changes features or functionality of the app, including other
+apps." Read verbatim and in context on
+[Apple compliance](/apple-compliance/).
+
+## What is a phased release?
+
+A phased release is App Store Connect's own staged delivery: an approved
+version is released to a growing share of users who have automatic updates
+switched on. It happens after review, applies only to a version Apple already
+approved, and cannot be used to ship a change that has not been reviewed. A
+Patch rollout percentage is the equivalent control for an OTA module.
+
+## What is an expedited review?
+
+An expedited review is a request to Apple to prioritise a submission ahead of
+the normal queue, reserved for critical situations such as a serious bug in a
+released app. It is a request, not a setting, and Apple decides. An OTA patch
+addresses the same urgency without a submission — for changes that stay inside
+the interpreted-code boundary.
+
+## What is a feature flag?
+
+A feature flag is a runtime switch that turns behaviour already shipped in the
+binary on or off. It changes configuration, not code, so anything the flag can
+reach had to be written and reviewed in advance. An OTA patch changes the code
+itself, which is why it can fix a bug a flag can only hide.
+
+## What is remote config?
+
+Remote config is server-delivered values — strings, numbers, colours, JSON —
+that an installed app reads at runtime. Like a feature flag it cannot introduce
+logic the binary does not already contain. Patch ships the logic, so it covers
+the cases where the fix is a code change rather than a value change.
+
+## What is server-driven UI?
+
+Server-driven UI is an architecture where the server sends a description of the
+interface and the app renders it from a fixed catalogue of components you built
+in advance. It requires designing the app around that catalogue up front.
+Patch lowers the SwiftUI you already wrote, so no architectural commitment is
+required to change a view over the air.
+
+## What is CodePush?
+
+CodePush is Microsoft's over-the-air update service for React Native, which
+kept an app's JavaScript and images in sync with releases and could not
+distribute changes that touched native code. The hosted App Center service was
+retired on 31 March 2025 and the client repository was archived on 20 May 2025;
+a standalone self-hosted server was published and is archived too. See
+[How Patch compares](/compare/).
+
+## What is EAS Update?
+
+EAS Update is Expo's over-the-air update service — in Expo's words, "a cloud
+service that serves updates for projects using the expo-updates library". It
+updates a React Native app's non-native pieces, such as JavaScript, styling and
+images; native changes require a new build. See
+[How Patch compares](/compare/).
+
+## What is Shorebird?
+
+Shorebird is the over-the-air code-push service for Flutter. It patches Dart
+code, running it on iOS through a custom Dart interpreter, and states that it
+"does not support changing native code (e.g. Java/Kotlin on Android or
+Objective-C/Swift on iOS)". See [How Patch compares](/compare/).
+
+## Related
+
+- [FAQ](/faq/) — short answers to the questions behind these terms
+- [How it works](/how-it-works/) — the pipeline these terms describe
+- [What Patch can & can't update](/coverage/) — the measured coverage map
+- [Apple compliance](/apple-compliance/) — DPLA §3.3.1(B) and Guideline 2.5.2

@@ -1,10 +1,11 @@
 ---
 title: How it works
-description: The Swift-to-WebAssembly pipeline and on-device runtime.
+description: Patch splits one Swift codebase into a WebAssembly module of updatable code and a native shell that holds everything else and calls into it on-device.
 sidebar:
   order: 3
 sources:
   - cli/Sources/Compiler/WasmCompiler.swift
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -53,3 +54,12 @@ Patch also picks the smallest viable **packaging tier** per module, so OTA patch
 | **T2 · Full Foundation** | ~11.7 MB | The fallback when a module needs in-module Foundation no bridge covers (`Mirror`, in-module `Codable` synthesis, `NSRegularExpression`, formatters). |
 
 Patch uses the lightest tier a module can run on, only stepping up when the code genuinely needs more. Any heavier base ships once; every update after that is a tiny compressed **binary diff** against the version already on the device — typically a few hundred bytes to tens of KB.
+
+## Related
+
+- [What Patch can & can't update](/coverage/) — the measured coverage map
+- [The compatibility fingerprint](/fingerprint/) — why a patch stops applying
+- [Glossary](/glossary/) — PMOD, WasmKit, Embedded Swift, host bridge, thunk
+- [Compiling Swift to WebAssembly](https://patchrelease.com/blog/swift-to-webassembly)
+- [SwiftUI over the wire](https://patchrelease.com/blog/swiftui-over-the-wire)
+- [WasmKit: a WebAssembly runtime in Swift](https://patchrelease.com/blog/wasmkit-webassembly-runtime-swift)

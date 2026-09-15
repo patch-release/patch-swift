@@ -63,6 +63,13 @@ public struct PatchConfig: Sendable, Equatable {
     /// (the same wrap `patchcli overlay package` does). Nil = no overlay (the artifact
     /// is byte-identical to today).
     public var overlaySpec: String?
+    /// SwiftUI views `patchcli prepare --verify` proved break the app build once prepared
+    /// (a generated-code compile error, or a view body that stops type-checking in reasonable
+    /// time). They are KEPT NATIVE everywhere, consistently: prepare gives them no `dynamic`
+    /// and no thunk, the build doesn't ship them OTA, and the fingerprint keeps their body
+    /// hashed. Serialized as a `native_views:` list only when non-empty, so an existing
+    /// `.Patch.yml` round-trips byte-identically. A developer may also add names by hand.
+    public var nativeViews: [String]
 
     public init(
         version: Int = 1,
@@ -81,7 +88,8 @@ public struct PatchConfig: Sendable, Equatable {
         apiBaseURL: String? = nil,
         apiKey: String? = nil,
         publishToken: String? = nil,
-        overlaySpec: String? = nil
+        overlaySpec: String? = nil,
+        nativeViews: [String] = []
     ) {
         self.version = version
         self.appKey = appKey
@@ -100,6 +108,7 @@ public struct PatchConfig: Sendable, Equatable {
         self.apiKey = apiKey
         self.publishToken = publishToken
         self.overlaySpec = overlaySpec
+        self.nativeViews = nativeViews
     }
 
     public static let defaultBridges: [String: Bool] = [
@@ -195,6 +204,10 @@ public struct PatchConfig: Sendable, Equatable {
         } else {
             for e in exclude { out += "  - \(e)\n" }
         }
+        if !nativeViews.isEmpty {
+            out += "native_views:\n"
+            for v in nativeViews { out += "  - \(v)\n" }
+        }
         out += "bridges:\n"
         for key in PatchConfig.bridgeOrder {
             let v = bridges[key] ?? false
@@ -246,12 +259,20 @@ public struct PatchConfig: Sendable, Equatable {
         return nil
     }
 
+    /// The `native_views:` of the `.Patch.yml` governing `dir` (found by walking up, like every
+    /// other command), or empty when there is none / it doesn't parse. Shared by prepare, the
+    /// build and the fingerprint so all three keep exactly the same views native.
+    public static func nativeViewNames(near dir: URL) -> Set<String> {
+        guard let url = find(startingAt: dir), let cfg = try? load(from: url) else { return [] }
+        return Set(cfg.nativeViews)
+    }
+
     /// Minimal YAML parser for this fixed schema.
     public static func parse(_ text: String) throws -> PatchConfig {
         var cfg = PatchConfig(bridges: [:])
         var bridgesSeen = false
         // Current container: nil = top-level, else the sub-map name.
-        enum Section { case top, exclude, bridges, build }
+        enum Section { case top, exclude, nativeViews, bridges, build }
         var section: Section = .top
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -291,6 +312,9 @@ public struct PatchConfig: Sendable, Equatable {
                     section = .exclude
                     // inline empty list `exclude: []`
                     if unquote(value) == "[]" { section = .top }
+                case "native_views":
+                    section = .nativeViews
+                    if unquote(value) == "[]" { section = .top }
                 case "bridges":
                     section = .bridges; bridgesSeen = true
                 case "build":
@@ -308,6 +332,11 @@ public struct PatchConfig: Sendable, Equatable {
                     cfg.exclude.append(unquote(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)))
                 } else if trimmed == "[]" {
                     // empty list block
+                }
+            case .nativeViews:
+                if trimmed.hasPrefix("- ") {
+                    let name = unquote(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces))
+                    if !name.isEmpty, !cfg.nativeViews.contains(name) { cfg.nativeViews.append(name) }
                 }
             case .bridges:
                 if let (key, value) = splitKeyValue(trimmed) {

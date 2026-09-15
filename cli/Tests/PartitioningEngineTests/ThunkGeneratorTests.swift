@@ -44,6 +44,26 @@ final class ThunkGeneratorTests: XCTestCase {
         XCTAssertTrue(r.thunkFileContents.contains("func __patchSlots() -> [String: ([String]) -> AnyView]"))
     }
 
+    /// Swift 6.0.x crashes at -O/-Osize ("Global is external, but doesn't have external or
+    /// weak linkage") on a `private`/`fileprivate` opaque `@_dynamicReplacement(for: body)`
+    /// declared in a different file from the view. Debug builds are fine, so only a customer's
+    /// Release build would find it. The replacement property must stay internal.
+    func testReplacementPropertyIsNeverPrivate() {
+        let r = run(["A.swift": """
+        import SwiftUI
+        struct Hello: View {
+            @State private var n = 0
+            var body: some View { Text("hi \\(n)") }
+        }
+        """])
+        let lines = r.thunkFileContents.components(separatedBy: "\n")
+        let decls = lines.filter { $0.contains("var \(ThunkGenerator.replacementPropertyName)") }
+        XCTAssertFalse(decls.isEmpty, r.thunkFileContents)
+        for d in decls {
+            XCTAssertFalse(d.contains("private"), "replacement must be internal: \(d)")
+        }
+    }
+
     func testMixedViewEmitsNativeSlot() {
         // A body referencing a CUSTOM child view (a self-contained native leaf)
         // becomes a slotable opaque leaf → the thunk renders it via a slot closure.
@@ -63,7 +83,7 @@ final class ThunkGeneratorTests: XCTestCase {
         XCTAssertTrue(r.viewNames.contains("Screen"))
         // Screen's slot map renders Card() natively. Card() has no string-literal
         // args, so it's a PLAIN factory that ignores its args.
-        XCTAssertTrue(r.thunkFileContents.contains("{ (_: [String]) in AnyView(Card()) }"),
+        XCTAssertTrue(r.thunkFileContents.contains("{ (_: [String]) -> AnyView in AnyView(Card()) }"),
                       "expected a native slot closure for Card(): \(r.thunkFileContents)")
     }
 

@@ -134,6 +134,13 @@ public struct BuildPipeline {
         }
         var ineligible = Set<String>()
         for (name, n) in structDeclCounts where n > 1 { ineligible.insert(name) }
+        // A view whose stored property is an INFERRED associated type (`var entry:
+        // Provider.Entry`) gets no prepare thunk either — any cross-file extension of it trips a
+        // compiler bug in the developer's file (`ThunkGenerator.inferredAssociatedTypeRiskViews`).
+        // Only sources that contain such a member-type path can match, so skip the parse otherwise.
+        if sources.contains(where: { $0.contains(".Entry") || $0.range(of: #":\s*[A-Z]\w*\.[A-Z]\w*"#, options: .regularExpression) != nil }) {
+            ineligible.formUnion(ThunkGenerator.inferredAssociatedTypeRiskViews(sources: sources))
+        }
         return ineligible
     }
 
@@ -1729,7 +1736,10 @@ public struct BuildPipeline {
         // generated → it renders NATIVE on device. EXCLUDE it here so it's neither shipped as
         // OTA-routable nor recorded in the shipped manifest (the fingerprint then keeps its
         // body hashed — no false-stable).
+        // + views `.Patch.yml` keeps native (`native_views:`, recorded by `prepare --verify` when a
+        // view's prepared code broke the app build): prepare gives them no thunk → never ship OTA.
         let thunkIneligibleViews = Self.thunkIneligibleViewNames(sources: loweringSources.map(\.source))
+            .union(PatchConfig.nativeViewNames(near: sourceDir))
 
         do {
             for lowered in loweredViews {
@@ -1738,6 +1748,12 @@ public struct BuildPipeline {
                 // [R2-#95] A view prepare can't thunk renders native — don't ship it OTA.
                 if thunkIneligibleViews.contains(lowered.viewName) {
                     excludedViews.append(lowered.viewName)
+                    if PatchConfig.nativeViewNames(near: sourceDir).contains(lowered.viewName) {
+                        demoteReasons[lowered.viewName] = demoteReasons[lowered.viewName]
+                            ?? "listed under `native_views:` in .Patch.yml (`patchcli prepare --verify` found its "
+                            + "prepared code broke the app build) — it renders natively, not OTA-patchable"
+                        continue
+                    }
                     demoteReasons[lowered.viewName] = demoteReasons[lowered.viewName]
                         ?? "another top-level struct shares the name `\(lowered.viewName)` (or it's a "
                         + "generic view with a `where` clause), so `patchcli prepare` generates no "

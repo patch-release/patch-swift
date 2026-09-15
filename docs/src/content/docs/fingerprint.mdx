@@ -1,19 +1,25 @@
 ---
 title: The compatibility fingerprint
-description: Why a patch stops applying after you change native code, and how to fix a mismatch.
+description: The native-shell fingerprint is a hash of your signed binary's layout; a patch is served only to matching builds. Why a mismatch happens and how to clear it.
 sidebar:
   order: 5
 sources:
   - cli/Sources/Compiler/ProjectFingerprint.swift
   - cli/Sources/PatchCLI/Fingerprint.swift
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-If you hit one problem with Patch, it will almost certainly be this one. It is
-worth ten minutes now.
+The native-shell fingerprint is a deterministic SHA-256 hash of everything that
+fixes your signed binary's layout: native Swift sources, the SDK and WasmKit
+versions, bridge definitions, Info.plist, entitlements, linked frameworks, the
+deployment target and the compiler version. A patch is served only to devices
+whose build reports the same fingerprint it was built against. If you hit one
+problem with Patch, it will almost certainly be a mismatch here — so this page
+is worth ten minutes now.
 
-## What it is
+## What is the native-shell fingerprint?
 
 Every Patch release is built against a specific version of your app's **native
 shell** — the compiled Swift that ships inside your signed App Store binary. The
@@ -60,6 +66,8 @@ you are patching is fingerprint-stable — that is the entire point.
 
 **Editing string literals inside a slotted view.** Since CLI 1.6.28 string
 literals are lifted out of native slot source and ride the patch instead.
+
+**What `prepare` adds to your files.** The `dynamic` keyword on `var body`, the `PATCH-ACCESS` forwarder block and any `PATCH-THUNKS` block are stripped before hashing, so preparing a project, or migrating from the older in-file layout, does not move the fingerprint. `patchcli unprepare` *does* change the source the hash sees; re-register if you prepare again after it.
 
 **Comments, whitespace, and formatting** in patchable code.
 
@@ -189,3 +197,10 @@ patchcli fingerprint diff --explain
 Between them these give the versions, the toolchain, and exactly which functions
 are native and why — which is usually enough to identify the cause without
 anyone needing your source.
+
+## Related
+
+- [What Patch can & can't update](/coverage/) — why a function was classified native
+- [Troubleshooting](/troubleshooting/) — the other four ways a release fails
+- [Glossary](/glossary/) — native shell, fingerprint, demote-to-native
+- [What is an OTA update for iOS?](https://patchrelease.com/blog/what-is-an-ota-update-for-ios)

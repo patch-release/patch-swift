@@ -1,15 +1,19 @@
 ---
 title: Open source
-description: What's open, under which licence, and how to build it yourself.
+description: "The PatchSDK (MIT) and the engine (Apache-2.0) both live in patch-release/patch-swift: what is in each package, why two licences, and how to build them."
 sidebar:
   order: 38
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside, CardGrid, LinkCard, Tabs, TabItem, Steps, FileTree } from '@astrojs/starlight/components';
 
-Patch edits your Xcode project and injects code into your `@main` App struct. You
-shouldn't have to take that on trust, so the engine that does it and the runtime
-that ships inside your binary are both public.
+The PatchSDK (MIT) and the Patch engine (Apache-2.0) are both public, in the
+repository [`patch-release/patch-swift`](https://github.com/patch-release/patch-swift)
+— the SDK as the SwiftPM package at the root, the engine as a second package
+nested at `cli/`. Patch edits your Xcode project and injects code into your
+`@main` App struct, so you shouldn't have to take either on trust. The hosted
+control plane is a commercial service and is not open source.
 
 ## One repository, two packages
 

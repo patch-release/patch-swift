@@ -1,45 +1,96 @@
 ---
 title: Apple compliance
-description: Why over-the-air Swift updates are permitted, and the boundaries you must stay inside.
+description: Apple permits an app to download and run interpreted code that does not change its primary purpose — the DPLA clause, Guideline 2.5.2 verbatim, and the limits.
 sidebar:
   order: 41
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The most common question about Patch is whether Apple allows it. They do, under
-a long-standing provision of the Developer Program License Agreement, and it is
-the same provision Expo/EAS Update and Microsoft CodePush have relied on for
-close to a decade across tens of thousands of App Store apps.
+Apple's Developer Program License Agreement permits an app to download and run
+interpreted code that does not change the app's primary purpose. Patch ships a
+WebAssembly module executed by an interpreter already inside your signed
+binary. Shorebird cites the same clause by number for Flutter; CodePush and EAS
+Update ship a JavaScript bundle to a binary they likewise never modify. This
+page sets out the clause, the review guideline, and the boundary that is your
+responsibility rather than the tool's.
 
-## The provision
+## Does Apple allow over-the-air updates to a Swift app?
 
-Apple's Developer Program License Agreement permits an application to download
-and run **interpreted code**, provided that the downloaded code:
+Yes — Apple's Developer Program License Agreement permits an application to
+download and run **interpreted code**, provided that the downloaded code does
+not change the primary purpose of the application, does not create a store or
+storefront for other code, and does not bypass the operating system's sandbox
+or code-signing protections. Nothing in that clause is specific to JavaScript
+or Dart, so a WebAssembly module interpreted by a runtime compiled into your
+app sits in the same position as a React Native bundle. What the clause does
+not do is license a change that turns your app into a different product after
+review — that limit is on you, not on the mechanism.
 
-- does not change the **primary purpose** of the application,
-- does not create a **store or storefront** for other code, and
-- does not **bypass** the operating system's sandbox or code-signing protections.
+## What does DPLA §3.3.1(B) require?
 
-<Aside type="caution" title="Verify the clause yourself">
-This provision has been renumbered across revisions of the agreement — older
-material (including some of our own, now corrected) cites a section number that
-no longer applies. Rather than quote a number that may be stale, we link the
-agreement itself. Read the current text in the
-[Apple Developer Program License Agreement](https://developer.apple.com/support/terms/),
-and check the [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
-alongside it.
+DPLA §3.3.1(B), headed "Executable Code" and formerly numbered §3.3.2, is the
+interpreted-code provision. Its first paragraph reads, verbatim:
+
+> Except as set forth in the next paragraph, an Application may not download or
+> install executable code. Interpreted code may be downloaded to an Application
+> but only so long as such code: (a) does not change the primary purpose of the
+> Application by providing features or functionality that are inconsistent with
+> the intended and advertised purpose of the Application (b) does not bypass
+> signing, sandbox, or other security features of the OS; and (c) for
+> Applications distributed on the App Store, does not create a store or
+> storefront for other Applications.
+
+— [Apple Developer Program License Agreement](https://developer.apple.com/support/downloads/terms/apple-developer-program/Apple-Developer-Program-License-Agreement-English.pdf),
+section 3.3.1 B, retrieved 22 August 2026
+
+Three conditions, then: primary purpose, security features, and no storefront.
+Section numbers have moved between revisions of the agreement: section 3.3.2 in
+the current text is "Regulatory Compliance", an unrelated rule about laws and
+regulations. Cite both numbers, and read the current agreement, published at
+[developer.apple.com/support/terms](https://developer.apple.com/support/terms/).
+
+<Aside type="caution" title="Read the current agreement">
+The quote above was taken from Apple's PDF on 22 August 2026. Apple revises the
+agreement, and the clause has already been renumbered once — the 2017 warning
+emails quoted below cite section 3.3.2 for the same rule. Re-read the current
+text at
+[developer.apple.com/support/terms](https://developer.apple.com/support/terms/)
+before you rely on it, and treat this page as a pointer, not as legal advice.
 </Aside>
 
-## How Patch meets it
+## What does App Review Guideline 2.5.2 say?
+
+Guideline 2.5.2 is the review-time counterpart to the DPLA clause. Apple's
+current text reads, verbatim:
+
+> Apps should be self-contained in their bundles, and may not read or write data
+> outside the designated container area, nor may they download, install, or
+> execute code which introduces or changes features or functionality of the app,
+> including other apps. Educational apps designed to teach, develop, or allow
+> students to test executable code may, in limited circumstances, download code
+> provided that such code is not used for other purposes. Such apps must make the
+> source code provided by the app completely viewable and editable by the user.
+
+— [App Review Guidelines, 2.5.2](https://developer.apple.com/app-store/review/guidelines/#software-requirements)
+
+Read alongside §3.3.1(B), the operative words are *introduces or changes
+features or functionality*. Fixing a defect in a feature you shipped and had
+reviewed is not the same act as introducing one that was not reviewed, and the
+DPLA's interpreted-code allowance is what carves out the former. That reading
+is what every OTA update tool on iOS depends on, and it is a reading, not a
+guarantee — Apple decides.
+
+## How does Patch stay inside the rules?
 
 **Your signed binary is never modified.** Patch does not rewrite, re-sign, or
-replace the app you shipped through review. The binary on the device is byte-for-byte
-the one Apple notarised.
+replace the app you shipped through review. The binary on the device is
+byte-for-byte the one Apple notarised.
 
 **Only interpreted code updates.** A patch is WebAssembly, executed by the
-[WasmKit](https://github.com/swiftwasm/WasmKit) interpreter embedded in your app.
-It is never native machine code, and it is never loaded as an executable.
+[WasmKit](https://github.com/swiftwasm/WasmKit) interpreter embedded in your
+app. It is never native machine code, and it is never loaded as an executable.
 
 **The sandbox is intact.** Patched code reaches the system only through host
 functions your binary already exposes. It cannot call a framework you did not
@@ -50,41 +101,77 @@ app sandbox. This is enforced by the architecture, not by policy — see
 **The primary purpose is unchanged.** Patch is for fixing and iterating on the
 app you shipped. Which leads to the part that is genuinely your responsibility.
 
-## Where the line is
+## What did Apple ban in 2017, and why is this different?
 
-The compliance argument holds for the thing Patch is designed for: fixing bugs,
-correcting copy, adjusting layout, changing business rules, iterating on views.
+In March 2017 Apple sent warning emails to developers whose apps embedded
+"hot code push" SDKs. The notice, as reproduced at the time, read: "Your app,
+extension, and/or linked framework appears to contain code designed explicitly
+with the capability to change your app's behavior or functionality after App
+Review approval, which is not in compliance with section 3.3.2 of the Apple
+Developer Program License Agreement and App Store Review Guideline 2.5.2." It
+added that "This code, combined with a remote resource, can facilitate
+significant changes to your app's behavior compared to when it was initially
+reviewed for the App Store."
+([9to5Mac, 7 March 2017](https://9to5mac.com/2017/03/07/apple-cracks-down-on-hot-push-code-sdks/))
 
-It does not cover using OTA updates to turn your app into a different product
-after review. That is a real limit, and it is on you rather than on the
-mechanism:
+Two things follow from that. First, Apple did not withdraw the interpreted-code
+provision — it is in the current agreement as §3.3.1(B), quoted verbatim above.
+Second, the objection Apple
+stated was about *changing behaviour beyond what was reviewed*, which is the
+same boundary §3.3.1(B) draws. Patch narrows the mechanism as far as the
+architecture allows: a patch is interpreted WebAssembly that can only call
+symbols already compiled and signed into the reviewed binary, and it can never
+add a framework, entitlement or privacy capability the app did not ship with.
+It cannot narrow your intent for you.
 
-- Do not ship a patch that introduces functionality you concealed during review.
-- Do not use patches to enable features rejected by App Review.
-- Do not build a mechanism for users to obtain or run third-party code.
+## What must a patch never do?
 
-Patch cannot enforce this — no OTA tool can. It is a term you accepted as a
-developer.
+Do not ship a patch that introduces functionality you concealed during review.
+Do not use patches to enable features App Review rejected. Do not build a
+mechanism for users to obtain or run third-party code. Patch cannot enforce any
+of this — no OTA tool can, because these are statements about intent, not about
+bytes. They are terms you accepted as a developer, and they are the part of the
+compliance argument that stays with you.
 
-## The precedent
+The uses Patch is designed for sit well inside the line: fixing bugs, correcting
+copy, adjusting layout, changing business rules, iterating on views within the
+app you already shipped.
 
-React Native's CodePush, Expo's EAS Update, and Flutter's Shorebird all deliver
-interpreted code updates under the same provision. The practice is well
-established, widely documented, and has been operating at scale for years.
+## What is the precedent for this?
+
+React Native's CodePush, Expo's EAS Update and Flutter's Shorebird all deliver
+interpreted code updates under the same provision. Microsoft published
+[react-native-code-push](https://github.com/microsoft/react-native-code-push) in
+June 2015, and interpreted-code updates have been standard practice in
+production React Native apps since. The practice is well established and widely
+documented.
 
 Patch differs in what it interprets — WebAssembly compiled from your Swift,
 rather than JavaScript or Dart — but the compliance position is identical, and
 if anything narrower: the code that ships is a fragment that can only call into
-symbols your reviewed binary already contains.
+symbols your reviewed binary already contains. See
+[How Patch compares](/compare/) for what each tool patches.
 
-## If a reviewer asks
+## What should I say if App Review asks?
 
-Be straightforward. The app downloads interpreted WebAssembly used to update
-covered application logic and UI. The signed binary is unchanged, no new
-capabilities are introduced, and nothing bypasses the sandbox or code signing.
+Be straightforward and factual. The app downloads interpreted WebAssembly used
+to update covered application logic and UI. The signed binary is unchanged, no
+new capabilities are introduced, and nothing bypasses the sandbox or code
+signing. If it helps, name the mechanism: the module runs in an embedded
+WebAssembly interpreter and can only call functions the reviewed binary already
+exports.
 
 <Aside type="note">
 We are not your lawyers, and this page is not legal advice. If your app is in a
 regulated category, or you are unsure whether a change alters your primary
 purpose, get your own advice.
 </Aside>
+
+## Related
+
+- [What Apple allows for OTA updates](https://patchrelease.com/blog/what-apple-allows-ota-updates)
+- [Update an iOS app without App Store review](https://patchrelease.com/blog/update-ios-app-without-app-store-review)
+- [OTA update tools compared](https://patchrelease.com/ota-update-tools-compared)
+- [How Patch compares](/compare/) — Patch, CodePush, EAS Update and Shorebird
+- [FAQ](/faq/) — short answers, including the Guideline 2.5.2 question
+- [What Patch can & can't update](/coverage/) — the architectural boundary

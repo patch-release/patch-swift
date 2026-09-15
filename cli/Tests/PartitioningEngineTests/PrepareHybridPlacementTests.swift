@@ -300,4 +300,34 @@ final class PrepareHybridPlacementTests: XCTestCase {
         """
         XCTAssertTrue(ThunkGenerator.parses(ok))
     }
+
+    /// Target membership composes with excluded-file cleanup: a file OUTSIDE the build target
+    /// (a widget/package file) that an older prepare left a same-file block + `dynamic` in is
+    /// cleaned, exactly like an `exclude:`-matched file; in-target files are untouched.
+    func testOutOfTargetFilesAreCleanedOfStalePatchCode() throws {
+        let dir = try tmp("out-of-target")
+        let appURL = dir.appendingPathComponent("App/Hello.swift")
+        let widgetURL = dir.appendingPathComponent("Widget/WidgetView.swift")
+        try write(helloView.replacingOccurrences(of: "var body", with: "dynamic var body"), to: appURL)
+        try write("""
+        import SwiftUI
+        struct WidgetView: View {
+            dynamic var body: some View { Text("w") }
+        }
+
+        \(ThunkGenerator.sameFileBeginMarker)
+        #if canImport(SwiftUI)
+        import PatchSDK
+        #endif
+        \(ThunkGenerator.sameFileEndMarker)
+        """, to: widgetURL)
+        let sources = Prepare.swiftSources(in: dir, excludes: [])
+        Prepare.cleanExcludedFiles(root: dir, excludes: [], quiet: true, sources: sources,
+                                   targetCompileSet: [appURL.path])
+        let widget = read(widgetURL)
+        XCTAssertFalse(widget.contains(ThunkGenerator.sameFileBeginMarker), widget)
+        XCTAssertFalse(widget.contains("import PatchSDK"), widget)
+        XCTAssertFalse(widget.contains("dynamic var body"), "prepare's `dynamic` is removed with its block:\n\(widget)")
+        XCTAssertTrue(read(appURL).contains("dynamic var body"), "in-target files are left alone")
+    }
 }

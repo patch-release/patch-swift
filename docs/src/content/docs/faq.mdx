@@ -1,0 +1,264 @@
+---
+title: FAQ
+description: "Short answers about Patch: Apple's rules, what an OTA patch can and cannot change, rollback, the fingerprint, self-hosting, pricing, and supported iOS versions."
+sidebar:
+  order: 2.5
+lastUpdated: 2026-08-22T09:00:00-04:00
+---
+
+Patch ships over-the-air code updates to native Swift iOS apps: the `patchcli`
+CLI compiles the Swift you changed to WebAssembly, and the on-device PatchSDK
+runs that module in the WasmKit runtime inside your signed App Store binary.
+This page answers the questions people ask before adopting it. Failure modes
+and their fixes live in [Troubleshooting](/troubleshooting/); term definitions
+live in the [Glossary](/glossary/).
+
+## Does Apple allow OTA updates to native Swift apps?
+
+Yes — Apple's Developer Program License Agreement permits an application to
+download and run **interpreted code**, provided the downloaded code does not
+change the application's primary purpose, does not create a store or storefront
+for other code, and does not bypass the operating system's sandbox or
+code-signing protections. That is the clause React Native's CodePush, Expo's
+EAS Update and Flutter's Shorebird have all relied on, and it is the clause
+Patch relies on. Staying inside it — not shipping functionality you concealed
+during review — is your responsibility as the developer, not something any OTA
+tool can enforce. See [Apple compliance](/apple-compliance/).
+
+## Does Patch comply with App Review Guideline 2.5.2?
+
+Yes, on Patch's side of the line. Guideline 2.5.2 says apps "may not download,
+install, or execute code which introduces or changes features or functionality
+of the app, including other apps." Patch does not modify or replace the signed
+binary, does not load native machine code, and cannot call a framework your app
+did not link or acquire an entitlement your app did not declare. What it can
+do is change code you already shipped — so the guideline's boundary becomes a
+policy question about your change, not a technical one. Read the full argument
+on [Apple compliance](/apple-compliance/).
+
+## Is WebAssembly interpreted code?
+
+Yes, in the form Patch ships it. A patch is a WebAssembly module executed by
+[WasmKit](https://github.com/swiftwasm/WasmKit), a Swift WebAssembly runtime
+compiled into your app. The module is never native machine code, is never
+`dlopen`ed or loaded as an executable, and reaches the system only through host
+functions your binary already exposes. See
+[How it works](/how-it-works/).
+
+## What can a Patch update change?
+
+Swift logic, `async`/`await` concurrency, and SwiftUI view bodies — structure,
+state and interaction. An OTA patch can add, remove, reorder and restyle views,
+change text and images, rebind controls, change navigation and presentation,
+and rewrite business rules such as pricing or validation. Code that touches an
+OS API stays native and keeps running from the signed binary. The measured
+per-app numbers are on
+[What Patch can & can't update](/coverage/).
+
+## What can't a Patch update change?
+
+Anything that needs a native symbol, framework or entitlement that is not
+already compiled and signed into your shipped binary — a camera prompt in an
+app with no `NSCameraUsageDescription`, a `MKMapView` in an app that never
+linked MapKit. It also cannot rewrite the compiled body of native code that is
+not a patchable `View.body`: a `UIViewRepresentable`'s `makeUIView`, a custom
+`ButtonStyle`'s `makeBody`, a Core Data fetch predicate. Those existing views
+still render, move and reorder over the air — only their native internals are
+frozen. See [the binary-symbol wall](/coverage/).
+
+## Can Patch update SwiftUI views without wrapping them?
+
+Yes. `patchcli prepare` marks each `var body: some View` `dynamic` and
+generates `@_dynamicReplacement(for: body)` thunks — the same dynamic-replacement
+mechanism Xcode Previews uses. There is no `PatchView` wrapper and no change to
+how you write your views. The step runs automatically inside `patchcli build`,
+`push` and `release`, so views you add later are picked up with no extra
+command. See [Quick Start](/quickstart/).
+
+## Does prepare put generated code in my source files?
+
+Almost none. Thunks live in a gitignored `Patch/Generated/` folder. A view file
+gets `dynamic` on `var body`, and a view that uses `private` members also gets
+one short, sorted `PATCH-ACCESS` extension of forwarders, so you never have to
+widen `private` to `internal`. A `private struct … : View` keeps a compact thunk
+in its own file, because no other file can extend it. `patchcli unprepare`
+removes everything. See
+[where prepare puts generated code](/cli/#where-prepare-puts-generated-code).
+
+## Can Patch update UIKit?
+
+Yes, for declarative construction. Patch lowers the view-building code in a
+`UITableViewCell` / `UICollectionViewCell`'s `configure(with:)` and `setup()`,
+and in a programmatic view controller's `setupViews()` / `viewDidLoad`, into
+the same over-the-air path SwiftUI uses. Lowering is all-or-nothing per method:
+one statement the engine does not recognise keeps that whole method native. A
+subview it cannot reconstruct becomes a native slot rather than being dropped.
+See [What Patch can & can't update](/coverage/).
+
+## Which iOS versions are supported?
+
+iOS 16 and later. That is the deployment target PatchSDK requires. The
+deployment target is also part of the
+[native-shell fingerprint](/fingerprint/), so raising it in a future build
+means registering a new fingerprint before you release patches against it.
+
+## How is Patch different from CodePush?
+
+CodePush patches a React Native app's JavaScript bundle and images; Microsoft's
+README states that changes "which touch native code … cannot be distributed via
+CodePush." Patch patches native Swift compiled to WebAssembly, so there is no
+JavaScript bundle involved. The hosted App Center CodePush service was retired
+on 31 March 2025 and the client repository was archived on 20 May 2025. See
+[How Patch compares](/compare/).
+
+## How is Patch different from Expo EAS Update?
+
+EAS Update is, in Expo's words, "a cloud service that serves updates for
+projects using the expo-updates library" — React Native. It updates an app's
+"non-native pieces (such as JS, styling, and images)". Patch updates native
+Swift and SwiftUI in an app that has no JavaScript layer at all. If your app is
+Expo or React Native, EAS Update is the right tool; Patch cannot patch a JS
+bundle. See [How Patch compares](/compare/).
+
+## How is Patch different from Shorebird?
+
+Shorebird patches Dart in a Flutter app and states plainly that it "does not
+support changing native code (e.g. Java/Kotlin on Android or Objective-C/Swift
+on iOS)." Patch is the reverse: it patches the Swift, and cannot patch Dart. If
+your app is Flutter, use Shorebird. See [How Patch compares](/compare/).
+
+## How do I roll back a patch?
+
+Run `patchcli rollback --channel <channel>`. The previous module re-activates
+and propagates to devices on their next update check. A device already running
+the rolled-back release is recalled — the update check tells it to deactivate
+and fall back. Rollback is channel-scoped, so rolling back `staging` leaves
+`production` untouched. See
+[Staged rollouts & A/B](/rollouts/).
+
+## What happens if a patch fails to run?
+
+The app runs the signed binary. If a module is missing, corrupt, or fails to
+verify or activate, the SDK falls back down the chain — the previous good
+module, then the native code compiled into your App Store build. At build time
+the same principle applies in reverse: if generated WebAssembly does not
+compile, the offending code is demoted to native and the build retries, so a
+broken module is never produced. See [How it works](/how-it-works/).
+
+## What is the native-shell fingerprint, and why did my release say MISMATCH?
+
+The fingerprint is a SHA-256 hash of everything that fixes your signed binary's
+layout — native Swift sources, Info.plist, entitlements, linked frameworks,
+deployment target, compiler version. A patch is only served to devices running
+a build whose fingerprint matches the one it was built against. MISMATCH means
+your native shell changed since the last registered build, so the patch is not
+provably compatible. Run `patchcli fingerprint diff --explain` to see what
+moved. See [The compatibility fingerprint](/fingerprint/).
+
+## Does a patch survive an App Store update?
+
+No — and that is deliberate. A new App Store build has a different native
+shell, so it reports a different fingerprint and is not served patches built
+for the old one. It simply runs its own native code. After the new build is
+live, run `patchcli fingerprint register` and release patches against it.
+Devices still on the previous version keep receiving the patches built for
+them. See [The compatibility fingerprint](/fingerprint/).
+
+## How big is a patch?
+
+Small. Most modules use the embedded tier — tens of KB — because Foundation
+values are satisfied by host bridges into the native shell's real Foundation
+rather than being compiled into the module. When a module does need the
+full-Foundation base, that base ships once; every update after it is a
+compressed binary diff against the version already on the device, typically a
+few hundred bytes to tens of KB. See
+[the packaging tiers](/how-it-works/#compatibility-fingerprint--packaging-tiers).
+
+## Will running in WebAssembly slow my app down?
+
+No — the overhead is negligible for the code Patch ships. Patched code runs in
+WasmKit, and a view whose body is byte-identical to the one in your signed
+binary runs the native body with no WebAssembly at all: only views a patch
+actually changed execute the module. Performance-critical code — low-level
+rendering, AVFoundation, heavy compute — stays native by construction. See
+[How it works](/how-it-works/).
+
+## Do I need to annotate my Swift code?
+
+No. You write ordinary Swift with no attributes or macros. The engine
+classifies every function and decides what can ship over the air: pure logic
+and WASM-safe Foundation value types compile to WebAssembly, code that touches
+a bridged API runs over the air and calls back into the shell, mixed code is
+split, and anything else stays native. When it is unsure, it keeps the code
+native. See [How it works](/how-it-works/#whats-updatable).
+
+## Can I ship a patch to only some devices?
+
+Yes. Three independent controls stack: a **channel** decides which stream a
+build follows, **targeting** decides which devices are eligible by app version,
+OS version and cohort, and the **rollout percentage** decides what share of
+those eligible devices get the release. Bucketing is deterministic per device
+and release, so raising a percentage only ever adds devices. See
+[Release targeting](/targeting/) and
+[Staged rollouts & A/B](/rollouts/).
+
+## Can I self-host Patch?
+
+Partly. The SDK talks to any base URL, so you can serve modules from your own
+infrastructure and point `PatchConfiguration.apiBaseURL` at it. What is not
+open source is the hosted control plane — rollouts, targeting, analytics,
+audit, team accounts — so a self-hosted deployment means building or forgoing
+those. A static bucket-and-CDN publish command is planned and not yet shipped.
+See [Running it yourself](/self-hosting/).
+
+## Is the SDK open source?
+
+Yes. The SDK is MIT-licensed and the engine is Apache-2.0, both in
+[patch-release/patch-swift](https://github.com/patch-release/patch-swift) — the
+SDK at the repository root, the engine nested at `cli/`. The engine is
+Apache-2.0 rather than MIT for its express patent grant. The hosted control
+plane is a commercial service and its source is not published. See
+[Open source](/open-source/).
+
+## How much does Patch cost?
+
+Hobby is free and serves up to 100 distinct devices, with unlimited apps,
+unlimited 100% production releases, instant rollback and usage analytics.
+Startup is $59/month and adds team members, staged rollouts and A/B, channels
+beyond `production`, and a 10,000-device fleet. Enterprise adds the audit log
+and activity feed, support, and an unlimited fleet. See
+[Plans & billing](/billing/) and
+[pricing](https://patchrelease.com/pricing).
+
+## Will my app keep working if I stop paying?
+
+Yes. Your signed App Store binary is never modified, so the app runs exactly as
+Apple reviewed it, and the SDK keeps activating the module already cached on
+the device. Downgrading to Hobby re-applies the free-tier limits going forward
+— new invites and non-100% rollouts are gated again — but existing data is not
+deleted. Once a Hobby workspace is at its 100-device cap, a *new* device's
+update check returns "no update"; devices already in the counted set keep
+updating. See [Plans & billing](/billing/).
+
+## How do I install Patch?
+
+Two commands to set up the machine, one to set up the app:
+
+```bash
+brew install patch-release/tap/patchcli
+patchcli setup            # the swift.org toolchain + WebAssembly SDK
+cd MyApp && patchcli init # register the app, add the SDK, wire the startup code
+```
+
+`patchcli init` is safe to re-run and prints exact manual steps for anything it
+cannot do safely. See [Quick Start](/quickstart/), or hand the whole thing to
+an AI assistant with the prompts on [Set up with AI](/ai-setup/).
+
+## Related
+
+- [Glossary](/glossary/) — definitions of every term used here
+- [Apple compliance](/apple-compliance/) — DPLA §3.3.1(B) and Guideline 2.5.2
+- [How Patch compares](/compare/) — Patch, CodePush, EAS Update and Shorebird side by side
+- [Troubleshooting](/troubleshooting/) — failure modes and their fixes
+- [What is an OTA update for iOS?](https://patchrelease.com/blog/what-is-an-ota-update-for-ios)
+- [What Apple allows for OTA updates](https://patchrelease.com/blog/what-apple-allows-ota-updates)

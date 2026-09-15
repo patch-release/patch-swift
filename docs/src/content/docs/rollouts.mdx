@@ -1,16 +1,21 @@
 ---
 title: Staged rollouts & A/B (%)
-description: Percentage rollouts and A/B.
+description: Ship an OTA release to a percentage of devices first, watch the failure rate, then widen it in place — bucketing is deterministic, so a device in stays in.
 sidebar:
   order: 8
 sources:
   - cli/Sources/PatchCLI/Release.swift
   - cli/Sources/PatchCLI/Rollback.swift
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every release carries a rollout percentage. Ship to a slice of devices first, watch the failure rate, then widen to 100%. Because bucketing is deterministic, a device that's "in" the rollout stays in as you raise the percentage — adoption only ever grows, devices never flip-flop.
+A staged rollout is an OTA release served to a percentage of eligible devices
+rather than all of them. Every Patch release carries a rollout percentage: ship
+to a slice first, watch the failure rate, then widen to 100%. Because bucketing
+is deterministic, a device that is "in" the rollout stays in as you raise the
+percentage — adoption only ever grows, and devices never flip-flop.
 
 ## Release a staged rollout with `--rollout`
 
@@ -70,3 +75,11 @@ Rolled back:   2026.06.03.142210  (now inactive)
 Now active:    2026.05.30.090112  (rollout 100%)
 Takes effect on each device's next update check.
 ```
+
+## Related
+
+- [Release targeting](/targeting/) — which devices are eligible in the first place
+- [Deployment channels](/channels/) — which stream a build follows
+- [FAQ](/faq/) — rollback, fingerprint, and what happens if a patch fails
+- [Instant rollback for an iOS release](https://patchrelease.com/blog/instant-rollback-ios-release)
+- [The iOS hotfix playbook](https://patchrelease.com/blog/ios-hotfix-playbook)

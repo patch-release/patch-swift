@@ -1,16 +1,22 @@
 ---
 title: Quick Start
-description: Install the CLI and ship your first patch.
+description: Install patchcli, run patchcli init to register the app and wire the SDK, then ship your first OTA patch with patchcli release — about ten minutes end to end.
 sidebar:
   order: 1
 sources:
   - cli/Sources/PatchCLI/Init.swift
   - cli/Sources/PatchCLI/Setup.swift
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-From zero to a live OTA patch. Machine setup is two commands you run once. Per-app setup is **one command** — `patchcli init` registers the app, adds the SDK, and wires the startup code for you. Then you write normal Swift and release.
+Setting Patch up takes three commands: `brew install patch-release/tap/patchcli`
+installs the CLI, `patchcli setup` installs the Swift-to-WebAssembly toolchain,
+and `patchcli init` registers your app, adds the PatchSDK package, wires the
+startup code and makes your SwiftUI views patchable. After that you write
+ordinary Swift and ship it with `patchcli release`. The whole path below is
+about ten minutes.
 
 ## 1 · Install the CLI + toolchain (once per machine)
 
@@ -34,7 +40,7 @@ From your app's directory, run `patchcli init`. One command does the whole setup
 2. **Registers the app** — your browser opens `app.patchrelease.com/cli-connect`; sign in (or create a free account) and click **Register app**. The CLI receives the app key **and a publish token** automatically within seconds and writes `app_key`/`publish_token`/`app_id`/`workspace_id` into `.Patch.yml` — no copying credentials.
 3. **Adds the PatchSDK Swift package** to the Xcode project (exactly what Xcode's "Add Package Dependencies…" would write; a backup is kept at `project.pbxproj.patch-backup`), then resolves packages.
 4. **Proposes a diff** inserting the Patch startup code into your `@main` App struct — applied only after you confirm (`y/n`).
-5. **Makes your SwiftUI views patchable** — marks each view `body` patchable and generates the dynamic-replacement thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with **no `PatchView` wrapping and no changes to your views**. This runs **automatically on every `patchcli release` / `push` / `build`**, so views you add later are picked up with no extra step. (You can still run `patchcli prepare --check` in CI to verify, or `--no-prepare` to opt out.)
+5. **Makes your SwiftUI views patchable** — marks each view `body` patchable and generates the dynamic-replacement thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with **no `PatchView` wrapping and no changes to your views**. This runs **automatically on every `patchcli release` / `push` / `build`**, so views you add later are picked up with no extra step. (You can still run `patchcli prepare --check` in CI to verify, or `--no-prepare` to opt out.) `init` then **builds the prepared project** (`prepare --verify`): any view whose prepared code doesn't compile is kept native automatically, and `init` ends with a compatibility summary naming each native view and why. Skip the build with `--no-verify`. Generated code lives in `Patch/Generated/`, not in your view files — see [where prepare puts generated code](/cli/#where-prepare-puts-generated-code). `patchcli unprepare` removes all of it.
 
 ```bash title="~/MyApp — zsh"
 $ patchcli init
@@ -136,8 +142,16 @@ Running `patchcli release` from your machine is great for the first end-to-end t
 
 Everything `patchcli init` automates can be done by hand — and `init` prints these exact steps whenever it can't do something safely (or when you run `patchcli init --manual`):
 
-1. **Add the SDK package** — in Xcode, **File → Add Package Dependencies…** with `https://github.com/patch-release/patch-swift` (product `PatchSDK`, from `1.0.0`). See [SDK reference](/sdk/) for the `Package.swift` form.
+1. **Add the SDK package** — in Xcode, **File → Add Package Dependencies…** with `https://github.com/patch-release/patch-swift` (product `PatchSDK`, from `1.7.0`). See [SDK reference](/sdk/) for the `Package.swift` form.
 2. **Create the app** in the [dashboard](https://app.patchrelease.com) to get its `pak_…` app key.
 3. **Paste the key** — set `app_key` (and optionally `app_id`/`workspace_id`) in [`.Patch.yml`](/cli/#configuration-patchyml).
 4. **Get a publish token** — run `patchcli login`, or create one in the dashboard and set `publish_token` in `.Patch.yml`. Without it, `push`/`release` cannot authenticate.
 4. **Add the startup code** — the `import PatchSDK` + `Patch.configure` / `Patch.shared.start()` snippet from step 2 above, in your `@main` App struct's `init()`.
+
+## Related
+
+- [FAQ](/faq/) — Apple's rules, what can be patched, rollback, pricing
+- [Set up with AI](/ai-setup/) — hand the same flow to a coding assistant
+- [The compatibility fingerprint](/fingerprint/) — the one gate to understand first
+- [Troubleshooting](/troubleshooting/) — when a step does not go to plan
+- [Update an iOS app without App Store review](https://patchrelease.com/blog/update-ios-app-without-app-store-review)

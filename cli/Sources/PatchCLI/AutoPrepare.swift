@@ -50,7 +50,7 @@ enum AutoPrepare {
 
         // Count how many view bodies are NOT yet `dynamic` BEFORE we run, so we can
         // report "N new view(s) prepared" precisely (and stay silent when it's a no-op).
-        let newViews = countUnpreparedViews(root: root, excludes: excludes)
+        let newViews = countUnpreparedViews(root: root, excludes: excludes, target: target)
 
         do {
             // `quiet: true` → Prepare suppresses its wall of progress output; `assumeYes:
@@ -80,12 +80,14 @@ enum AutoPrepare {
     /// many NEW views prepare will add a thunk for). Best-effort + read-only; returns 0
     /// on any error so we simply stay quiet. Mirrors `prepare --check` / the doctor's
     /// `dynamicInsertions` signal.
-    static func countUnpreparedViews(root: URL, excludes: [String]) -> Int {
+    static func countUnpreparedViews(root: URL, excludes: [String], target: String? = nil) -> Int {
         let sources = Prepare.swiftSources(in: root, excludes: excludes)
         guard !sources.isEmpty else { return 0 }
+        // Views `.Patch.yml` keeps native never get `dynamic` — don't count them as unprepared.
         let result = ThunkGenerator().prepare(sources: sources.map {
             ThunkGenerator.SourceFile(url: $0.url, text: $0.text)
-        })
+        }, nativeViews: PatchConfig.nativeViewNames(near: root),
+           thunkableFiles: Prepare.targetCompileSet(root: root, target: target, sources: sources))
         return result.dynamicInsertions
     }
 }

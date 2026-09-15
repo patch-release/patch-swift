@@ -1,11 +1,19 @@
 ---
 title: Audit log
-description: The activity trail.
+description: Every action in a Patch workspace — pushes, rollout changes, rollbacks, role and plan changes — is recorded to an immutable trail, in the console or by API.
 sidebar:
   order: 15
+lastUpdated: 2026-08-22T09:00:00-04:00
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+
+The Patch audit log is an immutable, workspace-scoped record of who did what:
+sign-ins, app creation, fingerprint registration, module pushes, rollout
+changes, rollbacks, member invites and role changes, and plan changes. Each
+entry captures the actor, the workspace, the app when relevant, a structured
+before/after payload, and a timestamp. The console shows it on the **Activity**
+page; the same data is readable over the API.
 
 <Aside type="note" title="Enterprise plan">
 The audit log & activity feed is an **Enterprise (Team) plan** feature. The events below are recorded for every workspace, but the **Activity** page and the audit API are available on the Enterprise plan — see [Plans & billing](/billing/).
