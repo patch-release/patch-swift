@@ -36,12 +36,15 @@ final class ThunkGeneratorSameFileTests: XCTestCase {
         XCTAssertEqual(r.viewNames, ["Hello"])
         XCTAssertTrue(r.thunkFileContents.isEmpty, "no separate thunk file in same-file mode")
         let t = text(r, named: "Hello.swift")
-        // The original view + `dynamic` + the appended marked block, all in one file.
-        XCTAssertTrue(t.contains("dynamic var body: some View"), t)
+        // The original view (body routed) + the appended marked block, all in one file.
+        XCTAssertTrue(t.contains("var body: some View { __patchRoute { Text(\"hi\") } }"), t)
+        XCTAssertFalse(t.contains("dynamic"), t)
         XCTAssertTrue(t.contains(ThunkGenerator.sameFileBeginMarker), t)
         XCTAssertTrue(t.contains(ThunkGenerator.sameFileEndMarker), t)
         XCTAssertTrue(t.contains("extension Hello {"), t)
-        XCTAssertTrue(t.contains("@_dynamicReplacement(for: body)"), t)
+        XCTAssertTrue(t.contains("func __patchRoute<"), t)
+        // The route fallback block goes last (after the thunk block).
+        XCTAssertTrue(t.hasSuffix("\n" + ThunkGenerator.routeFallbackBlock), t)
         XCTAssertTrue(t.contains(#"typeName: "Hello""#), t)
         // The struct decl must come BEFORE the generated block (we append, never prepend).
         XCTAssertLessThan(t.range(of: "struct Hello")!.lowerBound,
@@ -76,9 +79,11 @@ final class ThunkGeneratorSameFileTests: XCTestCase {
         let once = text(r1, named: "Hello.swift")
         // Feed the GENERATED output (dynamic + block) back through prepare.
         let r2 = run([("Hello.swift", once)])
-        let twice = text(r2, named: "Hello.swift")
-        // No `dynamic` to add the second time (it's already there); the block is regenerated.
-        XCTAssertEqual(r2.dynamicInsertions, 0, "dynamic must not be inserted twice")
+        // A fixed point: the regenerated text equals the input, so nothing is reported modified.
+        XCTAssertTrue(r2.modifiedFiles.isEmpty, "a re-run must report no edits")
+        let twice = r2.modifiedFiles.first { $0.url.lastPathComponent == "Hello.swift" }?.text ?? once
+        // Nothing to route the second time (it's already routed); the blocks are regenerated.
+        XCTAssertEqual(r2.dynamicInsertions, 0, "a body must not be routed twice")
         // Exactly ONE begin + ONE end marker (no duplication).
         XCTAssertEqual(twice.components(separatedBy: ThunkGenerator.sameFileBeginMarker).count - 1, 1,
                        "exactly one generated block after re-run:\n\(twice)")
@@ -104,9 +109,9 @@ final class ThunkGeneratorSameFileTests: XCTestCase {
         let stripped = ThunkGenerator.stripSameFileBlock(from: withBlock)
         XCTAssertFalse(stripped.contains(ThunkGenerator.sameFileBeginMarker), stripped)
         XCTAssertFalse(stripped.contains("extension Hello {"), stripped)
-        // The developer's struct + the inserted `dynamic` survive the strip.
+        // The developer's struct + the body route survive the strip.
         XCTAssertTrue(stripped.contains("struct Hello: View"), stripped)
-        XCTAssertTrue(stripped.contains("dynamic var body"), stripped)
+        XCTAssertTrue(stripped.contains("__patchRoute {"), stripped)
         XCTAssertTrue(ThunkGenerator.parses(stripped), stripped)
     }
 

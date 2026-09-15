@@ -62,11 +62,11 @@ struct Push: ParsableCommand {
     var allowNativeDrift: Bool = false
 
     @Flag(name: .customLong("no-prepare"),
-          help: "Skip the automatic `prepare` step (don't add `dynamic`/thunks to new views before pushing).")
+          help: "Skip the automatic `prepare` step (don't route new views' bodies / generate their thunks before pushing).")
     var noPrepare: Bool = false
 
     func run() throws {
-        // Auto-prepare: make any NEW SwiftUI views patchable (insert `dynamic` + thunks)
+        // Auto-prepare: make any NEW SwiftUI views patchable (route their bodies + thunks)
         // so the next build picks them up — the developer never needs `patchcli prepare`.
         // Idempotent + quiet (silent when nothing's new); degrades gracefully on failure.
         // (When `release` runs, it preps once before building and ships via PushFlow

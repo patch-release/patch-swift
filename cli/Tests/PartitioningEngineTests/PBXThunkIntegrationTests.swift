@@ -327,6 +327,36 @@ final class PBXThunkIntegrationTests: XCTestCase {
             projectURL.appendingPathComponent("project.pbxproj")))
     }
 
+    /// Bug: prepare wrote `PatchUIKitThunks.generated.swift` (`import PatchUIKit`) but only PRINTED
+    /// that the product must be linked, so an Xcode app with a patchable UIKit cell stopped building
+    /// after prepare/init ("no such module 'PatchUIKit'"). The UIKit thunk now links its own product,
+    /// next to (not instead of) PatchSwiftUI, sharing the one patch-swift reference.
+    func testUIKitProductLinksAlongsidePatchSwiftUIAndIsIdempotent() throws {
+        let (projectURL, fileURL) = try makeProject(
+            Self.synchronized, fileRelativeToSourceRoot: "Sync/\(Self.thunkName)")
+        XCTAssertEqual(try ProjectIntegrator.wire(projectURL: projectURL, target: "Demo", fileURL: fileURL, fm: .default), .added)
+        let uikitFile = fileURL.deletingLastPathComponent().appendingPathComponent("PatchUIKitThunks.generated.swift")
+        try "// uikit thunk".write(to: uikitFile, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try ProjectIntegrator.wire(projectURL: projectURL, target: "Demo", fileURL: uikitFile, fm: .default,
+                                                  product: ProjectIntegrator.uikitProductName), .added,
+                       "PatchSwiftUI being linked must not count as PatchUIKit")
+        let text = try pbx(projectURL)
+        XCTAssertTrue(text.contains("productName = PatchUIKit;"), text)
+        XCTAssertTrue(text.contains("/* PatchUIKit in Frameworks */ = {isa = PBXBuildFile; productRef ="), text)
+        assertProductLinked(text)
+        XCTAssertEqual(text.components(separatedBy: "repositoryURL = \"https://github.com/patch-release/patch-swift\"").count - 1, 1)
+        XCTAssertFalse(text.contains("PatchUIKitThunks.generated.swift"), "synchronized folder: no explicit file reference")
+        XCTAssertEqual(try ProjectIntegrator.wire(projectURL: projectURL, target: "Demo", fileURL: uikitFile, fm: .default,
+                                                  product: ProjectIntegrator.uikitProductName), .alreadyPresent)
+        XCTAssertNil(XcodeProjectEditor.plutilLint(projectURL.appendingPathComponent("project.pbxproj")))
+
+        let (outcome, manifest) = try PBXThunkIntegration.addProduct(to: Self.manifest, targetName: "Demo", product: "PatchUIKit")
+        XCTAssertEqual(outcome, .added)
+        XCTAssertTrue(manifest.contains(".product(name: \"PatchUIKit\", package: \"patch-swift\")"), manifest)
+        XCTAssertFalse(manifest.contains(".product(name: \"PatchSwiftUI\""), manifest)
+        XCTAssertEqual(try PBXThunkIntegration.addProduct(to: manifest, targetName: "Demo", product: "PatchUIKit").0, .alreadyPresent)
+    }
+
     func testUnknownTargetThrows() throws {
         let (projectURL, fileURL) = try makeProject(
             Self.classic, fileRelativeToSourceRoot: Self.thunkName)

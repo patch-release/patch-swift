@@ -85,6 +85,15 @@ final class SwiftUIThunkCompileTests: XCTestCase {
     }
     """
 
+    /// Extra `swiftc` flags for every generated-code type-check in the compile suites, from
+    /// `PATCH_TYPECHECK_EXTRA_FLAGS` (whitespace-separated) — so CI can re-run the same nets under a
+    /// different language mode / isolation default (`-swift-version 6`, `-default-isolation MainActor`,
+    /// `-enable-upcoming-feature MemberImportVisibility`, `-warnings-as-errors`) without new fixtures.
+    static var envTypecheckFlags: [String] {
+        (ProcessInfo.processInfo.environment["PATCH_TYPECHECK_EXTRA_FLAGS"] ?? "")
+            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).map(String.init)
+    }
+
     // MARK: - Core: lower → generate thunk → COMPILE
 
     private struct CompileOutcome {
@@ -133,7 +142,7 @@ final class SwiftUIThunkCompileTests: XCTestCase {
             "-target", "arm64-apple-ios16.0-simulator",
             tmp.appendingPathComponent("Fixture.swift").path,
             tmp.appendingPathComponent("HostStub.swift").path
-        ]
+        ] + Self.envTypecheckFlags
         let log = Self.run("/usr/bin/swiftc", args, captureStderr: true) ?? ""
         return CompileOutcome(
             compiled: !log.contains("error:"),

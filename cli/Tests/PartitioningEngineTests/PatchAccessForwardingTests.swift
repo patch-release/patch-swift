@@ -5,7 +5,7 @@ import Foundation
 @testable import CodeGenerator
 
 /// PRIVATE-ACCESS FORWARDING — the default `patchcli prepare` placement for a view whose thunk reads
-/// `private` members. The view's file gets only `dynamic` + a compact, sorted PATCH-ACCESS forwarder
+/// `private` members. The view's file gets only the body route + a compact, sorted PATCH-ACCESS forwarder
 /// extension; the whole thunk lives in `Patch/Generated/`. These tests run the REAL hybrid prepare and
 /// then swiftc TYPE-CHECK the resulting MULTI-FILE output (each prepared source file as its own file +
 /// the generated file + the SDK host stub) against the iOS simulator SDK — separate files, so Swift's
@@ -54,7 +54,8 @@ final class PatchAccessForwardingTests: XCTestCase {
         paths.append(stub.path)
         let log = SwiftUIThunkCompileTests.run("/usr/bin/swiftc",
             ["-typecheck", "-sdk", sdk, "-target", "arm64-apple-ios17.0-simulator",
-             "-swift-version", swiftVersion, "-module-name", "FixtureApp"] + paths,
+             "-swift-version", swiftVersion, "-module-name", "FixtureApp"] + paths
+                + SwiftUIThunkCompileTests.envTypecheckFlags,
             captureStderr: true) ?? ""
         return (!log.contains("error:"), log)
     }
@@ -136,8 +137,8 @@ final class PatchAccessForwardingTests: XCTestCase {
             return XCTFail("MixView should be forwarded; placement=\(String(describing: r.placements["MixView"])) blockers=\(r.forwardingBlockers)\n\(dump(r, files))")
         }
         XCTAssertFalse(members.isEmpty, "\(dump(r, files))")
-        // In-file footprint: dynamic + the forwarder block only — no thunk block, no replacement.
-        XCTAssertTrue(view.contains("dynamic var body"), view)
+        // In-file footprint: the body route + the forwarder block (+ the route fallback) — no thunk block, no route method.
+        XCTAssertTrue(view.contains("__patchRoute {"), view)
         XCTAssertTrue(view.contains(PatchAccessForwarding.beginMarker), view)
         // MixView's thunk (replacement + helpers) is NOT in the file. (The only in-file thunk is the
         // compact one for `MixTrackRow`, a `private struct … : View` — no other file can extend it.)
@@ -329,7 +330,7 @@ final class PatchAccessForwardingTests: XCTestCase {
         XCTAssertTrue(m.contains(PatchAccessForwarding.beginMarker), m)
         XCTAssertEqual(m.components(separatedBy: ThunkGenerator.sameFileBeginMarker).count - 1, 1, m)
         XCTAssertEqual(m.components(separatedBy: PatchAccessForwarding.beginMarker).count - 1, 1, m)
-        XCTAssertEqual(m.components(separatedBy: "dynamic var body").count - 1, 2, m)
+        XCTAssertEqual(m.components(separatedBy: "{ __patchRoute {").count - 1, 2, m)
         // Same as preparing the pristine source.
         let fresh = prepare(files)
         XCTAssertEqual(m, text(fresh, "MixView.swift", original: files))
@@ -337,7 +338,7 @@ final class PatchAccessForwardingTests: XCTestCase {
         // Fixed point.
         let again = prepare([("MixView.swift", m)])
         XCTAssertEqual(text(again, "MixView.swift", original: [("MixView.swift", m)]), m)
-        // And stripping every Patch block + dynamic restores the pristine source byte-for-byte.
+        // And stripping every Patch block + the body route restores the pristine source byte-for-byte.
         let stripped = PatchAccessForwarding.removeDynamic(
             from: PatchAccessForwarding.stripAllGeneratedBlocks(from: m), onlyTypes: nil).text
         XCTAssertEqual(stripped, Self.mixView.hasSuffix("\n") ? Self.mixView : Self.mixView + "\n")

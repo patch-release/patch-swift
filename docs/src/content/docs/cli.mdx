@@ -60,12 +60,12 @@ The full command surface of the `patchcli` CLI. `build` and `compile` drive the 
 
 | Command | What it does | Key flags |
 | --- | --- | --- |
-| `patchcli init [path]` | One-command app setup: detect the Xcode project/target/bundle id, register the app via the browser (`app.patchrelease.com/cli-connect` — the CLI automatically receives the app key **and a publish token**, writing `app_key`/`publish_token`/`app_id`/`workspace_id` into `.Patch.yml`), add the `PatchSDK` package to the project (backup at `project.pbxproj.patch-backup`), and propose the startup-code diff, applied after you confirm. Skips anything already done — safe to re-run. Anything it can't do safely falls back to printed manual steps. | `--manual` · `--no-open` · `--yes` · `--skip-package` · `--skip-code` · `--no-verify` · `--force` · `--target <name>` · `--base-url <url>` |
+| `patchcli init [path]` | One-command app setup: detect the Xcode project/target/bundle id, register the app via the browser (`app.patchrelease.com/cli-connect` — the CLI automatically receives the app key **and a publish token**, writing `app_key`/`publish_token`/`app_id`/`workspace_id` into `.Patch.yml`), add the `PatchSDK` package to the project (backup at `project.pbxproj.patch-backup`), and propose the startup-code diff, applied after you confirm. Skips anything already done — safe to re-run. Anything it can't do safely falls back to printed manual steps. | `--manual` · `--no-open` · `--yes` · `--skip-package` · `--skip-code` · `--no-verify` · `--verify-release` · `--force` · `--target <name>` · `--base-url <url>` |
 | `patchcli login [path]` (new) | Get a **publish token** (`ppt_…`) for this project and save it to `.Patch.yml`. Opens your browser, you approve, the CLI receives the token — the same hand-off `init` uses, on its own so you can run it any time. Use it when you clone a repo that has `.Patch.yml` but no token, when a token is revoked, or to mint one for CI. The token is never printed. | `--base-url <url>` |
 | `patchcli doctor [path]` (new) | Read-only setup/health preflight — answers "is my app set up correctly for OTA patches?" Runs six checks (each ✓/⚠/✗ with a one-line fix hint), **never mutates the project**, and exits non-zero on any blocking ✗ so it's CI-usable. Run it after `init` or whenever a patch isn't behaving. See [the doctor section](#check-your-setup-patchcli-doctor). | `--json` · `--offline` · `--base-url <url>` |
-| `patchcli prepare [path]` | Make your SwiftUI views patchable: mark each `var body: some View` `dynamic` and generate the `@_dynamicReplacement(for: body)` thunks (the same mechanism Xcode Previews uses), so a future OTA patch re-renders your views with no `PatchView` wrapping. Idempotent. **You normally never run this yourself** — it runs automatically on every `build` / `push` / `release`. This standalone command stays for CI (`--check`) and debugging. Generated code goes to a gitignored `Patch/Generated/` folder; see [where prepare puts generated code](#where-prepare-puts-generated-code). | `--check` · `--thunks-only` · `--yes` · `--verify` · `--report <path>` |
-| `patchcli unprepare [path]` (new) | The inverse of `prepare`: removes the in-file `PATCH-ACCESS` / `PATCH-THUNKS` blocks and the `dynamic` keywords prepare inserted, deletes `Patch/Generated/`, and unwires the generated files + `PatchSwiftUI` from the Xcode project (classic or synchronized groups) or `Package.swift`. Shows the plan first; every edit is verified and restored on failure. `--remove-sdk` also removes the `PatchSDK` package and the injected `Patch.configure` startup code. | `--dry-run` · `--yes` · `--remove-sdk` · `--keep-dynamic` |
-| `patchcli build [path]` | Parse → classify → split → compile to a real `.wasm` module at `.Patch/build/module.wasm`. Does not upload. Auto-runs `prepare` first (insert `dynamic` + thunks for any new views) unless `--no-prepare`. | `--verbose` · `--dry-run` · `--report <path>` · `--optimization size\|speed` · `--output <path>` · `--no-prepare` |
+| `patchcli prepare [path]` | Make your SwiftUI views patchable: route each `var body: some View` through Patch (`var body: some View { __patchRoute {` … `} }`, on the body's own lines) and generate the per-view route thunks, so a future OTA patch re-renders your views with no `PatchView` wrapping. Works in Debug and optimized Release/archive builds. Idempotent. **You normally never run this yourself** — it runs automatically on every `build` / `push` / `release`. This standalone command stays for CI (`--check`) and debugging. Generated code goes to a gitignored `Patch/Generated/` folder; see [where prepare puts generated code](#where-prepare-puts-generated-code). | `--check` · `--thunks-only` · `--yes` · `--verify` · `--verify-config all\|debug\|release` · `--report <path>` |
+| `patchcli unprepare [path]` (new) | The inverse of `prepare`: removes the in-file `PATCH-ROUTE` / `PATCH-ACCESS` / `PATCH-THUNKS` blocks and the body routes prepare inserted (and an older CLI's `dynamic` keywords), deletes `Patch/Generated/`, and unwires the generated files + `PatchSwiftUI` from the Xcode project (classic or synchronized groups) or `Package.swift`. Shows the plan first; every edit is verified and restored on failure. `--remove-sdk` also removes the `PatchSDK` package and the injected `Patch.configure` startup code. | `--dry-run` · `--yes` · `--remove-sdk` · `--keep-dynamic` |
+| `patchcli build [path]` | Parse → classify → split → compile to a real `.wasm` module at `.Patch/build/module.wasm`. Does not upload. Auto-runs `prepare` first (route new views' bodies + generate their thunks) unless `--no-prepare`. | `--verbose` · `--dry-run` · `--report <path>` · `--optimization size\|speed` · `--output <path>` · `--no-prepare` |
 | `patchcli push` | Upload an **already-built** `.wasm` to the backend, gated on a fingerprint-compatibility check. Does **not** build — run `build` first (or use `release`). | `--channel <name>` · `--rollout 0-100` · `--message <text>` · `--version <ver>` · `--module <path>` · `--mandatory` · `--min-app-version <ver>` · `--max-app-version <ver>` · `--min-os-version <ver>` · `--target-cohort <name>` · `--allow-native-drift` · `--base-url <url>` · `--dry-run` · `--no-prepare` |
 | `patchcli release` (new) | Build then push in one command — the everyday deploy. Runs the same build pipeline as `build`, then the same fingerprint-gated upload as `push`; accepts both flag sets (no `--module`, since it builds the module itself). Auto-runs `prepare` first so views you add are always patchable (skip with `--no-prepare`). | `--channel <name>` · `--rollout 0-100` · `--message <text>` · `--version <ver>` · `--mandatory` · `--min-app-version <ver>` · `--max-app-version <ver>` · `--min-os-version <ver>` · `--target-cohort <name>` · `--allow-native-drift` · `--optimization size\|speed` · `--output <path>` · `--base-url <url>` · `--dry-run` · `--no-prepare` |
 | `patchcli status` | Show the current deployment: version, rollout %, adoption, failure rate. | `--channel <name>` · `--base-url <url>` · `--json` |
@@ -78,7 +78,22 @@ The full command surface of the `patchcli` CLI. `build` and `compile` drive the 
 
 ## Where prepare puts generated code
 
-`prepare` keeps generated code out of the files you edit. Each view's `@_dynamicReplacement` thunk and its native slot, token and action helpers go into `Patch/Generated/PatchThunks.generated.swift`, a gitignored folder next to your views. Your view file gets one word: `dynamic` on `var body`. Swift requires that keyword on the declaration itself, so it can't be added from another file.
+`prepare` keeps generated code out of the files you edit. Each view's route thunk and its native slot, token and action helpers go into `Patch/Generated/PatchThunks.generated.swift`, a gitignored folder next to your views. Your view file gets two small, same-line edits and one short block:
+
+```swift
+var body: some View { __patchRoute {     // was: var body: some View {
+    VStack { … }
+} }                                      // was: }
+
+// PATCH-ROUTE-BEGIN (generated by `patchcli prepare` — DO NOT EDIT)
+// Renders this file's `__patchRoute { … }` view bodies natively when Patch/Generated/ has no route …
+fileprivate extension View {
+    @inline(__always) func __patchRoute<__PatchNativeBody: View>(@ViewBuilder _ __nativeBody: () -> __PatchNativeBody) -> __PatchNativeBody { __nativeBody() }
+}
+// PATCH-ROUTE-END
+```
+
+Line numbers in your file don't move. The `PATCH-ROUTE` block is a native fallback that needs only SwiftUI, so the file still builds on a fresh clone without `Patch/Generated/`. Projects prepared by an older CLI (which inserted `dynamic` on `var body`) migrate on the next `prepare` with no fingerprint change: that `dynamic` + `@_dynamicReplacement` form miscompiled or crashed in optimized Release builds.
 
 **Views that use `private` members.** Swift's `private` and `fileprivate` only reach within one file, so a thunk in `Patch/Generated/` can't read a view's `private var header: some View`, `@State private var isOn`, `private func row(_:)` or `private struct Row: View` directly. You don't have to change your access control. `prepare` adds one compact, marked extension at the end of that view's file. It holds one internal forwarder per private member the thunk uses, sorted by name:
 
@@ -93,7 +108,7 @@ extension MixView {
 // PATCH-ACCESS-END
 ```
 
-The block only changes when the *set* of private members the thunk uses changes, so editing a view body leaves it untouched. The native-shell [fingerprint](/fingerprint/) ignores it, just like it ignores `dynamic`.
+The block only changes when the *set* of private members the thunk uses changes, so editing a view body leaves it untouched. The native-shell [fingerprint](/fingerprint/) ignores it, just like it ignores the body route.
 
 Two cases still keep a compact thunk block (`PATCH-THUNKS`) in the file, and `prepare` names each view and the reason:
 
@@ -102,9 +117,9 @@ Two cases still keep a compact thunk block (`PATCH-THUNKS`) in the file, and `pr
 
 Set `PATCH_ACCESS_FORWARDING=0` to go back to the older layout, where helpers stay in the file. The fingerprint is identical either way, and projects prepared by older CLIs migrate automatically on the next `prepare` with no fingerprint change.
 
-**Excluded files.** A file listed under `exclude:` in `.Patch.yml` gets no thunks. The next `prepare` (or `build`/`release`) also removes any Patch blocks and Patch-inserted `dynamic` an earlier run left in it, so you never have to restore it by hand.
+**Excluded files.** A file listed under `exclude:` in `.Patch.yml` gets no thunks. The next `prepare` (or `build`/`release`) also removes any Patch blocks and body routes an earlier run left in it, so you never have to restore it by hand.
 
-**Removing it all.** `patchcli unprepare` shows what it will remove, then deletes the blocks, the `dynamic` keywords prepare recorded inserting (a `dynamic` you wrote yourself stays), `Patch/Generated/`, and the project wiring. On a standard project the result is byte-identical to the project before `prepare`. Add `--remove-sdk` to also remove the SDK package and the `Patch.configure` startup code. Build, push and release auto-prepare again unless you pass `--no-prepare`. If you later prepare again, re-register the fingerprint.
+**Removing it all.** `patchcli unprepare` shows what it will remove, then deletes the blocks, the body routes (and any `dynamic` keywords an older CLI recorded inserting — a `dynamic` you wrote yourself stays), `Patch/Generated/`, and the project wiring. On a standard project the result is byte-identical to the project before `prepare`. Add `--remove-sdk` to also remove the SDK package and the `Patch.configure` startup code. Build, push and release auto-prepare again unless you pass `--no-prepare`. If you later prepare again, re-register the fingerprint.
 
 ## Build coverage output
 
@@ -167,7 +182,7 @@ $ patchcli rollback --to 2026.05.30.090112
 2. **Publish token kept out of version control** — `.Patch.yml` holds a `publish_token`, so this fails if git *tracks* it (your credential is committed) and warns if it simply isn't ignored. Read-only: it reports, it doesn't edit your `.gitignore`.
 3. **PatchSDK package added + linked** — referenced in your `.xcodeproj` *or* `Package.swift` **and** linked into your app target.
 4. **`Patch.configure(...)` + `Patch.shared.start()` in the `@main` App** — plus `import PatchSDK` (a `configure` with no `start()` never fetches updates).
-5. **Views are patch-ready** — every SwiftUI view `body` is `dynamic` and the dynamic-replacement thunks exist. If some aren't yet, this is just a ⚠ (not a blocker): `build` / `push` / `release` auto-run `prepare`, so it self-heals on your next release.
+5. **Views are patch-ready** — every SwiftUI view `body` is routed and the route thunks exist. If some aren't yet, this is just a ⚠ (not a blocker): `build` / `push` / `release` auto-run `prepare`, so it self-heals on your next release.
 6. **Native-shell fingerprint registered + current** — the registered fingerprint matches the current shell (needs network; degrades to a ⚠ with `--offline`).
 
 ```bash title="~/MyApp — zsh"
@@ -181,8 +196,8 @@ Patch doctor
     MyApp.xcodeproj references patch-swift and links the PatchSDK product.
 ✓ Patch.configure(...) + start() in the @main App entry
     Patch.configure(...) + Patch.shared.start() + import PatchSDK found (MyAppApp.swift).
-✓ Views are patch-ready (bodies dynamic + thunks)
-    12 SwiftUI view(s) are `dynamic` + have generated thunks.
+✓ Views are patch-ready (view bodies routed + thunks)
+    12 SwiftUI view(s) are routed + have generated thunks.
 ✓ Native-shell fingerprint registered + current
     Registered fingerprint matches the current native shell (3f2b9c1e7a4d…).
 

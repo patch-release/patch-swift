@@ -72,6 +72,7 @@ final class ThunkHybridMultiFileCompileTests: XCTestCase {
             paths.append(url.path)
         }
         let args = ["-typecheck", "-sdk", sdkPath, "-target", "arm64-apple-ios18.0-simulator"] + paths
+            + SwiftUIThunkCompileTests.envTypecheckFlags
         let log = SwiftUIThunkCompileTests.run("/usr/bin/swiftc", args, captureStderr: true) ?? ""
         return Outcome(compiled: !log.contains("error:"), log: log, result: result, files: written)
     }

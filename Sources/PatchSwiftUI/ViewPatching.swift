@@ -3,19 +3,23 @@
 // ViewPatching.swift — the OUT-OF-THE-BOX SwiftUI body patching runtime.
 // ======================================================================
 // This is the SDK half of automatic view patching. The CLI (`patchcli prepare`,
-// run by `init` and as a build phase) makes every eligible `View.body` getter
-// `dynamic` and generates one replacement thunk per view:
+// run by `init` and auto-run by build/push/release) ROUTES every eligible `View.body`
+// getter through a generated per-view method (`var body: some View { __patchRoute { … } }`):
 //
 //   extension SettingsScreen {
-//       @_dynamicReplacement(for: body)
-//       @ViewBuilder @MainActor var __patch_body: some View {
+//       @MainActor @ViewBuilder
+//       func __patchRoute<N: View>(@ViewBuilder _ native: () -> N) -> some View {
 //           if let __p = Patch.shared.thunkBody(typeName: "SettingsScreen", instance: self) {
 //               __p
 //           } else {
-//               body   // ← inside a replacement this calls the ORIGINAL body
+//               native()   // ← the developer's original body content
 //           }
 //       }
 //   }
+//
+// (Older CLIs emitted an opaque-result `@_dynamicReplacement(for: body)` instead; that form
+// miscompiles, fails to link or crashes at launch in optimized Release builds, so it is gone.
+// The SDK entry point is the same for both.)
 //
 // At every body evaluation the thunk asks `thunkBody(typeName:instance:)` for a
 // patched replacement. The decision pipeline:

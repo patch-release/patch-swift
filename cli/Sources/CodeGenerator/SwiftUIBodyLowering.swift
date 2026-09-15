@@ -1087,7 +1087,7 @@ public struct BodyLowering {
     /// `.opaque` native-fallback slots, so a body never fails to lower).
     ///
     /// `sameFileThunk` controls the ACCESS-CONTROL contract with the generated thunk.
-    /// `patchcli prepare` now emits each view's `@_dynamicReplacement(for: body)` thunk
+    /// `patchcli prepare` now emits each view's body-route thunk
     /// (and its `__patchSlots()`/`__patchTokens()` helpers) as an extension in the
     /// SAME FILE as the view (see `ThunkGenerator`), so the thunk can reach the view's
     /// own `private`/`fileprivate` members. With same-file thunks (the default), the
@@ -1238,7 +1238,7 @@ public struct BodyLowering {
             let report = LoweringReport(viewName: view.name, elements: collector.elements)
             var emitter = Emitter()
             // ACCESS CONTROL × THUNK PLACEMENT. With a SAME-FILE thunk (the default —
-            // `patchcli prepare` appends the `@_dynamicReplacement(for: body)` extension
+            // `patchcli prepare` appends the body-route extension
             // and its `__patchSlots()`/`__patchTokens()` to the view's own file), the
             // thunk CAN reference the view's `private`/`fileprivate` members, so NONE are
             // inaccessible — a leaf/token reading a private member is fully lowerable. With
@@ -4049,7 +4049,7 @@ public struct BodyLowering {
             guard let s = stmt.item.as(StructDeclSyntax.self) else { continue }
             // A generic view carrying a `where` clause (`struct Row<T>: View where T: …`) is
             // EXCLUDED from lowering — `ThunkGenerator.discover` likewise excludes it from thunk
-            // generation (no `dynamic` body, no `@_dynamicReplacement`). Were the engine to lower +
+            // generation (no body route, no route method). Were the engine to lower +
             // ship it thunkSafe while no thunk exists, the fingerprint would strip its body yet it
             // would render NATIVE (false-stable + coverage-loss: bug R2-#62). Match the predicate.
             if s.genericParameterClause != nil, s.genericWhereClause != nil { continue }
@@ -4071,7 +4071,10 @@ public struct BodyLowering {
         }
     }
 
-    /// The body's CodeBlock — the var body computed getter, or func body() body.
+    /// The body's CodeBlock — the var body computed getter, or func body() body. A body
+    /// `patchcli prepare` routed (`var body: some View { __patchRoute { … } }`) yields the
+    /// statements INSIDE the route closure, so a prepared body lowers — guest tree, slot ids,
+    /// tokens, `bodyHash` — exactly like the developer's original.
     private func bodyExpression(of s: StructDeclSyntax) -> CodeBlockItemListSyntax? {
         for member in s.memberBlock.members {
             // var body: some View { … }
@@ -4080,10 +4083,10 @@ public struct BodyLowering {
                     guard binding.pattern.trimmedDescription == "body" else { continue }
                     if let accessors = binding.accessorBlock {
                         switch accessors.accessors {
-                        case .getter(let items): return items
+                        case .getter(let items): return ThunkGenerator.unroutedStatements(items)
                         case .accessors(let list):
                             for acc in list where acc.accessorSpecifier.text == "get" {
-                                if let b = acc.body { return b.statements }
+                                if let b = acc.body { return ThunkGenerator.unroutedStatements(b.statements) }
                             }
                         }
                     }

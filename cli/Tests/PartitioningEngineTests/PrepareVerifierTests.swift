@@ -3,6 +3,7 @@
 import XCTest
 import Foundation
 @testable import Compiler
+@testable import PatchCLI
 import CodeGenerator
 
 /// `patchcli prepare --verify`: diagnostic parsing, error → prepared-view attribution, the
@@ -208,6 +209,257 @@ final class PrepareVerifierTests: XCTestCase {
         XCTAssertEqual(PrepareVerifier.detectBuild(root: root, scheme: "ShopApp")?.label, "xcodebuild -scheme ShopApp")
     }
 
+    // MARK: - Configurations (Debug + the archive configuration)
+
+    func testArchiveConfigurationComesFromTheSchemeArchiveAction() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("verify-archive-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let shared = root.appendingPathComponent("Shop.xcodeproj/xcshareddata/xcschemes")
+        try fm.createDirectory(at: shared, withIntermediateDirectories: true)
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: "Shop"), "Release",
+                       "no scheme file → Xcode's default archive configuration")
+
+        func scheme(_ archive: String) -> String {
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Scheme LastUpgradeVersion = "2600" version = "1.7">
+               <LaunchAction buildConfiguration = "Debug"></LaunchAction>
+               <ArchiveAction
+                  buildConfiguration = "\(archive)"
+                  revealArchiveInOrganizer = "YES">
+               </ArchiveAction>
+            </Scheme>
+            """
+        }
+        try scheme("AppStore").write(to: shared.appendingPathComponent("Shop.xcscheme"), atomically: true, encoding: .utf8)
+        try scheme("Beta").write(to: shared.appendingPathComponent("ShopBeta.xcscheme"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: "Shop"), "AppStore")
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: "ShopBeta"), "Beta")
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: nil), "AppStore",
+                       "no scheme named → the scheme named like the project")
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: "Missing"), "AppStore")
+
+        // A per-user scheme counts too.
+        let user = root.appendingPathComponent("Shop.xcodeproj/xcuserdata/dev.xcuserdatad/xcschemes")
+        try fm.createDirectory(at: user, withIntermediateDirectories: true)
+        try scheme("Staging").write(to: user.appendingPathComponent("Internal.xcscheme"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(root: root, scheme: "Internal"), "Staging")
+
+        XCTAssertNil(PrepareVerifier.archiveConfiguration(schemeXML: "<Scheme><LaunchAction buildConfiguration = \"Debug\"/></Scheme>"))
+        XCTAssertEqual(PrepareVerifier.archiveConfiguration(schemeXML: "<ArchiveAction buildConfiguration=\"Release\">"), "Release")
+    }
+
+    func testVerificationBuildsFollowThePlan() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("verify-plan-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("Shop.xcodeproj"), withIntermediateDirectories: true)
+
+        let all = PrepareVerifier.verificationBuilds(root: root, scheme: "Shop", plan: .all)
+        XCTAssertEqual(all.count, 2)
+        XCTAssertFalse(all[0].arguments.contains("-configuration"), "Debug first: the scheme's default build")
+        XCTAssertEqual(Array(all[1].arguments.drop { $0 != "-configuration" }.prefix(2)), ["-configuration", "Release"])
+        XCTAssertEqual(all[1].label, "xcodebuild -scheme Shop -configuration Release")
+        XCTAssertEqual(PrepareVerifier.verificationBuilds(root: root, scheme: "Shop", plan: .debug).count, 1)
+        let release = PrepareVerifier.verificationBuilds(root: root, scheme: "Shop", plan: .release)
+        XCTAssertEqual(release.map(\.label), ["xcodebuild -scheme Shop -configuration Release"])
+
+        // A scheme that archives with Debug is built once.
+        let shared = root.appendingPathComponent("Shop.xcodeproj/xcshareddata/xcschemes")
+        try fm.createDirectory(at: shared, withIntermediateDirectories: true)
+        try "<Scheme><ArchiveAction buildConfiguration = \"Debug\"></ArchiveAction></Scheme>"
+            .write(to: shared.appendingPathComponent("Shop.xcscheme"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(PrepareVerifier.verificationBuilds(root: root, scheme: "Shop", plan: .all).count, 1)
+
+        // SwiftPM: `swift build`, then `swift build -c release`.
+        let pkg = fm.temporaryDirectory.appendingPathComponent("verify-plan-pkg-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: pkg) }
+        try fm.createDirectory(at: pkg, withIntermediateDirectories: true)
+        try "// swift-tools-version:5.9".write(to: pkg.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        let spm = PrepareVerifier.verificationBuilds(root: pkg, scheme: nil, plan: .all)
+        XCTAssertEqual(spm.map(\.label), ["swift build", "swift build -c release"])
+        XCTAssertEqual(Array(spm[1].arguments.suffix(2)), ["-c", "release"])
+
+        XCTAssertEqual(PrepareVerifier.ConfigurationPlan(argument: "Release"), .release)
+        XCTAssertEqual(PrepareVerifier.ConfigurationPlan(argument: "archive"), .release)
+        XCTAssertEqual(PrepareVerifier.ConfigurationPlan(argument: "both"), .all)
+        XCTAssertNil(PrepareVerifier.ConfigurationPlan(argument: "profile"))
+    }
+
+    // MARK: - Compiler crashes + systemic failures
+
+    static let crashLog = """
+    SwiftCompile normal arm64 Compiling\\ PatchThunks.generated.swift (in target 'Shop' from project 'Shop')
+    Stack dump:
+    0.\tProgram arguments: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend -frontend -c -O -whole-module-optimization
+    1.\tApple Swift version 6.2 (swiftlang-6.2.0.19.9 clang-1700.3.19.1)
+    2.\tCompiling with effective version 5.10
+    3.\tWhile evaluating request IRGenRequest(IR Generation for module 'Shop')
+    4.\tWhile emitting IR SIL function "@$s4Shop11ProfileCardV13__patchedBodyQrvg".
+     for getter for __patchedBody (at /p/App/Patch/Generated/PatchThunks.generated.swift:12:9)
+    Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+    0  swift-frontend           0x0000000108d1c2b8 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 56
+    1  swift-frontend           0x0000000108d1a3d8 llvm::sys::RunSignalHandlers() + 112
+    error: compile command failed due to signal 6 (use -v to see invocation)
+    ** BUILD FAILED **
+    """
+
+    func testParseCompilerCrashesAttributesTheInnermostFrame() {
+        let crashes = PrepareVerifier.parseCompilerCrashes(Self.crashLog)
+        XCTAssertEqual(crashes, [D(file: "/p/App/Patch/Generated/PatchThunks.generated.swift", line: 12, column: 9,
+                                   message: PrepareVerifier.compilerCrashMessage)])
+        XCTAssertTrue(PrepareVerifier.parseDiagnostics(Self.crashLog).isEmpty, "a crash has no file:line error")
+        XCTAssertTrue(PrepareVerifier.parseCompilerCrashes("error: compile command failed due to signal 6").isEmpty,
+                      "no stack dump → nothing to attribute")
+        let files = ["/p/App/Patch/Generated/PatchThunks.generated.swift": Self.generatedFile]
+        let a = PrepareVerifier.attribute(crashes, preparedViews: ["ProfileCard"], readFile: { files[$0] })
+        XCTAssertEqual(a.byView["ProfileCard"]?.count, 1, "the crash is attributed to the view whose thunk it is in")
+    }
+
+    /// A generated file with one replacement per view (every view shares the thunk shape).
+    static func generated(_ views: [String]) -> String {
+        "// PatchThunks.generated.swift — GENERATED BY `patchcli prepare`. DO NOT EDIT.\nimport SwiftUI\n"
+            + views.map { "extension \($0) {\n    @_dynamicReplacement(for: body)\n    var __patchedBody: some View { body }\n}\n" }
+                .joined()
+    }
+
+    func testLoopStopsWithoutDemotingWhenMostViewsFailInGeneratedCode() throws {
+        let views = ["A", "B", "C", "D"]
+        let gen = "/p/G/PatchThunks.generated.swift"
+        let files = [gen: Self.generated(views)]
+        var applyCalls = 0
+        // Line 4 / 8 / 12 / 16 are the four `@_dynamicReplacement` getters.
+        let log = views.indices.map { "\(gen):\(4 * $0 + 5):5: error: cannot find 'ThemeColor' in scope" }
+        let report = try PrepareVerifier.run(
+            preparedViews: Set(views), keptNative: [],
+            apply: { _ in applyCalls += 1; return Set(views) },
+            build: { self.outcome(Array(log.prefix(3))) },
+            readFile: { files[$0] })
+        let systemic = try XCTUnwrap(report.systemic, "3 of 4 views failing in generated code is a Patch bug")
+        XCTAssertEqual(systemic.failingViews, ["A", "B", "C"])
+        XCTAssertEqual(systemic.preparedCount, 4)
+        XCTAssertFalse(systemic.compilerCrash)
+        XCTAssertTrue(report.demoted.isEmpty, "nothing is kept native for a systemic failure")
+        XCTAssertEqual(applyCalls, 0)
+        XCTAssertEqual(report.builds, 1)
+        XCTAssertNil(report.inconclusive)
+    }
+
+    func testAMinorityOfGeneratedFailuresIsStillDemotedPerView() throws {
+        let views = ["A", "B", "C", "D"]
+        let gen = "/p/G/PatchThunks.generated.swift"
+        let files = [gen: Self.generated(views)]
+        var native: Set<String> = []
+        let report = try PrepareVerifier.run(
+            preparedViews: Set(views), keptNative: [],
+            apply: { n in native = n; return Set(views).subtracting(n) },
+            build: {
+                // Two of four (not MORE than half) → per-view demotion, as before.
+                let errs = ["A", "B"].filter { !native.contains($0) }
+                    .map { v in "\(gen):\(4 * views.firstIndex(of: v)! + 5):5: error: ambiguous use of 'init'" }
+                return errs.isEmpty ? self.outcome([], exit: 0) : self.outcome(errs)
+            },
+            readFile: { files[$0] })
+        XCTAssertNil(report.systemic)
+        XCTAssertTrue(report.clean)
+        XCTAssertEqual(Set(report.demoted.map(\.view)), ["A", "B"])
+    }
+
+    /// A whole-module (Release) build stops at its FIRST crash, so a compiler crash on the thunk
+    /// pattern itself surfaces one view per build. The second crashing view proves it is systemic:
+    /// stop, and give the first view its thunk back.
+    func testRepeatedCompilerCrashAcrossRoundsIsSystemicAndUndoesTheCrashDemotion() throws {
+        let views = ["A", "B", "C", "D", "E", "F"]
+        let gen = "/p/G/PatchThunks.generated.swift"
+        let files = [gen: Self.generated(views)]
+        var native: Set<String> = []
+        var applied: [Set<String>] = []
+        func crash(at view: String) -> String {
+            Self.crashLog.replacingOccurrences(of: "/p/App/Patch/Generated/PatchThunks.generated.swift:12:9",
+                                               with: "\(gen):\(4 * views.firstIndex(of: view)! + 5):9")
+        }
+        let report = try PrepareVerifier.run(
+            preparedViews: Set(views), keptNative: ["Legacy"],
+            apply: { n in applied.append(n); native = n; return Set(views).subtracting(n) },
+            build: {
+                let next = views.first { !native.contains($0) }!
+                return PrepareVerifier.BuildOutcome(log: crash(at: next), exitCode: 65, timedOut: false, seconds: 1)
+            },
+            readFile: { files[$0] })
+        let systemic = try XCTUnwrap(report.systemic)
+        XCTAssertTrue(systemic.compilerCrash)
+        XCTAssertEqual(systemic.failingViews, ["A", "B"])
+        XCTAssertEqual(report.builds, 2)
+        XCTAssertTrue(report.demoted.isEmpty, "the crash demotion from round 1 is undone")
+        XCTAssertEqual(applied, [["Legacy", "A"], ["Legacy"]], "config-kept views stay native throughout")
+    }
+
+    /// The real-app sequence (Xcode 16.1, `-configuration Release`, the prepared HelloXcode26 fixture):
+    /// the whole-module compile crashed at `PatchThunks.generated.swift:56:9` (ContentView's getter);
+    /// ContentView was demoted, the generated file regenerated, and the NEXT view's getter now sat at
+    /// 56:9 and crashed identically. The old loop took the identical file:line:message as proof the
+    /// error was the project's own and re-promoted ContentView, ending "inconclusive". A diagnostic in
+    /// regenerated code is never evidence of a pre-existing error — this is a systemic Patch bug.
+    func testSameLocationCrashAfterRegenerationIsSystemicNotPreExisting() throws {
+        let views = ["ContentView", "SettingsPanel", "TaskRow"]
+        let gen = "/p/G/PatchThunks.generated.swift"
+        var files = [gen: Self.generated(views)]
+        var native: Set<String> = []
+        let log = Self.crashLog.replacingOccurrences(of: "/p/App/Patch/Generated/PatchThunks.generated.swift:12:9",
+                                                     with: "\(gen):5:9")
+        let report = try PrepareVerifier.run(
+            preparedViews: Set(views), keptNative: [],
+            apply: { n in
+                native = n
+                let left = views.filter { !n.contains($0) }
+                files[gen] = Self.generated(left)
+                return Set(left)
+            },
+            build: { PrepareVerifier.BuildOutcome(log: log, exitCode: 65, timedOut: false, seconds: 1) },
+            readFile: { files[$0] })
+        let systemic = try XCTUnwrap(report.systemic, "inconclusive: \(report.inconclusive ?? "-"), pre-existing: \(report.preExisting)")
+        XCTAssertTrue(systemic.compilerCrash)
+        XCTAssertEqual(systemic.failingViews, ["ContentView", "SettingsPanel"])
+        XCTAssertTrue(report.demoted.isEmpty)
+        XCTAssertTrue(report.preExisting.isEmpty, "a generated-code crash is never the project's own error")
+        XCTAssertTrue(native.isEmpty, "the crash demotion is undone")
+        XCTAssertEqual(files[gen], Self.generated(views))
+    }
+
+    func testASingleCompilerCrashInOneViewIsDemotedLikeAnError() throws {
+        let views = ["A", "B", "C", "D"]
+        let gen = "/p/G/PatchThunks.generated.swift"
+        let files = [gen: Self.generated(views)]
+        var native: Set<String> = []
+        let log = Self.crashLog.replacingOccurrences(of: "/p/App/Patch/Generated/PatchThunks.generated.swift:12:9",
+                                                     with: "\(gen):9:9")
+        let report = try PrepareVerifier.run(
+            preparedViews: Set(views), keptNative: [],
+            apply: { n in native = n; return Set(views).subtracting(n) },
+            build: {
+                native.contains("B")
+                    ? self.outcome([], exit: 0)
+                    : PrepareVerifier.BuildOutcome(log: log, exitCode: 65, timedOut: false, seconds: 1)
+            },
+            readFile: { files[$0] })
+        XCTAssertNil(report.systemic)
+        XCTAssertTrue(report.clean)
+        XCTAssertEqual(report.demoted.map(\.view), ["B"])
+    }
+
+    func testSystemicFailureMessageNamesPatchAndIsActionable() {
+        let s = PrepareVerifier.SystemicFailure(
+            failingViews: ["A", "B", "C"], preparedCount: 4, compilerCrash: true,
+            example: D(file: "/p/PatchThunks.generated.swift", line: 9, column: 9, message: PrepareVerifier.compilerCrashMessage))
+        let m = Prepare.systemicFailureMessage(s, buildLabel: "xcodebuild -scheme Shop -configuration Release")
+        XCTAssertTrue(m.contains("PATCH BUG"))
+        XCTAssertTrue(m.contains("patchcli \(Patch.configuration.version)"))
+        XCTAssertTrue(m.contains("crashes the Swift compiler in 3 of 4"))
+        XCTAssertTrue(m.contains("-configuration Release"))
+        XCTAssertTrue(m.contains("patchcli unprepare"))
+    }
+
     // MARK: - native_views config
 
     func testNativeViewsConfigRoundTripsAndIsAbsentWhenEmpty() throws {
@@ -244,7 +496,7 @@ final class PrepareVerifierTests: XCTestCase {
         let plain = ThunkGenerator().prepare(sources: [.init(url: url, text: Self.twoViews)], hybrid: true)
         XCTAssertEqual(plain.viewNames, ["Drop", "Keep"])
         let prepared = plain.modifiedFiles.first?.text ?? ""
-        XCTAssertTrue(prepared.contains("dynamic var body: some View { Text(\"drop\") }"))
+        XCTAssertTrue(prepared.contains("var body: some View { __patchRoute { Text(\"drop\") } }"), prepared)
 
         // Re-prepare the ALREADY-prepared file keeping `Drop` native.
         let kept = ThunkGenerator().prepare(sources: [.init(url: url, text: prepared)], hybrid: true,
@@ -253,7 +505,7 @@ final class PrepareVerifierTests: XCTestCase {
         let restored = kept.modifiedFiles.first?.text ?? prepared
         XCTAssertTrue(restored.contains("    var body: some View { Text(\"drop\") }"),
                       "the kept-native view's original source span is restored:\n\(restored)")
-        XCTAssertTrue(restored.contains("dynamic var body: some View { Text(\"keep\") }"))
+        XCTAssertTrue(restored.contains("var body: some View { __patchRoute { Text(\"keep\") } }"), restored)
         XCTAssertFalse(kept.generatedFileContents.contains("extension Drop"))
         // The other view's generated thunk is byte-identical to a run without the list.
         let keepOnlyPlain = plain.generatedFileContents.components(separatedBy: "extension Keep").count

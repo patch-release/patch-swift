@@ -42,9 +42,9 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         XCTAssertEqual(r.viewNames, ["Hello"])
         XCTAssertEqual(r.placements["Hello"], .separateFile)
 
-        // The view's OWN file gets ONLY `dynamic` — NO same-file block.
+        // The view's OWN file gets ONLY the body route (+ its PATCH-ROUTE fallback) — NO same-file block.
         let view = text(r, named: "Hello.swift")
-        XCTAssertTrue(view.contains("dynamic var body: some View"), view)
+        XCTAssertTrue(view.contains("__patchRoute {"), view)
         XCTAssertFalse(view.contains(ThunkGenerator.sameFileBeginMarker),
                        "a non-private view must NOT get a same-file block:\n\(view)")
         XCTAssertFalse(view.contains("extension Hello {"),
@@ -54,7 +54,7 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         // The whole thunk (replacement + helper methods) is in the generated file.
         let gen = r.generatedFileContents
         XCTAssertTrue(gen.contains("extension Hello {"), gen)
-        XCTAssertTrue(gen.contains("@_dynamicReplacement(for: body)"), gen)
+        XCTAssertTrue(gen.contains("__PatchNativeBody) -> some View"), gen)
         XCTAssertTrue(gen.contains(#"typeName: "Hello""#), gen)
         XCTAssertTrue(gen.contains("func __patchSlots() -> [String: ([String]) -> AnyView]"), gen)
         XCTAssertTrue(gen.contains("func __patchTokens() -> [String: PatchHostToken]"), gen)
@@ -89,9 +89,9 @@ final class ThunkGeneratorHybridTests: XCTestCase {
                       "the annotation should name the private member `profile`: \(members)")
 
         let view = text(r, named: "CardView.swift")
-        // The view file gets `dynamic` + the FACTORED block (helper methods only) + the
+        // The view file gets the body route + the FACTORED block (helper methods only) + the
         // actionable comment.
-        XCTAssertTrue(view.contains("dynamic var body"), view)
+        XCTAssertTrue(view.contains("__patchRoute {"), view)
         XCTAssertTrue(view.contains(ThunkGenerator.sameFileBeginMarker), view)
         XCTAssertTrue(view.contains("reads private member(s): profile"),
                       "the kept-in-file comment must name the member + how to remove it:\n\(view)")
@@ -101,14 +101,14 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         // The factored block carries the HELPER methods…
         XCTAssertTrue(view.contains("func __patchTokens() -> [String: PatchHostToken]"), view)
         // …but NOT the body-replacement (that rides the generated file).
-        XCTAssertFalse(view.contains("@_dynamicReplacement(for: body)"),
+        XCTAssertFalse(view.contains("__PatchNativeBody) -> some View"),
                        "the body-replacement must NOT be in the developer's file (it needs no private access):\n\(view)")
         XCTAssertTrue(ThunkGenerator.parses(view), view)
 
         // The generated file carries the body-replacement (every view) but NOT this
         // view's helper methods (those are same-file).
         let gen = r.generatedFileContents
-        XCTAssertTrue(gen.contains("@_dynamicReplacement(for: body)"), gen)
+        XCTAssertTrue(gen.contains("__PatchNativeBody) -> some View"), gen)
         XCTAssertTrue(gen.contains(#"typeName: "CardView""#), gen)
         XCTAssertFalse(gen.contains("func __patchTokens"),
                        "a same-file view's helper methods must NOT be duplicated in the generated file:\n\(gen)")
@@ -136,7 +136,7 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         guard case .sameFileBecausePrivate? = r.placements["CardView"] else {
             return XCTFail("CardView should be same-file; got \(String(describing: r.placements["CardView"]))")
         }
-        // Hello's file: just dynamic, no block.
+        // Hello's file: just the route, no thunk block.
         XCTAssertFalse(text(r, named: "Hello.swift").contains(ThunkGenerator.sameFileBeginMarker))
         // CardView's file: factored block.
         XCTAssertTrue(text(r, named: "CardView.swift").contains(ThunkGenerator.sameFileBeginMarker))
@@ -254,8 +254,9 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         let r1 = run([("CardView.swift", original)])
         let once = text(r1, named: "CardView.swift")
         let r2 = run([("CardView.swift", once)])
-        let twice = text(r2, named: "CardView.swift")
-        XCTAssertEqual(r2.dynamicInsertions, 0, "dynamic must not be inserted twice")
+        XCTAssertTrue(r2.modifiedFiles.isEmpty, "a re-run on the prepared file must report no edits")
+        let twice = r2.modifiedFiles.first { $0.url.lastPathComponent == "CardView.swift" }?.text ?? once
+        XCTAssertEqual(r2.dynamicInsertions, 0, "a body must not be routed twice")
         XCTAssertEqual(once, twice, "the same-file factored block must be a fixed point")
         XCTAssertEqual(twice.components(separatedBy: ThunkGenerator.sameFileBeginMarker).count - 1, 1,
                        "exactly one factored block after re-run")
@@ -333,7 +334,7 @@ final class ThunkGeneratorHybridTests: XCTestCase {
         // The private type's FULL thunk (replacement + helpers) is SAME-FILE.
         XCTAssertTrue(view.contains(ThunkGenerator.sameFileBeginMarker), view)
         XCTAssertTrue(view.contains("extension AccountChip {"), "private type thunk must be same-file:\n\(view)")
-        XCTAssertTrue(view.contains("@_dynamicReplacement(for: body)"), view)
+        XCTAssertTrue(view.contains("__PatchNativeBody) -> some View"), view)
         XCTAssertTrue(ThunkGenerator.parses(view), view)
         // The generated file must NOT extend the private type (would be inaccessible cross-file).
         XCTAssertFalse(r.generatedFileContents.contains("extension AccountChip {"),

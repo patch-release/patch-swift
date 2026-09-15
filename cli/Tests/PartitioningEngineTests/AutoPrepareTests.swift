@@ -52,8 +52,10 @@ final class AutoPrepareTests: XCTestCase {
                         noPrepareFlag: false, config: PatchConfig())
 
         let after = read(viewURL)
-        XCTAssertTrue(after.contains("dynamic var body"),
-                      "auto-prepare should insert `dynamic` on the view body. Got:\n\(after)")
+        XCTAssertTrue(after.contains("var body: some View { __patchRoute { Text(\"hi\") } }"),
+                      "auto-prepare should route the view body. Got:\n\(after)")
+        XCTAssertFalse(after.contains("dynamic"), "no `dynamic` (opaque dynamic replacement breaks Release builds). Got:\n\(after)")
+        XCTAssertTrue(after.contains(ThunkGenerator.routeFallbackBeginMarker), "the file carries its native route fallback. Got:\n\(after)")
         // HYBRID placement: a non-private view's thunk goes to the dedicated generated
         // folder, NOT into the developer's file — so NO same-file block here.
         XCTAssertFalse(after.contains(ThunkGenerator.sameFileBeginMarker),
@@ -67,7 +69,8 @@ final class AutoPrepareTests: XCTestCase {
                       "the generated-folder thunk file should exist")
         let gen = read(genURL)
         XCTAssertTrue(gen.contains("extension MyView {"), gen)
-        XCTAssertTrue(gen.contains("@_dynamicReplacement(for: body)"), gen)
+        XCTAssertTrue(gen.contains("func __patchRoute<"), gen)
+        XCTAssertFalse(gen.contains("_dynamicReplacement"), gen)
         XCTAssertTrue(ThunkGenerator.parses(gen), "the generated file must parse")
         // The generated folder is gitignored (root rule + in-folder .gitignore).
         XCTAssertTrue(read(dir.appendingPathComponent(".gitignore")).contains("Patch/Generated/"),
@@ -152,15 +155,15 @@ final class AutoPrepareTests: XCTestCase {
         // First run prepares it.
         AutoPrepare.run(root: dir, excludes: [], target: nil, noPrepareFlag: false, config: PatchConfig())
         let firstPass = read(viewURL)
-        XCTAssertTrue(firstPass.contains("dynamic var body"))
-        // Hybrid: the (non-private) view's file gets only `dynamic`, no same-file block.
+        XCTAssertTrue(firstPass.contains("__patchRoute {"))
+        // Hybrid: the (non-private) view's file gets only the route (+ its fallback), no same-file block.
         XCTAssertFalse(firstPass.contains(ThunkGenerator.sameFileBeginMarker))
         let genURL = dir.appendingPathComponent("Patch/Generated/PatchThunks.generated.swift")
         let firstGen = read(genURL)
         XCTAssertTrue(firstGen.contains("extension MyView {"))
 
         // Second run must be a no-op: BOTH the source AND the generated file are
-        // byte-identical (deterministic regeneration; `dynamic` is already there).
+        // byte-identical (deterministic regeneration; the body is already routed).
         AutoPrepare.run(root: dir, excludes: [], target: nil, noPrepareFlag: false, config: PatchConfig())
         let secondPass = read(viewURL)
         XCTAssertEqual(secondPass, firstPass, "re-running auto-prepare must be a no-op (source)")
@@ -174,18 +177,18 @@ final class AutoPrepareTests: XCTestCase {
 
     func testCountUnpreparedViewsCountsNewViewsOnly() throws {
         let dir = try makeTempDir("count")
-        // One already-dynamic view + one brand-new un-prepared view → 1 "new".
+        // One already-routed view + one brand-new un-prepared view → 1 "new".
         try write("""
         import SwiftUI
         struct OldView: View {
-            dynamic var body: some View { Text("old") }
+            var body: some View { __patchRoute { Text("old") } }
         }
         struct NewView: View {
             var body: some View { Text("new") }
         }
         """, to: dir.appendingPathComponent("Views.swift"))
         XCTAssertEqual(AutoPrepare.countUnpreparedViews(root: dir, excludes: []), 1,
-                       "only the un-prepared (non-dynamic) view counts as new")
+                       "only the un-prepared (unrouted) view counts as new")
     }
 
     // MARK: - Graceful degradation: a failing prepare never crashes / corrupts

@@ -67,6 +67,9 @@ struct Init: ParsableCommand {
     @Flag(name: .long, help: "Skip the build verification after preparing views (it compiles the prepared project and keeps native any view whose generated code breaks the build).")
     var noVerify: Bool = false
 
+    @Flag(name: .long, help: "Also verify the configuration the app archives with (usually Release) after the Debug build. Catches optimizer-only compiler failures in generated code; adds one full optimized build (often several minutes). Same as `patchcli prepare --verify`.")
+    var verifyRelease: Bool = false
+
     mutating func run() throws {
         let root = URL(fileURLWithPath: path ?? FileManager.default.currentDirectoryPath).standardizedFileURL
         let fm = FileManager.default
@@ -272,7 +275,7 @@ struct Init: ParsableCommand {
         print("")
 
         // --- Step 3: make the app's SwiftUI views patchable ------------------
-        // Insert `dynamic` on every view body + generate the replacement thunks so
+        // Route every view body + generate the body-route thunks so
         // OTA patches re-render views with NO `PatchView` wrapping. Skipped under
         // --manual (the manual steps below cover it); honors --yes for the source edits.
         // Degrades gracefully — a failure just prints the manual `prepare`.
@@ -280,10 +283,10 @@ struct Init: ParsableCommand {
         // [P0 init↔release fingerprint divergence — the "fingerprint changed straight
         // after init" bug] Prepare MUST run BEFORE the native-shell fingerprint is computed
         // below. `patchcli release` auto-prepares, so the fingerprint it enforces is the one
-        // over the PREPARED tree — the inserted `dynamic var body` line is part of the hashed
-        // shell (it is only stripped for a file that ALSO carries a same-file thunk block, e.g.
-        // a view reading a private member; the common view gets a separate-file thunk + a bare
-        // `dynamic`, which stays in the hash). The old order computed + registered the
+        // over the PREPARED tree — the prepared `var body` line (hashed in its legacy canonical
+        // `dynamic var body` form, see `ThunkGenerator.legacyCanonicalForm`) is part of the hashed
+        // shell (the `dynamic` is only stripped for a file that ALSO carries a same-file thunk block,
+        // e.g. a view reading a private member). The old order computed + registered the
         // fingerprint on the UNPREPARED tree (this prepare ran AFTER), so the FIRST `release`
         // recomputed a different, prepared-tree fingerprint and false-MISMATCHED — the exact
         // failure a user hit running `init` then editing a view. Prepare first, then hash.
@@ -299,7 +302,11 @@ struct Init: ParsableCommand {
                 let n = try Prepare.execute(
                     root: root, excludes: cfg.exclude, target: targetName,
                     assumeYes: assumeYes, thunksOnly: false, check: false, quiet: false,
-                    verify: !noVerify)
+                    verify: !noVerify, verifyPlan: verifyRelease ? .all : .debug)
+                if let systemic = Prepare.lastVerifySystemicFailure {
+                    note("Build verification hit a Patch bug (\(systemic.failingViews.count) view(s)) — see above. "
+                         + "Your views are left prepared; `patchcli unprepare` removes Patch's changes.")
+                }
                 if n == 0 {
                     note("No top-level SwiftUI views found yet — run `patchcli prepare` after you add views.")
                 }
@@ -393,7 +400,7 @@ struct Init: ParsableCommand {
         // after a native (App Store) change.
         //
         // GUARD: register ONLY when the tree is in the EXACT state `release` will enforce —
-        // every view prepared (`dynamic` inserted; `countUnpreparedViews == 0`) AND the
+        // every view prepared (body routed; `countUnpreparedViews == 0`) AND the
         // configure call injected (`codeHandled`). If the user DECLINED either edit, the
         // registered fingerprint would not match release's (which auto-prepares + sees the
         // configure call), so we skip auto-register and let the manual `fingerprint register`
@@ -722,8 +729,8 @@ struct Init: ParsableCommand {
     }
 
     static func manualPrepareInstructions() -> String {
-        "Make your SwiftUI views patchable (inserts `dynamic` on view bodies +\n"
-            + "     generates the replacement thunks, so OTA patches re-render with no\n"
+        "Make your SwiftUI views patchable (routes view bodies through Patch +\n"
+            + "     generates the body-route thunks, so OTA patches re-render with no\n"
             + "     PatchView wrapping): run  patchcli prepare"
     }
 

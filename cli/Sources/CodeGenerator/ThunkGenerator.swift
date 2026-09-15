@@ -6,22 +6,23 @@
 // views themselves. Two outputs, both compiled INTO the app (App-Store-legal —
 // only DATA changes at runtime, never code):
 //
-//   1. `dynamic` is inserted on every eligible `var body: some View` (one word,
-//      placed precisely before the `var` keyword via SwiftSyntax token offsets,
-//      so attributes/access-modifiers/formatting are preserved). This is what
-//      makes the body REPLACEABLE — the same thing Xcode Previews does.
-//   2. A generated `PatchThunks.generated.swift` with one
-//      `@_dynamicReplacement(for: body)` extension per View. Each thunk asks the
-//      SDK for a patched body; if the active OTA module ships one it renders the
-//      WASM tree, else it falls through to the ORIGINAL `body` (a direct call to
-//      `body` inside the replacement reaches the original — verified).
+//   1. Every eligible `var body: some View` getter is ROUTED: wrapped in
+//      `__patchRoute { … }` on the body's own opening/closing lines (byte-exact,
+//      same-line — see `BodyRouting.swift`), plus a tiny file-private native
+//      fallback (the PATCH-ROUTE block) so the file builds without generated code.
+//   2. A generated `PatchThunks.generated.swift` with one `__patchRoute` method per
+//      View. Each asks the SDK for a patched body; if the active OTA module ships
+//      one it renders the WASM tree, else it renders the wrapped native content.
+//      (No `dynamic` / `@_dynamicReplacement`: an opaque-result dynamic
+//      replacement miscompiles, fails to link or crashes at launch in optimized
+//      Release builds — see `BodyRouting.swift`.)
 //
 // The discovery matches the engine's lowering scope (top-level structs declaring
 // `: View`), computed GLOBALLY across all sources so a body declared in a
 // different file than its struct (or in an `extension`) is still handled.
 //
-// IDEMPOTENT + re-runnable: a body already `dynamic` is left as-is; the thunk
-// file is regenerated wholesale.
+// IDEMPOTENT + re-runnable: a body already routed is left as-is (a legacy `dynamic`
+// body from an older CLI is migrated); the thunk file is regenerated wholesale.
 
 import Foundation
 import SwiftSyntax
@@ -41,9 +42,9 @@ public struct ThunkGenerator {
         return !tree.hasError
     }
 
-    /// The fixed property name each generated replacement uses (unique per type;
-    /// each lives in its own `extension`, so reuse across types is fine).
-    public static let replacementPropertyName = "__patchedBody"
+    /// The fixed name of each view's generated body-route method (`routeMethodName`; one per
+    /// type, each in its own `extension`, so reuse across types is fine).
+    public static var replacementMethodName: String { routeMethodName }
     /// The per-view method exposing native slot closures for mixed views.
     public static let slotsMethodName = "__patchSlots"
     /// The per-view method exposing native DESIGN-SYSTEM TOKEN values (resolved
@@ -127,26 +128,26 @@ public struct ThunkGenerator {
     /// Where a view's generated thunk lands in HYBRID placement (the new default).
     public enum Placement: Sendable, Equatable {
         /// The whole thunk goes into the dedicated generated folder's separate file —
-        /// the developer's view file gets ONLY the one `dynamic` keyword. Chosen when the
+        /// the developer's view file gets ONLY the body route (+ its PATCH-ROUTE fallback). Chosen when the
         /// view's thunk needs no `private`/`fileprivate` access (the common case).
         case separateFile
         /// The view's HELPER methods (`__patchSlots()`/`__patchTokens()`/
         /// `__patchRowSlots()`) must stay in the view's own file because the thunk reads
         /// these `private`/`fileprivate` member(s) (Swift access control is file-scoped).
-        /// The `@_dynamicReplacement` body-replacement still rides the separate file
+        /// The body-route method still rides the separate file
         /// (it needs no private access) — minimal in-file footprint. The associated names
         /// are surfaced to the developer in an actionable comment.
         case sameFileBecausePrivate(members: [String])
         /// PRIVATE-ACCESS FORWARDING (the default for a view whose thunk reads private members):
         /// the WHOLE thunk rides the generated file, with its private references rewritten to
-        /// internal `__patch_*` forwarders; the view's own file gets only `dynamic` + one compact,
+        /// internal `__patch_*` forwarders; the view's own file gets only the body route + one compact,
         /// stable `PATCH-ACCESS` forwarder extension listing exactly these `members`.
         /// See `PatchAccessForwarding`.
         case forwardedPrivateAccess(members: [String])
     }
 
     public struct Result {
-        /// Files whose source changed — `dynamic` inserted on a body AND/OR the same-file
+        /// Files whose source changed — a body routed (+ its PATCH-ROUTE fallback) AND/OR the same-file
         /// generated thunk block appended (in SAME-FILE mode). New text each.
         public var modifiedFiles: [(url: URL, text: String)]
         /// The generated thunk file contents (LEGACY separate-file mode — one extension
@@ -154,7 +155,7 @@ public struct ThunkGenerator {
         public var thunkFileContents: String
         /// The view type names that got a thunk (sorted, deterministic).
         public var viewNames: [String]
-        /// Total `dynamic` keywords inserted across all files this run.
+        /// Total view bodies newly routed across all files this run (0 = every eligible body already routed).
         public var dynamicInsertions: Int
         /// True when the thunks were generated SAME-FILE (appended to each view's own
         /// source file) rather than into a separate `PatchThunks.generated.swift`.
@@ -174,8 +175,8 @@ public struct ThunkGenerator {
         public var hybrid: Bool = false
         /// HYBRID only: each thunk view → the source file that declares it. Lets a caller
         /// that had to RESTORE a file (its source edit broke parsing, dropping the spliced
-        /// `dynamic` + same-file helpers) find which views to drop from the generated file —
-        /// else a private-member view's `@_dynamicReplacement` orphans a now-non-`dynamic`
+        /// body route + same-file helpers) find which views to drop from the generated file —
+        /// else a private-member view's generated route method calls a now-missing helper
         /// body (and calls a now-missing `__patchSlots`), breaking the whole app build.
         public var viewDeclaringFile: [String: URL] = [:]
         /// HYBRID only: re-render `generatedFileContents` EXCLUDING the given view names
@@ -187,7 +188,11 @@ public struct ThunkGenerator {
         public var forwardingBlockers: [String: [String: String]] = [:]
         /// Each source file → the View type names whose `var body` got a `dynamic` inserted by THIS
         /// run (recorded by `patchcli prepare` so `patchcli unprepare` removes only its own `dynamic`).
+        /// Always empty since body routing replaced `dynamic` (kept for the record format).
         public var dynamicInsertedTypes: [URL: [String]] = [:]
+        /// Each source file → the View type names whose recorded legacy `dynamic` THIS run removed
+        /// while routing the body (dropped from the prepare record by `patchcli prepare`).
+        public var legacyDynamicRemovedTypes: [URL: [String]] = [:]
         /// HYBRID only: per view, the FILE-PRIVATE symbols (a `private struct` child view, a
         /// `fileprivate enum` token, a file-scope `private let`) its thunk closures reference —
         /// the subset of its `.sameFileBecausePrivate` names that are not its own members.
@@ -204,21 +209,21 @@ public struct ThunkGenerator {
 
     // MARK: - Public API
 
-    /// Prepare a whole project: discover View types, make their bodies `dynamic`,
+    /// Prepare a whole project: discover View types, route their bodies,
     /// and generate the replacement thunks.
     ///
     /// `hybrid` (the new default `patchcli prepare` mode) makes placement a PER-VIEW
     /// decision: a view whose thunk needs NO `private`/`fileprivate` access has its WHOLE
     /// thunk emitted into a dedicated generated file (`generatedFileContents`) — the
-    /// developer's view file gets ONLY the one `dynamic` keyword (no big appended block).
+    /// developer's view file gets ONLY the body route + a tiny PATCH-ROUTE fallback (no big block).
     /// A view whose thunk DOES read a private member keeps only its helper methods
     /// (`__patchSlots()`/`__patchTokens()`/`__patchRowSlots()`) in its own file (factored
     /// to the minimum that genuinely needs file-scoped access), annotated with an
-    /// actionable comment naming the members; the `@_dynamicReplacement` body-replacement
+    /// actionable comment naming the members; the body-route method
     /// still rides the generated file. `placements` records each view's choice.
     ///
     /// `sameFile` (the legacy default, used when `hybrid == false`) appends each view's
-    /// `@_dynamicReplacement(for: body)` extension + its `__patchSlots()`/`__patchTokens()`
+    /// body-route extension + its `__patchSlots()`/`__patchTokens()`
     /// helpers to the SAME source file that declares the view, inside an idempotent
     /// BEGIN/END-marker block. This is what lets the thunk reach the view's own
     /// `private`/`fileprivate` members (Swift access control is file-scoped). When
@@ -227,8 +232,8 @@ public struct ThunkGenerator {
     /// private members are unreachable.
     ///
     /// `nativeViews` (the `.Patch.yml` `native_views:` list, grown by `prepare --verify`) are
-    /// views proven to break the app build once prepared: they get NO thunk and NO `dynamic`
-    /// — a `dynamic` left on their body by an earlier run is REMOVED, restoring the original
+    /// views proven to break the app build once prepared: they get NO thunk and NO body route
+    /// — a route (or legacy `dynamic`) left on their body by an earlier run is REMOVED, restoring the original
     /// source span — so they render exactly as the developer wrote them. Empty = unchanged
     /// behavior (byte-identical output).
     ///
@@ -236,15 +241,21 @@ public struct ThunkGenerator {
     /// a compact PATCH-ACCESS forwarder extension in its file instead of a same-file helper block.
     ///
     /// `thunkableFiles` (standardized absolute paths) restricts which files may receive a
-    /// `dynamic` keyword / host a thunked view: the build target's real compile set (see
+    /// body route / host a thunked view: the build target's real compile set (see
     /// `XcodeTargetSources`). A view declared in a file OUTSIDE it (another target, a local
     /// package module, a file removed from the project) gets no thunk — a thunk for a type the
     /// target doesn't compile can never build. `sources` must still be the WHOLE scanned set:
     /// the cross-file lowering bundle is built from it (identical to the build's). nil = every
     /// file is thunkable (the historical behavior).
+    ///
+    /// `legacyDynamicTypes` (per file — `normalizedPath` — from the prepare record): view types whose `dynamic` on
+    /// `var body` an OLDER CLI's prepare inserted. Routing such a body also removes that
+    /// `dynamic`; any other `dynamic` on a body is left alone (it may be the developer's own, and
+    /// `dynamic` without a `@_dynamicReplacement` builds and runs correctly).
     public func prepare(sources: [SourceFile], sameFile: Bool = true, hybrid: Bool = false,
                         nativeViews: Set<String> = [], accessForwarding: Bool = true,
-                        thunkableFiles: Set<String>? = nil) -> Result {
+                        thunkableFiles: Set<String>? = nil,
+                        legacyDynamicTypes: [String: Set<String>] = [:]) -> Result {
         // (1) GLOBAL discovery across all files. Collect View type names, count how
         // many top-level struct decls share each name (duplicates are unsafe to
         // thunk — `extension Name` would be ambiguous), and flag generic views with
@@ -260,6 +271,7 @@ public struct ThunkGenerator {
         // a struct's private members are file-scoped to where the struct is declared).
         var declaringFile: [String: URL] = [:]
         var availability: [String: [String]] = [:]
+        var inferredMainActor = Set<String>()
         let parsed: [(file: SourceFile, tree: SourceFileSyntax)] = sources.map {
             ($0, Parser.parse(source: $0.text))
         }
@@ -270,6 +282,7 @@ public struct ThunkGenerator {
             genericWhereViews.formUnion(d.genericWhereViews)
             privateViewTypes.formUnion(d.privateViewTypes)
             for (name, attrs) in d.availabilityAttributes { availability[name, default: []].append(contentsOf: attrs) }
+            inferredMainActor.formUnion(d.inferredMainActorViews)
             for name in d.structDeclaredNames where declaringFile[name] == nil {
                 declaringFile[name] = file.url
             }
@@ -279,7 +292,7 @@ public struct ThunkGenerator {
         // top-level struct decl) and not a generic-with-`where`. (A name reachable
         // only via `extension X: View` has 0 struct decls of that name and stays
         // eligible — there's no ambiguity.) Bodies of non-eligible views are left
-        // untouched (no `dynamic`, no thunk) — they simply render native.
+        // untouched (no body route, no thunk) — they simply render native.
         let thunkablePaths = thunkableFiles.map { Set($0.map(Self.normalizedPath)) }
         func isThunkable(_ url: URL) -> Bool {
             guard let thunkablePaths else { return true }
@@ -292,57 +305,59 @@ public struct ThunkGenerator {
                 && !assocTypeRiskViews.contains($0)
                 && !nativeViews.contains($0)
         }
-        // Kept-native views whose body still carries a `dynamic` from an earlier prepare run.
+        // Kept-native views whose body still carries a route / legacy `dynamic` from an earlier prepare run.
         let nativeKept = viewNames.intersection(nativeViews)
 
-        // (2) Per file: insert `dynamic` before each eligible view body (skipping
-        // bodies inside `#if` — their availability is config-dependent, so a thunk
-        // referencing them could fail to compile in another configuration). The result
-        // text per file (with `dynamic` spliced in, and any STALE generated block
-        // stripped) is what a same-file block is later appended to.
+        // (2) Per file: ROUTE each eligible view body — wrap its getter in `__patchRoute { … }`
+        // on the body's own lines (see `BodyRouting.swift`), skipping bodies inside `#if` (their
+        // availability is config-dependent, so a route referencing them could fail to compile in
+        // another configuration). A `dynamic` an older CLI's prepare put on a routed body (per the
+        // prepare record) is removed in the same edit. The result text per file (routed, any STALE
+        // generated block stripped) is what a same-file block is later appended to; the in-file
+        // PATCH-ROUTE fallback block is (re)appended last, iff the file has a routed body.
         var fileText: [URL: String] = [:]            // URL → current working text
         var fileInsertions: [URL: Int] = [:]
-        var dynamicInsertedTypes: [URL: [String]] = [:]
+        let dynamicInsertedTypes: [URL: [String]] = [:]
+        var legacyDynamicRemoved: [URL: [String]] = [:]
         var viewsWithBody = Set<String>()
         for (file, tree) in parsed {
-            let collector = BodyCollector(viewNames: eligible)
-            // A file outside the target's compile set never gets `dynamic` or a thunk (its
-            // stale generated block, if any, is still stripped below).
-            if isThunkable(file.url) { collector.walk(tree) }
-            for hit in collector.hits { viewsWithBody.insert(hit.type) }
-            // Always start from the file with any prior generated SAME-FILE block stripped
-            // (idempotent regeneration — never duplicate). Then splice `dynamic`.
+            // Always start from the file with any prior generated block stripped (idempotent
+            // regeneration — never duplicate). Body sites are located on the STRIPPED text so
+            // their byte offsets are valid wherever the generated blocks sat.
             let stripped = PatchAccessForwarding.stripAllGeneratedBlocks(from: file.text)
-            let toInsertHits = collector.hits.filter { !$0.alreadyDynamic }
-            let toInsert = toInsertHits.map { $0.offset }
-            if !toInsertHits.isEmpty { dynamicInsertedTypes[file.url] = toInsertHits.map { $0.type } }
-            var withDynamic = toInsert.isEmpty
-                ? stripped : Self.insertDynamic(into: stripped, atUTF8Offsets: toInsert)
-            // Restore kept-native views: drop the `dynamic` a previous run inserted on their body.
-            // (The stripped generated block sits at the END of the file, so byte offsets taken
-            // from the original tree are still valid for everything before it.)
-            var removedDynamic = false
-            if !nativeKept.isEmpty {
-                let nativeCollector = BodyCollector(viewNames: nativeKept)
-                nativeCollector.walk(tree)
-                let ranges = nativeCollector.dynamicModifierRanges
-                if !ranges.isEmpty {
-                    // Both edit kinds are position-based; apply them together, last-first.
-                    withDynamic = Self.applyDynamicEdits(to: stripped, insertAt: toInsert, removeRanges: ranges)
-                    removedDynamic = true
+            let sites = Self.bodySites(in: stripped == file.text ? tree : Parser.parse(source: stripped))
+            var edits: [TextEdit] = []
+            var newlyRouted: [String] = []
+            // A file outside the target's compile set is never routed (a stale route there keeps
+            // building through its re-appended fallback block; `cleanExcludedFiles` removes it).
+            if isThunkable(file.url) {
+                for site in sites where eligible.contains(site.type) {
+                    guard site.isRouted || site.openInsertOffset != nil else { continue }
+                    viewsWithBody.insert(site.type)
+                    if !site.isRouted { newlyRouted.append(site.type) }
+                    let dropDynamic = site.isDynamic && !legacyDynamicTypes.isEmpty
+                        && legacyDynamicTypes[Self.normalizedPath(file.url.path)]?.contains(site.type) == true
+                    if dropDynamic { legacyDynamicRemoved[file.url, default: []].append(site.type) }
+                    edits += Self.routeEdits(for: site, removingDynamic: dropDynamic)
                 }
             }
-            if stripped != file.text || !toInsert.isEmpty || removedDynamic {
-                fileText[file.url] = withDynamic
+            // Restore kept-native views: drop the route (and any legacy `dynamic`) an earlier run
+            // put on their body, so they render exactly as the developer wrote them.
+            for site in sites where nativeKept.contains(site.type) {
+                edits += Self.unrouteEdits(for: site)
             }
-            fileInsertions[file.url] = toInsert.count
+            if stripped != file.text || !edits.isEmpty {
+                fileText[file.url] = Self.apply(edits, to: stripped)
+            }
+            fileInsertions[file.url] = newlyRouted.count
         }
         let totalInsertions = fileInsertions.values.reduce(0, +)
 
-        // (3) LOCK-STEP: a thunk only for a view whose `body` we actually located
-        // (and therefore made `dynamic`) — `@_dynamicReplacement(for: body)` only
-        // type-checks when `body` is `dynamic`. A view with no findable body gets
-        // no thunk. (Pared down per-view below by the build-safety validation.)
+        // (3) LOCK-STEP: a thunk only for a view whose `body` we actually located and routed —
+        // the generated route method is only reachable through that wrapper. A view with no
+        // findable body gets no thunk. (Pared down per-view below by the build-safety
+        // validation; a routed view that loses its thunk there still builds and renders
+        // natively through its file's PATCH-ROUTE fallback.)
         var thunkViews = eligible.intersection(viewsWithBody).sorted()
         // REPORTING-ONLY: why each discovered view got no thunk (renders native).
         var skippedViews: [String: String] = [:]
@@ -437,6 +452,7 @@ public struct ThunkGenerator {
             r.skippedViews = skippedViews
             r.loweredViews = allLowered
             r.dynamicInsertedTypes = dynamicInsertedTypes
+            r.legacyDynamicRemovedTypes = legacyDynamicRemoved
             return r
         }
 
@@ -450,6 +466,7 @@ public struct ThunkGenerator {
                 viewCallbackSlots: viewCallbackSlots,
                 baselineHashes: viewBaselineHashes,
                 availability: availability,
+                inferredMainActor: inferredMainActor,
                 totalInsertions: totalInsertions,
                 accessForwarding: accessForwarding))
         }
@@ -464,11 +481,9 @@ public struct ThunkGenerator {
                                                  callbackSlots: viewCallbackSlots,
                                                  baselineHashes: viewBaselineHashes,
                                                  extraImports: imports)
-            let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
-                fileText[file.url].map { (file.url, $0) }
-            }
+            let modified = Self.finalizedModifiedFiles(parsed, fileText)
             return withReport(Result(modifiedFiles: modified,
-                          thunkFileContents: Self.applyAvailability(thunkFile, availability),
+                          thunkFileContents: Self.applyAvailability(thunkFile, availability, inferredMainActor: inferredMainActor),
                           viewNames: thunkViews, dynamicInsertions: totalInsertions,
                           sameFile: false))
         }
@@ -492,7 +507,7 @@ public struct ThunkGenerator {
         // its own `Subscription` references `ambiguous for type lookup`). Every slot/token
         // source in a same-file block comes from that same file, so its imports suffice.
         for (url, views) in viewsByFile {
-            // Base text = the file with `dynamic` spliced + any prior block stripped.
+            // Base text = the file with bodies routed + any prior block stripped.
             let base = fileText[url] ?? PatchAccessForwarding.stripAllGeneratedBlocks(
                 from: parsed.first { $0.file.url == url }?.file.text ?? "")
             let block = Self.renderSameFileBlock(viewNames: views.sorted(), slots: viewSlots,
@@ -503,12 +518,10 @@ public struct ThunkGenerator {
                                                  baselineHashes: viewBaselineHashes,
                                                  extraImports: Self.fileImports(url, parsed))
             let trimmed = base.hasSuffix("\n") ? base : base + "\n"
-            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability)
+            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability, inferredMainActor: inferredMainActor)
         }
 
-        let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
-            fileText[file.url].map { (file.url, $0) }
-        }
+        let modified = Self.finalizedModifiedFiles(parsed, fileText)
         return withReport(Result(modifiedFiles: modified, thunkFileContents: "",
                       viewNames: thunkViews, dynamicInsertions: totalInsertions,
                       sameFile: true))
@@ -547,13 +560,14 @@ public struct ThunkGenerator {
         viewCallbackSlots: [String: [BodyLowering.CallbackSlot]] = [:],
         baselineHashes: [String: String] = [:],
         availability: [String: [String]] = [:],
+        inferredMainActor: Set<String> = [],
         totalInsertions: Int,
         accessForwarding: Bool = true
     ) -> Result {
         var fileText = fileText
         // A `private`/`fileprivate struct X: View` can't be EXTENDED from the separate
         // generated file (Swift file-scoped access), so its WHOLE thunk — the
-        // `@_dynamicReplacement` body-replacement AND its helper methods — must live SAME-FILE
+        // body-route method AND its helper methods — must live SAME-FILE
         // (its declaring file). It's excluded from the generated file's replacement set and
         // gets a full same-file thunk below. Build-safe: a private type can never produce a
         // cross-file `'X' is inaccessible due to 'private'` error.
@@ -747,11 +761,11 @@ public struct ThunkGenerator {
             callbackSlots: viewCallbackSlots,
             baselineHashes: baselineHashes,
             extraImports: imports,
-            forwardedMethodExtensions: forwarded.keys.sorted().map { forwarded[$0]!.rewrittenText }), availability)
+            forwardedMethodExtensions: forwarded.keys.sorted().map { forwarded[$0]!.rewrittenText }), availability, inferredMainActor: inferredMainActor)
 
         // (C+D) SAME-FILE BLOCKS, ONE per declaring file (a file may declare several views):
         //   (C) FACTORED helper methods (+ an actionable annotation) for private-MEMBER
-        //       views — their `@_dynamicReplacement` rides the generated file;
+        //       views — their body-route method rides the generated file;
         //   (D) the FULL thunk (replacement + helper methods) for private VIEW TYPES — they
         //       can't be extended cross-file, so even the replacement must be co-located.
         // Both go into the SAME idempotent BEGIN/END block per file (never two markers).
@@ -788,7 +802,7 @@ public struct ThunkGenerator {
             let hasThunkBlock = !(factoredByFile[url] ?? []).isEmpty || !(fullByFile[url] ?? []).isEmpty
             let trimmed = base.hasSuffix("\n") ? base : base + "\n"
             guard hasThunkBlock else {
-                fileText[url] = trimmed + "\n" + Self.applyAvailability(accessBlock, availability)
+                fileText[url] = trimmed + "\n" + Self.applyAvailability(accessBlock, availability, inferredMainActor: inferredMainActor)
                 continue
             }
             let legacyBlock = Self.renderSameFileCombinedBlock(
@@ -808,12 +822,10 @@ public struct ThunkGenerator {
                     legacyBlock, factoredViews: factoredByFile[url] ?? [], fullViews: fullByFile[url] ?? [],
                     blockers: forwardingBlockers)
                 : legacyBlock)
-            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability)
+            fileText[url] = trimmed + "\n" + Self.applyAvailability(block, availability, inferredMainActor: inferredMainActor)
         }
 
-        let modified: [(url: URL, text: String)] = parsed.compactMap { (file, _) in
-            fileText[file.url].map { (file.url, $0) }
-        }
+        let modified = Self.finalizedModifiedFiles(parsed, fileText)
         var hybridResult = Result(modifiedFiles: modified, thunkFileContents: "",
                       viewNames: thunkViews, dynamicInsertions: totalInsertions,
                       sameFile: false,
@@ -831,7 +843,7 @@ public struct ThunkGenerator {
                               baselineHashes: baselineHashes,
                               extraImports: imports,
                               forwardedMethodExtensions: forwarded.keys.sorted()
-                                  .filter { !excluded.contains($0) }.map { forwarded[$0]!.rewrittenText }), availability)
+                                  .filter { !excluded.contains($0) }.map { forwarded[$0]!.rewrittenText }), availability, inferredMainActor: inferredMainActor)
                       })
         hybridResult.forwardingBlockers = forwardingBlockers
         // File-private symbols are reported only where they still force same-file placement — a
@@ -840,7 +852,7 @@ public struct ThunkGenerator {
         return hybridResult
     }
 
-    /// Render the dedicated generated-folder file: the `@_dynamicReplacement` body-
+    /// Render the dedicated generated-folder file: the body-route
     /// replacement extension for every `replacementViews` + the helper-methods extension
     /// for every `methodViews`. (In hybrid mode `replacementViews` = all thunk views and
     /// `methodViews` = the separate-file subset; same-file views' methods live in their
@@ -875,12 +887,13 @@ public struct ThunkGenerator {
         // =========================================================================
         // This file lives in a dedicated, gitignored `Patch/Generated/` folder so the
         // generated patch thunks never clutter YOUR source. Your view files get only the
-        // one `dynamic` keyword on `var body` (Swift requires `dynamic` on the
-        // declaration — it can't be added from an extension). Everything else is here.
+        // body route (`var body: some View { __patchRoute {` … `} }`) and a small
+        // PATCH-ROUTE block that renders the body natively when this folder is absent.
+        // Everything else is here.
         //
-        // For each SwiftUI View in this target: an `@_dynamicReplacement(for: body)` that
-        // routes the body through the Patch OTA renderer when a patch is active, else the
-        // original compiled `body`, plus its `__patchSlots()`/`__patchTokens()`/… helpers.
+        // For each SwiftUI View in this target: a `__patchRoute` method that renders the
+        // body through the Patch OTA renderer when a patch is active, else the original
+        // compiled body content, plus its `__patchSlots()`/`__patchTokens()`/… helpers.
         // A view whose helpers read `private`/`fileprivate` members reaches them through
         // the `__patch_*` forwarders in a small PATCH-ACCESS extension in its own file
         // (Swift access control is file-scoped). Only a `private` View TYPE — which no
@@ -888,7 +901,7 @@ public struct ThunkGenerator {
         // thunk block in its file; `patchcli prepare` names each one and why.
         //
         // Regenerated wholesale on every `patchcli prepare`. Safe to delete this whole
-        // folder — `patchcli prepare` recreates it (and re-inserts the `dynamic` keywords).
+        // folder — views then render natively until `patchcli prepare` recreates it.
 
         #if canImport(SwiftUI)
         import SwiftUI
@@ -898,7 +911,7 @@ public struct ThunkGenerator {
 
         """
         for imp in extraImports {
-            out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
+            out += Self.guardedImport(imp)
         }
         out += Self.literalArgHelperDecl
         // The body-replacement extensions (every view).
@@ -923,7 +936,7 @@ public struct ThunkGenerator {
     }
 
     /// Render the SAME-FILE FACTORED block for HYBRID private-member views: ONLY the
-    /// helper-methods extension(s) (the `@_dynamicReplacement` body-replacement rides the
+    /// helper-methods extension(s) (the body-route method rides the
     /// separate generated file), preceded by an actionable comment that explains WHY the
     /// block is in the developer's file and HOW to remove it — naming the exact
     /// `private`/`fileprivate` members forcing it. BEGIN/END-marked + regenerated
@@ -951,7 +964,7 @@ public struct ThunkGenerator {
 
     /// Render ONE same-file BEGIN/END block for a file, carrying BOTH:
     ///   * `factoredViews` — private-MEMBER views: only their helper-methods extension
-    ///     (their `@_dynamicReplacement` rides the separate generated file), with an
+    ///     (their body-route method rides the separate generated file), with an
     ///     actionable annotation naming the members;
     ///   * `fullViews` — private VIEW TYPES: their FULL thunk (replacement + helper methods),
     ///     because a `private`/`fileprivate struct X: View` can't be extended cross-file.
@@ -1019,7 +1032,7 @@ public struct ThunkGenerator {
 
         """
         for imp in extraImports {
-            out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
+            out += Self.guardedImport(imp)
         }
         out += Self.literalArgHelperDecl
         // Private-MEMBER views: helper methods only (replacement rides the generated file).
@@ -1064,13 +1077,20 @@ public struct ThunkGenerator {
 
     static func collectImports(_ trees: [SourceFileSyntax]) -> [String] {
         var seen = Set<String>(["SwiftUI", "PatchSDK", "PatchSwiftUI", "PatchRender"])
+        var preconcurrent = Set<String>()
         var out: [String] = []
         for tree in trees {
             for stmt in tree.statements {
                 guard let imp = stmt.item.as(ImportDeclSyntax.self) else { continue }
-                // Skip attributed imports (`@_exported`/`@testable`) — keep every plain or
-                // SCOPED (`import struct …`) import.
-                guard imp.attributes.isEmpty else { continue }
+                // Skip attributed imports (`@_exported`/`@testable`/`@_implementationOnly`/`@_spi`) —
+                // keep every plain or SCOPED (`import struct …`) import, and `@preconcurrency`
+                // ones AS `@preconcurrency`: the developer's `@preconcurrency import WeatherKit`
+                // is what lets a non-Sendable WeatherKit value cross an actor boundary in their
+                // view; the SAME code copied into a slot/effect closure in the generated file
+                // fails the Swift 6 build ("non-sendable type … cannot cross actor boundary")
+                // unless the generated file imports the module the same way.
+                let preconcurrency = Self.isPreconcurrencyOnly(imp.attributes)
+                guard imp.attributes.isEmpty || preconcurrency else { continue }
                 let path = imp.path.trimmedDescription
                 guard !path.isEmpty else { continue }
                 // A SCOPED import (`import struct DesignKit.Brand`) names the symbol's full
@@ -1086,11 +1106,34 @@ public struct ThunkGenerator {
                     // submodule resolves; a `canImport(os.log)` guard is valid.
                     module = path
                 }
-                guard !module.isEmpty, seen.insert(module).inserted else { continue }
+                guard !module.isEmpty else { continue }
+                if preconcurrency { preconcurrent.insert(module) }
+                guard seen.insert(module).inserted else { continue }
                 out.append(module)
             }
         }
-        return out.sorted()
+        // A module ANY view file imports `@preconcurrency` is imported that way here (the
+        // generated file holds code copied from every such file; the attribute only relaxes
+        // Sendable checking for that module's declarations).
+        return out.sorted().map { preconcurrent.contains($0) ? Self.preconcurrencyPrefix + $0 : $0 }
+    }
+
+    /// Marks an `extraImports` entry that must be emitted as `@preconcurrency import`.
+    static let preconcurrencyPrefix = "@preconcurrency "
+
+    /// `attributes` is exactly `@preconcurrency`.
+    static func isPreconcurrencyOnly(_ attributes: AttributeListSyntax) -> Bool {
+        attributes.count == 1
+            && attributes.first?.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "preconcurrency"
+    }
+
+    /// One `extraImports` entry as a `#if canImport(M)`-guarded import line.
+    static func guardedImport(_ entry: String) -> String {
+        if entry.hasPrefix(preconcurrencyPrefix) {
+            let module = String(entry.dropFirst(preconcurrencyPrefix.count))
+            return "#if canImport(\(module))\n@preconcurrency import \(module)\n#endif\n"
+        }
+        return "#if canImport(\(entry))\nimport \(entry)\n#endif\n"
     }
 
     // MARK: - View discovery (matches the engine's lowering scope)
@@ -1107,7 +1150,7 @@ public struct ThunkGenerator {
         /// access control is file-scoped, so a `private struct X: View` CANNOT be extended
         /// from the separate generated file (`'X' is inaccessible due to 'private'`). Its
         /// thunk MUST live SAME-FILE (the declaring file) — including the
-        /// `@_dynamicReplacement` body-replacement, which the hybrid path otherwise always
+        /// body-route method, which the hybrid path otherwise always
         /// routes separate.
         var privateViewTypes: Set<String> = []
         /// `@available(…)` attributes (verbatim) declared on a top-level struct, or on a
@@ -1117,6 +1160,11 @@ public struct ThunkGenerator {
         /// failed to build (`'X' is only available in iOS 17.0 or newer`) unless every
         /// generated extension of `X` repeats these attributes (see `applyAvailability`).
         var availabilityAttributes: [String: [String]] = [:]
+        /// Views whose `struct` declaration itself conforms to `View` (no `nonisolated`, no other
+        /// global actor): the whole type — every member of every extension — is inferred
+        /// `@MainActor` from `View`, so generated helper methods need no explicit `@MainActor`
+        /// (see `applyInferredMainActor`).
+        var inferredMainActorViews: Set<String> = []
     }
 
     /// Discover top-level View types in one file: structs declaring `: View`, plus
@@ -1133,6 +1181,12 @@ public struct ThunkGenerator {
                 if declaresViewConformance(s.inheritanceClause) {
                     d.viewNames.insert(s.name.text)
                     d.structDeclaredNames.insert(s.name.text)
+                    let nonisolated = s.modifiers.contains { $0.name.tokenKind == .keyword(.nonisolated) }
+                    let onlyKnownAttributes = s.attributes.allSatisfy {
+                        guard let a = $0.as(AttributeSyntax.self) else { return false }
+                        return ["available", "MainActor"].contains(a.attributeName.trimmedDescription)
+                    }
+                    if !nonisolated && onlyKnownAttributes { d.inferredMainActorViews.insert(s.name.text) }
                     if s.genericParameterClause != nil, s.genericWhereClause != nil {
                         d.genericWhereViews.insert(s.name.text)
                     }
@@ -1175,7 +1229,7 @@ public struct ThunkGenerator {
     /// not-yet-inferred `Entry`. Detected syntactically: a stored property typed `A.B` where `A`
     /// is a project type that declares no nested type/typealias `B` (so `B` is an INFERRED
     /// associated type) and `A`'s own declaration references `B` by its bare name. Such a view
-    /// renders native (no `dynamic`, no thunk) — the build never breaks.
+    /// renders native (no body route, no thunk) — the build never breaks.
     /// Source-text convenience for the build/fingerprint (`BuildPipeline.thunkIneligibleViewNames`):
     /// the same set `prepare` excludes, so a view prepare won't thunk is never auto-routed.
     public static func inferredAssociatedTypeRiskViews(sources: [String]) -> Set<String> {
@@ -1284,6 +1338,39 @@ public struct ThunkGenerator {
     /// the view's availability. Pure text over the rendered output: slot/token ids, the
     /// guest tree and every `bodyHash` are untouched, and a view with no `@available`
     /// attribute renders byte-identically.
+    static func applyAvailability(_ text: String, _ availability: [String: [String]],
+                                  inferredMainActor: Set<String>) -> String {
+        applyAvailability(applyInferredMainActor(text, inferredMainActor), availability)
+    }
+
+    /// Drop the explicit `@MainActor` from generated helper METHODS (`    @MainActor func __patch…`)
+    /// inside `extension X {` for views whose isolation is already inferred `@MainActor` from
+    /// their `struct X: View` declaration. The isolation is identical, but an EXPLICIT attribute
+    /// makes Swift 5 mode (minimal concurrency checking) diagnose the developer's copied slot /
+    /// effect code as if it had adopted concurrency — `main actor-isolated property 'chat' can
+    /// not be referenced from a Sendable closure` appears ONLY in the generated copy (real apps:
+    /// OpenAIWrapper, PlantWatering), which breaks a warnings-as-errors build. Views conformed
+    /// via `extension X: View` (nothing inferred) keep the explicit attribute; the body
+    /// replacement getter is never touched. Pure text over fingerprint-stripped output.
+    static func applyInferredMainActor(_ text: String, _ views: Set<String>) -> String {
+        guard !views.isEmpty, !text.isEmpty, text.contains("@MainActor func __patch") else { return text }
+        var current: String?
+        var changed = false
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map { raw -> String in
+            let line = String(raw)
+            if line.hasPrefix("extension "), line.hasSuffix(" {") {
+                current = String(line.dropFirst("extension ".count).dropLast(" {".count))
+            } else if line == "}" {
+                current = nil
+            } else if let c = current, views.contains(c), line.hasPrefix("    @MainActor func __patch") {
+                changed = true
+                return "    " + line.dropFirst("    @MainActor ".count)
+            }
+            return line
+        }
+        return changed ? lines.joined(separator: "\n") : text
+    }
+
     static func applyAvailability(_ text: String, _ availability: [String: [String]]) -> String {
         guard !availability.isEmpty, !text.isEmpty else { return text }
         var changed = false
@@ -1501,46 +1588,10 @@ public struct ThunkGenerator {
         return noGenerics
     }
 
-    // MARK: - Precise `dynamic` insertion
-
-    /// Insert "dynamic " at each given UTF-8 offset (the position of a `var`
-    /// keyword). Offsets are sorted DESCENDING so earlier ones stay valid as we
-    /// splice from the end backward.
-    static func insertDynamic(into source: String, atUTF8Offsets offsets: [Int]) -> String {
-        var bytes = Array(source.utf8)
-        let token = Array("dynamic ".utf8)
-        for off in offsets.sorted(by: >) {
-            guard off >= 0, off <= bytes.count else { continue }
-            bytes.insert(contentsOf: token, at: off)
-        }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
-    /// Insert `dynamic ` at `insertAt` offsets and delete the `removeRanges` byte ranges in one
-    /// pass (descending position, so earlier offsets stay valid).
-    static func applyDynamicEdits(to source: String, insertAt: [Int], removeRanges: [Range<Int>]) -> String {
-        enum Edit { case insert(Int), remove(Range<Int>) }
-        var edits: [(pos: Int, edit: Edit)] = insertAt.map { ($0, .insert($0)) }
-        edits += removeRanges.map { ($0.lowerBound, .remove($0)) }
-        var bytes = Array(source.utf8)
-        let token = Array("dynamic ".utf8)
-        for e in edits.sorted(by: { $0.pos > $1.pos }) {
-            switch e.edit {
-            case .insert(let off):
-                guard off >= 0, off <= bytes.count else { continue }
-                bytes.insert(contentsOf: token, at: off)
-            case .remove(let r):
-                guard r.lowerBound >= 0, r.upperBound <= bytes.count else { continue }
-                bytes.removeSubrange(r)
-            }
-        }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
     // MARK: - Per-view build-safety validation
 
     /// Validate that ONE view's generated thunk is BUILD-SAFE — the per-view isolation gate.
-    /// Renders the view's full thunk (the `@_dynamicReplacement` body-replacement + its
+    /// Renders the view's full thunk (the body-route method + its
     /// `__patchSlots()`/`__patchTokens()`/`__patchRowSlots()` helpers — the half that embeds
     /// the slot `AnyView(<source>)` and token `.string(<source>)`/`.color(<source>)` sources
     /// where a corrupt capture would live) and PARSES it. A thunk that does NOT parse (a
@@ -1611,10 +1662,10 @@ public struct ThunkGenerator {
         // this generated thunk. To regenerate from scratch, delete this file and
         // run `patchcli prepare`.
         // =========================================================================
-        // One `@_dynamicReplacement(for: body)` per SwiftUI View in this target. Each
-        // thunk routes the view's body through the Patch OTA renderer when a patch is
-        // active, and falls through to the original compiled `body` otherwise. This is
-        // what makes view bodies patchable over-the-air with no changes to the views.
+        // One `__patchRoute` body-route method per SwiftUI View in this target. Each
+        // renders the view's body through the Patch OTA renderer when a patch is active,
+        // and the original compiled body content otherwise. This is what makes view
+        // bodies patchable over-the-air with no changes to the views.
         //
         // For MIXED views (bodies that are only partly lowerable), each thunk also
         // exposes `__patchSlots()` — native closures that render the view's
@@ -1632,8 +1683,8 @@ public struct ThunkGenerator {
         // compiled-in app code (an OTA patch can re-select among these enumerated tokens
         // but can't invent a new native one — the App-Store wall).
         //
-        // Regenerated wholesale on every `patchcli prepare`. Safe to delete — running
-        // `patchcli prepare` recreates it (and re-inserts the `dynamic` keywords).
+        // Regenerated wholesale on every `patchcli prepare`. Safe to delete — views then
+        // render natively until `patchcli prepare` recreates it.
 
         #if canImport(SwiftUI)
         import SwiftUI
@@ -1643,7 +1694,7 @@ public struct ThunkGenerator {
 
         """
         for imp in extraImports {
-            out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
+            out += Self.guardedImport(imp)
         }
         out += Self.literalArgHelperDecl
 
@@ -1660,7 +1711,7 @@ public struct ThunkGenerator {
         return out
     }
 
-    /// Render ONE view's `@_dynamicReplacement(for: body)` extension + its
+    /// Render ONE view's body-route extension + its
     /// `__patchSlots()`/`__patchTokens()` helpers. The body is IDENTICAL regardless of
     /// where the extension is placed — `self`-relative member names resolve in the
     /// view's own context. In SAME-FILE placement (the extension lives in the view's own
@@ -1675,7 +1726,7 @@ public struct ThunkGenerator {
                                 effectSlots: [BodyLowering.EffectSlot] = [],
                                 callbackSlots: [BodyLowering.CallbackSlot] = [],
                                 baselineHash: String? = nil) -> String {
-        // The full thunk = the `@_dynamicReplacement` body-replacement extension +
+        // The full thunk = the body-route method extension +
         // the `__patchSlots()`/`__patchTokens()`/`__patchRowSlots()` helper-methods
         // extension. The two are independent extensions (Swift allows any number per
         // type), which is what lets the HYBRID placement split them: the replacement
@@ -1690,12 +1741,20 @@ public struct ThunkGenerator {
                                      callbackSlots: callbackSlots)
     }
 
-    /// The `@_dynamicReplacement(for: body)` body-replacement extension for ONE view.
-    /// It reads NO private member — it forwards `self` and references the view's
-    /// `__patchSlots()`/`__patchTokens()`/`__patchRowSlots()` methods (which are
-    /// `internal`, so callable cross-file within the module). That's why this half can
-    /// always be emitted into the SEPARATE generated file even for a view whose helper
-    /// methods must stay same-file (HYBRID factoring — minimal in-file footprint).
+    /// The body-ROUTE extension for ONE view: the concrete `__patchRoute(_:)` member its
+    /// routed body (`var body: some View { __patchRoute { … } }`) calls. Overload resolution
+    /// prefers this member over the file's `fileprivate extension View` native fallback. It
+    /// reads NO private member — it forwards `self` and references the view's
+    /// `__patchSlots()`/`__patchTokens()`/`__patchRowSlots()` methods (which are `internal`,
+    /// so callable cross-file within the module). That's why this half can always be emitted
+    /// into the SEPARATE generated file even for a view whose helper methods must stay
+    /// same-file (HYBRID factoring — minimal in-file footprint).
+    ///
+    /// A plain (non-`dynamic`) generic method with a `@ViewBuilder` `if let`: the native path is
+    /// `_ConditionalContent<AnyView, NativeBody>` with the body's concrete type, and it compiles
+    /// + links + runs correctly in every optimization mode — unlike the opaque-result
+    /// `@_dynamicReplacement(for: body)` prepare used to emit (see `BodyRouting.swift`).
+    /// `internal`, never `private`: the fallback it must out-rank is file-private.
     static func renderReplacementExtension(name: String, baselineHash: String? = nil) -> String {
         // NATIVE-FAST-PATH: bake the view's body content hash as `baselineHash:`. The SDK
         // compares it to the active module's manifest `bodyHash`; an EQUAL hash means this
@@ -1704,11 +1763,11 @@ public struct ThunkGenerator {
         // `nil` (a view we couldn't hash) omits the argument → the OLD always-route behavior
         // (fail-safe: the view runs WASM, never a false native that drops a real patch).
         let baselineArg = baselineHash.map { " baselineHash: \"\($0)\"," } ?? ""
+        let n = Self.routeNativeTypeParam, p = Self.routeNativeParam
         return """
         extension \(name) {
-            @_dynamicReplacement(for: body)
             @MainActor @ViewBuilder
-            var \(Self.replacementPropertyName): some View {
+            func \(Self.routeMethodName)<\(n): View>(@ViewBuilder _ \(p): () -> \(n)) -> some View {
                 if let __patched = Patch.shared.thunkBody(
                     typeName: "\(name)",\(baselineArg) instance: self,
                     slots: { self.__patchSlots() }, tokens: { self.__patchTokens() },
@@ -1718,7 +1777,7 @@ public struct ThunkGenerator {
                     callbackSlots: { self.__patchCallbackSlots() }) {
                     __patched
                 } else {
-                    body
+                    \(p)()
                 }
             }
         }
@@ -2140,7 +2199,7 @@ public struct ThunkGenerator {
     // MARK: - Same-file generated block
 
     /// Render the SAME-FILE generated block appended to ONE view file: a BEGIN/END-marked
-    /// region carrying the `@_dynamicReplacement(for: body)` extensions for the views
+    /// region carrying the body-route extensions for the views
     /// DECLARED in that file. The block is `#if canImport(SwiftUI)`-guarded and self-
     /// contained (its own imports), and is regenerated wholesale (see `stripSameFileBlock`)
     /// so re-running `patchcli prepare` never duplicates it. Living in the view's own file
@@ -2157,9 +2216,9 @@ public struct ThunkGenerator {
         var out = Self.sameFileBeginMarker + "\n"
         out += Self.doNotEditBanner + "\n"
         out += """
-        // One `@_dynamicReplacement(for: body)` per SwiftUI View DECLARED in this file.
-        // Each thunk routes the view's body through the Patch OTA renderer when a patch is
-        // active, falling through to the original compiled `body` otherwise — so view
+        // One `__patchRoute` body-route method per SwiftUI View DECLARED in this file.
+        // Each renders the view's body through the Patch OTA renderer when a patch is
+        // active, and the original compiled body content otherwise — so view
         // bodies are patchable over-the-air with no changes to the views. It also exposes
         // `__patchSlots()` (native renderers for non-lowerable leaves) and `__patchTokens()`
         // (natively-resolved design-system token values). Generated in THIS file (not a
@@ -2175,7 +2234,7 @@ public struct ThunkGenerator {
 
         """
         for imp in extraImports {
-            out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
+            out += Self.guardedImport(imp)
         }
         out += Self.literalArgHelperDecl
         for name in viewNames {
@@ -2218,77 +2277,6 @@ public struct ThunkGenerator {
         let tail = String(source[endLowerBound..<source.endIndex])
         let joined = tail.isEmpty ? head + "\n" : head + "\n" + tail
         return joined
-    }
-}
-
-// MARK: - Body collector
-
-private final class BodyCollector: SyntaxVisitor {
-    let viewNames: Set<String>
-    private var typeStack: [String] = []
-    /// Depth of enclosing `#if` blocks: a body inside one is config-dependent, so
-    /// we never touch it (a thunk referencing it could fail in another config).
-    private var ifConfigDepth = 0
-    /// (offset of the `var` keyword, enclosing type name, already `dynamic`?).
-    private(set) var hits: [(offset: Int, type: String, alreadyDynamic: Bool)] = []
-    /// Byte range of each hit's `dynamic` modifier INCLUDING its trailing trivia (so removing
-    /// it turns `dynamic var body` back into `var body`).
-    private(set) var dynamicModifierRanges: [Range<Int>] = []
-
-    init(viewNames: Set<String>) {
-        self.viewNames = viewNames
-        super.init(viewMode: .sourceAccurate)
-    }
-
-    override func visit(_ node: IfConfigDeclSyntax) -> SyntaxVisitorContinueKind {
-        ifConfigDepth += 1; return .visitChildren
-    }
-    override func visitPost(_ node: IfConfigDeclSyntax) { ifConfigDepth -= 1 }
-
-    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.name.text); return .visitChildren
-    }
-    override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast() }
-
-    override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(ThunkGenerator.baseTypeName(node.extendedType)); return .visitChildren
-    }
-    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
-
-    // Track other type containers so a body's nearest enclosing type is correct
-    // (a View struct nested in an enum, etc.) — only the LAST element is consulted.
-    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.name.text); return .visitChildren
-    }
-    override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast() }
-    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.name.text); return .visitChildren
-    }
-    override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast() }
-    override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
-        typeStack.append(node.name.text); return .visitChildren
-    }
-    override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
-
-    override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
-        guard ifConfigDepth == 0, let type = typeStack.last, viewNames.contains(type),
-              Self.isBodySomeView(node) else { return .visitChildren }
-        let offset = node.bindingSpecifier.positionAfterSkippingLeadingTrivia.utf8Offset
-        let alreadyDynamic = node.modifiers.contains { $0.name.tokenKind == .keyword(.dynamic) }
-        hits.append((offset, type, alreadyDynamic))
-        if let dyn = node.modifiers.first(where: { $0.name.tokenKind == .keyword(.dynamic) }) {
-            dynamicModifierRanges.append(dyn.positionAfterSkippingLeadingTrivia.utf8Offset..<dyn.endPosition.utf8Offset)
-        }
-        return .visitChildren
-    }
-
-    /// `var body: some View` (and ONLY `some View` — never `some Scene` /
-    /// `some Commands` / `some ToolbarContent` / `some WidgetConfiguration`).
-    static func isBodySomeView(_ node: VariableDeclSyntax) -> Bool {
-        guard node.bindings.count == 1, let b = node.bindings.first,
-              b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == "body",
-              let t = b.typeAnnotation?.type else { return false }
-        return t.trimmedDescription == "some View"
     }
 }
 

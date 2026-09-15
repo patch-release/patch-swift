@@ -63,7 +63,7 @@ final class PreparedOutputCompileTests: XCTestCase {
         try SwiftUIThunkCompileTests.hostStub.write(to: stub, atomically: true, encoding: .utf8)
         paths.append(stub.path)
         let args = ["-typecheck", "-sdk", sdk, "-target", "arm64-apple-ios17.0-simulator"]
-            + extraFlags + paths.sorted()
+            + extraFlags + paths.sorted() + SwiftUIThunkCompileTests.envTypecheckFlags
         let log = SwiftUIThunkCompileTests.run("/usr/bin/swiftc", args, captureStderr: true) ?? ""
         return Outcome(compiled: !log.contains("error:"), log: log, files: files, result: result)
     }

@@ -103,7 +103,7 @@ public struct BuildPipeline {
     /// [R2-#95] View names `patchcli prepare`'s `ThunkGenerator` will NOT thunk because a
     /// non-View struct shares the name (2+ top-level struct decls of that name) OR it's a
     /// generic view carrying a `where` clause. Such a view renders NATIVE on device (no
-    /// `@_dynamicReplacement` thunk), even though the engine's collision check (which counts
+    /// body-route thunk), even though the engine's collision check (which counts
     /// only View-conforming lowered types) would otherwise ship + mark it `thunkSafe`. The
     /// build/fingerprint must not auto-route a view prepare can't thunk. Computed from the
     /// shared lowering sources (`crossFileLoweringSources` texts).
@@ -1652,7 +1652,7 @@ public struct BuildPipeline {
 
         // (1) Scan source for View structs + lower each body.
         // SAME-FILE THUNK PLACEMENT (the default): `patchcli prepare` now emits each
-        // view's `@_dynamicReplacement(for: body)` thunk + its `__patchSlots()`/
+        // view's body-route thunk + its `__patchSlots()`/
         // `__patchTokens()` helpers as an extension in the SAME FILE as the view, so the
         // thunk can reach the view's own `private`/`fileprivate` members. That lets the
         // engine host-resolve a read of a private member (slot / token) — the unblock for
@@ -1757,7 +1757,7 @@ public struct BuildPipeline {
                     demoteReasons[lowered.viewName] = demoteReasons[lowered.viewName]
                         ?? "another top-level struct shares the name `\(lowered.viewName)` (or it's a "
                         + "generic view with a `where` clause), so `patchcli prepare` generates no "
-                        + "@_dynamicReplacement thunk for it — it renders natively, not OTA-patchable"
+                        + "body-route thunk for it — it renders natively, not OTA-patchable"
                     log("EXCLUDE \(lowered.viewName): not thunk-eligible (duplicate top-level struct "
                         + "name / generic-where) — prepare won't thunk it, so it renders native")
                     continue
@@ -3561,7 +3561,7 @@ public struct BuildPipeline {
             // WASM. Mirror the analysis-pass exclusion (SwiftParserEngine.isTestFile).
             if SwiftParserEngine.isTestFile(url) { continue }
             // Never ingest `patchcli prepare`'s OWN generated thunk file: it imports
-            // PatchSDK/PatchSwiftUI and emits `@_dynamicReplacement` extensions that
+            // PatchSDK/PatchSwiftUI and emits body-route extensions that
             // compile into the NATIVE app, never the WASM module. Pulling it into the
             // closure would leak those host-only symbols into a guest compile unit. (It
             // declares no View structs, so the lowering pass already ignores it; this

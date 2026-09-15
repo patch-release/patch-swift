@@ -109,18 +109,23 @@ public struct UIKitThunkGenerator {
     /// closure reference a third-party custom-view type used in a cell.
     static func collectImports(_ sources: [SourceFile]) -> [String] {
         var seen = Set<String>(["UIKit", "PatchSDK", "PatchUIKit", "Foundation"])
+        var preconcurrent = Set<String>()
         var out: [String] = []
         for src in sources {
             let tree = Parser.parse(source: src.text)
             for stmt in tree.statements {
-                guard let imp = stmt.item.as(ImportDeclSyntax.self),
-                      imp.attributes.isEmpty, imp.importKindSpecifier == nil else { continue }
+                guard let imp = stmt.item.as(ImportDeclSyntax.self), imp.importKindSpecifier == nil else { continue }
+                // `@preconcurrency` imports are kept as such (see `ThunkGenerator.collectImports`).
+                let preconcurrency = ThunkGenerator.isPreconcurrencyOnly(imp.attributes)
+                guard imp.attributes.isEmpty || preconcurrency else { continue }
                 let path = imp.path.trimmedDescription
-                guard !path.isEmpty, !path.contains("."), seen.insert(path).inserted else { continue }
+                guard !path.isEmpty, !path.contains(".") else { continue }
+                if preconcurrency { preconcurrent.insert(path) }
+                guard seen.insert(path).inserted else { continue }
                 out.append(path)
             }
         }
-        return out.sorted()
+        return out.sorted().map { preconcurrent.contains($0) ? ThunkGenerator.preconcurrencyPrefix + $0 : $0 }
     }
 
     // MARK: - Precise `dynamic` insertion
@@ -177,7 +182,7 @@ public struct UIKitThunkGenerator {
 
         """
         for imp in extraImports {
-            out += "#if canImport(\(imp))\nimport \(imp)\n#endif\n"
+            out += ThunkGenerator.guardedImport(imp)
         }
 
         for cell in cells {

@@ -67,7 +67,7 @@ you are patching is fingerprint-stable — that is the entire point.
 **Editing string literals inside a slotted view.** Since CLI 1.6.28 string
 literals are lifted out of native slot source and ride the patch instead.
 
-**What `prepare` adds to your files.** The `dynamic` keyword on `var body`, the `PATCH-ACCESS` forwarder block and any `PATCH-THUNKS` block are stripped before hashing, so preparing a project, or migrating from the older in-file layout, does not move the fingerprint. `patchcli unprepare` *does* change the source the hash sees; re-register if you prepare again after it.
+**What `prepare` adds to your files.** The body route (`__patchRoute { … }`, and the `dynamic` keyword older CLIs inserted on `var body`), the `PATCH-ROUTE` fallback block, the `PATCH-ACCESS` forwarder block and any `PATCH-THUNKS` block are stripped before hashing, so preparing a project, or migrating from the older in-file layout, does not move the fingerprint. `patchcli unprepare` *does* change the source the hash sees; re-register if you prepare again after it.
 
 **Comments, whitespace, and formatting** in patchable code.
 

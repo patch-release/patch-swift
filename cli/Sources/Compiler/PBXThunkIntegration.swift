@@ -39,13 +39,14 @@ enum PBXThunkIntegration {
 
     // MARK: - xcodeproj wiring
 
-    static func wire(projectURL: URL, target: String, fileURL: URL, fm: FileManager) throws -> Outcome {
+    static func wire(projectURL: URL, target: String, fileURL: URL, fm: FileManager,
+                     product: String = productName) throws -> Outcome {
         let pbxprojURL = projectURL.appendingPathComponent("project.pbxproj")
         guard let original = try? String(contentsOf: pbxprojURL, encoding: .utf8) else {
             throw Err.unsupported("Could not read \(pbxprojURL.path).")
         }
         let (outcome, edited) = try transform(
-            pbxproj: original, projectURL: projectURL, target: target, fileURL: fileURL, fm: fm)
+            pbxproj: original, projectURL: projectURL, target: target, fileURL: fileURL, fm: fm, product: product)
         guard outcome == .added else { return outcome }
 
         // backup → write → plutil-lint verify → restore-on-fail (mirrors
@@ -73,7 +74,8 @@ enum PBXThunkIntegration {
     /// lives inside a synchronized root group's folder (a disk question); the
     /// rest is a string transform so it stays unit-testable.
     static func transform(
-        pbxproj: String, projectURL: URL, target: String, fileURL: URL, fm: FileManager
+        pbxproj: String, projectURL: URL, target: String, fileURL: URL, fm: FileManager,
+        product: String = productName
     ) throws -> (Outcome, String) {
         guard pbxproj.hasPrefix("// !$*UTF8*$!") else {
             throw Err.unsupported(
@@ -106,10 +108,10 @@ enum PBXThunkIntegration {
         }
 
         // ---- 2. The PatchSwiftUI product link ----------------------------
-        if productAlreadyLinked(text, targetName: target) {
+        if productAlreadyLinked(text, targetName: target, product: product) {
             // Already linked to this target.
         } else {
-            text = try addProductLink(to: text, target: target)
+            text = try addProductLink(to: text, target: target, product: product)
             didChange = true
         }
 
@@ -290,7 +292,7 @@ enum PBXThunkIntegration {
     /// True when `targetName` already lists a packageProductDependency whose
     /// XCSwiftPackageProductDependency is the PatchSwiftUI product (regardless
     /// of which patch-swift reference it points at). Idempotency guard.
-    static func productAlreadyLinked(_ text: String, targetName: String) -> Bool {
+    static func productAlreadyLinked(_ text: String, targetName: String, product: String = productName) -> Bool {
         guard let targetRange = XcodeProjectEditor.nativeTargetBlockRange(in: text, targetName: targetName) else {
             return false
         }
@@ -299,7 +301,7 @@ enum PBXThunkIntegration {
         for id in deps {
             guard let obj = objectBlock(id: id, in: text),
                   obj.contains("isa = XCSwiftPackageProductDependency;") else { continue }
-            if let prod = quotedOrBareValue(of: "productName", in: obj), prod == productName {
+            if let prod = quotedOrBareValue(of: "productName", in: obj), prod == product {
                 return true
             }
         }
@@ -313,7 +315,7 @@ enum PBXThunkIntegration {
     /// references the product (NO fileRef — a productRef build file), then wire
     /// the product into the target's packageProductDependencies and Frameworks
     /// phase.
-    static func addProductLink(to text: String, target: String) throws -> String {
+    static func addProductLink(to text: String, target: String, product productName: String = productName) throws -> String {
         guard let targetRange = XcodeProjectEditor.nativeTargetBlockRange(in: text, targetName: target) else {
             throw Err.unsupported("Could not find target `\(target)`.")
         }
@@ -368,7 +370,7 @@ enum PBXThunkIntegration {
         out = try insertObject(buildEntry, intoSection: "PBXBuildFile", of: out)
 
         // 4. target packageProductDependencies (re-locate — offsets shifted).
-        out = try addTargetProductDependency(prodID: prodID, targetName: target, to: out)
+        out = try addTargetProductDependency(prodID: prodID, targetName: target, to: out, product: productName)
 
         // 5. Frameworks phase files list.
         out = try addBuildFileToPhase(
@@ -426,7 +428,8 @@ enum PBXThunkIntegration {
     /// Append `prodID` to the target's `packageProductDependencies` list,
     /// creating it after the `name = …;` line when absent. (XcodeProjectEditor's
     /// equivalent hard-codes the PatchSDK comment, so we carry our own.)
-    static func addTargetProductDependency(prodID: String, targetName: String, to text: String) throws -> String {
+    static func addTargetProductDependency(prodID: String, targetName: String, to text: String,
+                                           product productName: String = productName) throws -> String {
         guard let targetRange = XcodeProjectEditor.nativeTargetBlockRange(in: text, targetName: targetName) else {
             throw Err.unsupported("Could not re-locate target `\(targetName)` after editing.")
         }
@@ -611,12 +614,13 @@ enum PBXThunkIntegration {
 
     // MARK: - Package.swift wiring
 
-    static func wirePackage(packageDir: URL, target: String, fm: FileManager) throws -> Outcome {
+    static func wirePackage(packageDir: URL, target: String, fm: FileManager,
+                            product: String = productName) throws -> Outcome {
         let manifestURL = packageDir.appendingPathComponent("Package.swift")
         guard let original = try? String(contentsOf: manifestURL, encoding: .utf8) else {
             throw Err.unsupported("Could not read \(manifestURL.path).")
         }
-        let (outcome, edited) = try addProduct(to: original, targetName: target)
+        let (outcome, edited) = try addProduct(to: original, targetName: target, product: product)
         guard outcome == .added else { return outcome }
 
         let backupURL = manifestURL.appendingPathExtension(
@@ -635,15 +639,19 @@ enum PBXThunkIntegration {
         return .added
     }
 
-    static let productLine =
-        ".product(name: \"\(productName)\", package: \"\(packageName)\")"
+    static let productLine = productLine(for: productName)
+    static func productLine(for product: String) -> String {
+        ".product(name: \"\(product)\", package: \"\(packageName)\")"
+    }
     static let packageLine =
         ".package(url: \"\(packageURL)\", from: \"\(minimumVersion)\")"
 
     /// Pure transform: add `.product(name: "PatchSwiftUI", package: "patch-swift")`
     /// to `targetName`'s dependencies (and the package-level `.package(...)` line
     /// if patch-swift isn't already a dependency). Idempotent.
-    static func addProduct(to manifest: String, targetName: String) throws -> (Outcome, String) {
+    static func addProduct(to manifest: String, targetName: String,
+                           product: String = productName) throws -> (Outcome, String) {
+        let productLine = productLine(for: product)
         // Already wired? The product line is what we ensure; if it's present the
         // target already depends on PatchSwiftUI.
         if manifest.contains(productLine) {
@@ -651,7 +659,7 @@ enum PBXThunkIntegration {
         }
 
         // 1. The product on the target.
-        var text = try addProductToTarget(in: manifest, targetName: targetName)
+        var text = try addProductToTarget(in: manifest, targetName: targetName, product: product)
 
         // 2. The package dependency, only if patch-swift isn't already declared
         //    (a prior PatchSDK add may have added it).
@@ -663,7 +671,9 @@ enum PBXThunkIntegration {
 
     /// Append `.product(name: "PatchSwiftUI", …)` to the target's dependencies,
     /// reusing PackageManifestEditor's bracket-/string-/comment-aware scanners.
-    static func addProductToTarget(in manifest: String, targetName: String) throws -> String {
+    static func addProductToTarget(in manifest: String, targetName: String,
+                                   product: String = productName) throws -> String {
+        let productLine = productLine(for: product)
         guard let packageCall = PackageManifestEditor.argumentRange(ofCall: "Package", in: manifest) else {
             throw Err.unsupported(
                 "Could not find the Package(...) initializer in Package.swift — add the product manually.")

@@ -4,13 +4,15 @@
 // files newly added to `.Patch.yml` `exclude:`). Removes EXACTLY what `patchcli prepare` / `init`
 // added, and nothing else:
 //
-//   • SOURCES — the PATCH-ACCESS forwarder block and any PATCH-THUNKS block (exact markers, must be
-//     terminated), and the `dynamic` keyword prepare inserted on `var body: some View`. Which `dynamic`
-//     is prepare's comes from the prepare RECORD (`Patch/Generated/prepare-record.json`, written on
-//     every prepare). With no record (e.g. a fresh clone — the folder is gitignored) the documented
-//     fallback is "every `dynamic var body: some View` of a View type in a file prepare touched"
-//     (a file carrying a Patch block, or a view Patch/Generated/ replaces) — reported as such;
-//     `--keep-dynamic` never touches `dynamic`.
+//   • SOURCES — the PATCH-ROUTE / PATCH-ACCESS / PATCH-THUNKS blocks (exact markers, must be
+//     terminated), and prepare's body edit on `var body: some View`: the `__patchRoute { … }`
+//     wrapper (always prepare's — removed wherever found) and, for a project prepared by an older CLI,
+//     the `dynamic` keyword. Which `dynamic` is prepare's comes from the prepare RECORD
+//     (`Patch/Generated/prepare-record.json`, written on every prepare). With no record (e.g. a fresh
+//     clone — the folder is gitignored) the documented fallback is "every `dynamic var body: some View`
+//     of a View type in a file prepare touched" (a file carrying a Patch block or a routed body, or a
+//     view Patch/Generated/ replaces) — reported as such; `--keep-dynamic` leaves body edits alone
+//     (a kept routed body keeps its PATCH-ROUTE fallback block, so the file still builds).
 //   • FILES — every `Patch/Generated/` folder, `PatchUIKitThunks.generated.swift`, and the
 //     `.patch-backup` copies prepare/init leave beside edited files.
 //   • PROJECT — pbxproj references to the generated files + the PatchSwiftUI/PatchUIKit product link
@@ -50,7 +52,10 @@ public enum PatchUninstaller {
                                     droppingTypes: Set<String> = [], fm: FileManager = .default) {
         let url = genDir.appendingPathComponent(recordFileName)
         let existing = try? JSONDecoder().decode(Record.self, from: Data(contentsOf: url))
-        guard !inserted.isEmpty || (existing != nil && !droppingTypes.isEmpty) else { return }
+        // Always leave a record once prepare has run (even an empty one): body routing inserts no
+        // `dynamic`, and an EMPTY record tells `unprepare` exactly that — so it never falls back to
+        // stripping every `dynamic var body` (possibly the developer's own).
+        guard !inserted.isEmpty || existing == nil || !droppingTypes.isEmpty else { return }
         var rec = existing ?? Record()
         for (file, types) in inserted {
             let rel = relativePath(file, root: root)
@@ -121,22 +126,38 @@ public enum PatchUninstaller {
     /// Strip every Patch block and (unless `keepDynamic`) prepare's `dynamic` from one source file.
     /// `dynamicTypes`: the recorded View types for this file; nil = no record → the fallback rule
     /// (all View bodies, but only when the file shows prepare evidence — `hasEvidence`).
+    ///
+    /// Prepare's body edit is the `__patchRoute { … }` wrapper (a legacy `dynamic` from an older
+    /// CLI is removed the same way). A wrapper is itself unambiguous evidence of prepare. A routed
+    /// body that stays (`keepDynamic`, or a view the record doesn't list) keeps a fresh PATCH-ROUTE
+    /// fallback block, so the file always still builds.
     public static func cleanSource(_ text: String, dynamicTypes: Set<String>?, hasEvidence: Bool,
                                    keepDynamic: Bool) -> SourceClean {
-        let blocks = [ThunkGenerator.sameFileBeginMarker, PatchAccessForwarding.beginMarker]
+        let thunkBlocks = [ThunkGenerator.sameFileBeginMarker, PatchAccessForwarding.beginMarker]
             .map { text.components(separatedBy: $0).count - 1 }.reduce(0, +)
+        let blocks = thunkBlocks + text.components(separatedBy: ThunkGenerator.routeFallbackBeginMarker).count - 1
         var out = blocks > 0 ? PatchAccessForwarding.stripAllGeneratedBlocks(from: text) : text
         var removed: [String] = []
         if !keepDynamic {
+            // Every route wrapper is prepare's (no developer writes `__patchRoute`), record or not.
+            let unrouted = ThunkGenerator.unrouteBodies(in: out, onlyTypes: nil, removingDynamic: false)
+            out = unrouted.text
+            removed = unrouted.types
+            // A `dynamic` is prepare's only per the record (or, without one, with the legacy
+            // evidence an older CLI left: a thunk block, or a view its generated file replaced).
             if let types = dynamicTypes {
                 if !types.isEmpty {
                     let r = PatchAccessForwarding.removeDynamic(from: out, onlyTypes: types)
-                    out = r.text; removed = r.types
+                    out = r.text; removed += r.types
                 }
-            } else if hasEvidence || blocks > 0 {
+            } else if hasEvidence || thunkBlocks > 0 {
                 let r = PatchAccessForwarding.removeDynamic(from: out, onlyTypes: nil)
-                out = r.text; removed = r.types
+                out = r.text; removed += r.types
             }
+            removed = Array(Set(removed)).sorted()
+        }
+        if ThunkGenerator.hasRoutedBody(out) {
+            out = ThunkGenerator.appendingRouteFallback(to: ThunkGenerator.stripRouteFallbackBlock(from: out))
         }
         return SourceClean(text: out, removedBlocks: blocks, removedDynamic: removed)
     }
@@ -203,7 +224,7 @@ public enum PatchUninstaller {
             if name == "Package.swift" || name.hasPrefix("Package@swift-") { continue }
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let hasBlock = text.contains(ThunkGenerator.sameFileBeginMarker) || text.contains(PatchAccessForwarding.beginMarker)
-            let hasDynamicBody = text.contains("dynamic var body")
+            let hasDynamicBody = text.contains("dynamic var body") || text.contains(ThunkGenerator.routeMethodName)
             let hasEntry = options.removeSDK && (text.contains("Patch.configure(") || text.contains("import PatchSDK"))
             let hasRegistrar = text.contains(HostBridgeProjectIntegrator.registrarInstallCall)
             guard hasBlock || hasDynamicBody || hasEntry || hasRegistrar else { continue }
@@ -217,7 +238,7 @@ public enum PatchUninstaller {
                 let c = cleanSource(updated, dynamicTypes: recorded, hasEvidence: evidence, keepDynamic: options.keepDynamic)
                 updated = c.text
                 if c.removedBlocks > 0 { parts.append("\(c.removedBlocks) generated block(s)") }
-                if !c.removedDynamic.isEmpty { parts.append("`dynamic` on \(c.removedDynamic.sorted().joined(separator: ", "))") }
+                if !c.removedDynamic.isEmpty { parts.append("body routing on \(c.removedDynamic.sorted().joined(separator: ", "))") }
                 if hasDynamicBody, c.removedDynamic.isEmpty, !options.keepDynamic, record != nil {
                     // Left alone deliberately: not recorded as inserted by prepare.
                 }

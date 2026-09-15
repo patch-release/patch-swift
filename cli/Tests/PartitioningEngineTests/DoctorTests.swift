@@ -351,12 +351,12 @@ final class DoctorTests: XCTestCase {
     }
 
     func testPrepareDoneIsPass() throws {
-        // A view whose body is `dynamic` AND a same-file thunk block marker present.
+        // A view whose body is routed AND a same-file thunk block marker present.
         let dir = try makeTempDir("prep-done")
         try write("""
         import SwiftUI
         struct MyView: View {
-            dynamic var body: some View { Text("hi") }
+            var body: some View { __patchRoute { Text("hi") } }
         }
 
         \(ThunkGenerator.sameFileBeginMarker)

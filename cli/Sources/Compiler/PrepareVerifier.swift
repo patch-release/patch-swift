@@ -13,7 +13,7 @@ import CodeGenerator
 /// type-check this expression in reasonable time"), an app type the syntax-only lowering can't
 /// see, a brand-new codegen bug. This verifier BUILDS the prepared project, attributes each
 /// `file:line:col: error:` to the view whose prepared code it lands in, keeps ONLY those views
-/// native (no `dynamic`, no thunk — their original source span restored), and rebuilds, looping
+/// native (no body route, no thunk — their original source span restored), and rebuilds, looping
 /// until the build is clean or nothing attributable is left.
 ///
 /// FAIL-SAFE BY CONSTRUCTION:
@@ -73,6 +73,60 @@ public enum PrepareVerifier {
         return out
     }
 
+    /// Message of the pseudo-diagnostics `parseCompilerCrashes` produces.
+    public static let compilerCrashMessage = "the Swift compiler crashed"
+
+    /// A compiler CRASH prints no `file:line:col: error:` — only a stack dump whose `While …`
+    /// frames name the declaration being processed (`… for getter for __patchedBody (at
+    /// /abs/PatchThunks.generated.swift:62:9)`). Each crash dump contributes ONE pseudo-diagnostic
+    /// at its INNERMOST (last-printed) source location, so a crash inside a prepared view's
+    /// generated code is attributed to that view like any other error. De-duplicated.
+    public static func parseCompilerCrashes(_ log: String) -> [Diagnostic] {
+        var out: [Diagnostic] = []
+        var seen = Set<Diagnostic>()
+        var inDump = false
+        var innermost: Diagnostic?
+        func flush() {
+            if let d = innermost, seen.insert(d).inserted { out.append(d) }
+            innermost = nil
+        }
+        for raw in log.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.contains("Stack dump:") {
+                flush()
+                inDump = true
+                continue
+            }
+            guard inDump else { continue }
+            let t = line.trimmingCharacters(in: .whitespaces)
+            // Frames are numbered (`3.\tWhile evaluating …`) with optional continuation lines
+            // (` for getter for x (at /p.swift:1:2)`); anything else ends the dump.
+            let isFrame = t.first?.isNumber == true || t.hasPrefix("for ") || t.hasPrefix("at ") || t.hasPrefix("(at ")
+            if isFrame {
+                if let d = swiftLocation(in: line) { innermost = d }
+            } else if !t.isEmpty {
+                flush()
+                inDump = false
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// The first `/abs/File.swift:12:5` in `line` → a crash pseudo-diagnostic.
+    static func swiftLocation(in line: String) -> Diagnostic? {
+        guard let dot = line.range(of: ".swift:") else { return nil }
+        guard let slash = line[..<dot.lowerBound].lastIndex(where: { $0 == " " || $0 == "(" || $0 == "\"" || $0 == "\t" }) else {
+            return nil
+        }
+        let path = String(line[line.index(after: slash)..<dot.lowerBound]) + ".swift"
+        guard path.hasPrefix("/") else { return nil }
+        let nums = line[dot.upperBound...].split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard let ln = nums.first.flatMap({ Int($0) }) else { return nil }
+        let col = nums.dropFirst().first.flatMap { Int($0.prefix { $0.isNumber }) } ?? 1
+        return Diagnostic(file: path, line: ln, column: col, message: compilerCrashMessage)
+    }
+
     // MARK: - Attribution (diagnostic → prepared view)
 
     public struct Attribution: Sendable {
@@ -119,11 +173,15 @@ public enum PrepareVerifier {
             var blocks: [(Int, Int)] = []
             var open: Int?
             for (i, l) in lines.enumerated() {
-                // Both in-file generated blocks: the compact PATCH-THUNKS block and the PATCH-ACCESS
-                // forwarder block (an error in a forwarder is attributed to its `extension <View>`).
-                if l.hasPrefix(ThunkGenerator.sameFileBeginMarker) || l.hasPrefix(PatchAccessForwarding.beginMarker) {
+                // Every in-file generated block: the compact PATCH-THUNKS block, the PATCH-ACCESS
+                // forwarder block (an error in a forwarder is attributed to its `extension <View>`) and
+                // the PATCH-ROUTE native fallback (`fileprivate extension View` — generated, but shared
+                // by the file's routed bodies, so never pinned on one view).
+                if l.hasPrefix(ThunkGenerator.sameFileBeginMarker) || l.hasPrefix(PatchAccessForwarding.beginMarker)
+                    || l.hasPrefix(ThunkGenerator.routeFallbackBeginMarker) {
                     open = i + 1
-                } else if l.hasPrefix(ThunkGenerator.sameFileEndMarker) || l.hasPrefix(PatchAccessForwarding.endMarker),
+                } else if l.hasPrefix(ThunkGenerator.sameFileEndMarker) || l.hasPrefix(PatchAccessForwarding.endMarker)
+                            || l.hasPrefix(ThunkGenerator.routeFallbackEndMarker),
                           let o = open {
                     blocks.append((o, i + 1)); open = nil
                 }
@@ -134,6 +192,12 @@ public enum PrepareVerifier {
             let collector = TypeDeclLineCollector(converter: converter)
             collector.walk(tree)
             decls = collector.decls
+        }
+
+        /// The line is Patch-GENERATED code (the generated thunk file, or an in-file PATCH-THUNKS /
+        /// PATCH-ACCESS block) — an error there can never be the developer's own.
+        func isGenerated(line: Int) -> Bool {
+            isGeneratedFile || blocks.contains { line >= $0.0 && line <= $0.1 }
         }
 
         func view(atLine line: Int, candidates: Set<String>) -> String? {
@@ -202,8 +266,11 @@ public enum PrepareVerifier {
     ///     per-project derived-data dir outside the project so rebuilds are incremental;
     ///   * a `Package.swift` → `swift build` (scratch path outside the project);
     ///   * otherwise nil (verification is skipped).
-    /// `scheme` defaults to the `.Patch.yml` target, else the project's name.
-    public static func detectBuild(root: URL, scheme: String?, fm: FileManager = .default) -> BuildInvocation? {
+    /// `scheme` defaults to the `.Patch.yml` target, else the project's name. `configuration` nil
+    /// builds the scheme's default (Debug); otherwise `-configuration <name>` for xcodebuild, or
+    /// `-c release` for SwiftPM when it is anything but Debug (SwiftPM knows only the two).
+    public static func detectBuild(root: URL, scheme: String?, configuration: String? = nil,
+                                   fm: FileManager = .default) -> BuildInvocation? {
         let entries = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
         let scratch = verifyScratchDirectory(for: root)
         let workspace = entries.filter { $0.hasSuffix(".xcworkspace") }.sorted().first
@@ -211,22 +278,108 @@ public enum PrepareVerifier {
         if let container = workspace ?? project {
             let stem = (container as NSString).deletingPathExtension
             let s = (scheme?.isEmpty == false ? scheme! : stem)
-            let args = [workspace != nil ? "-workspace" : "-project", container,
-                        "-scheme", s,
-                        "-destination", "generic/platform=iOS Simulator",
-                        "-derivedDataPath", scratch.appendingPathComponent("DerivedData").path,
-                        "build",
-                        "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO",
-                        "COMPILER_INDEX_STORE_ENABLE=NO"]
-            return BuildInvocation(executable: "/usr/bin/xcodebuild", arguments: args,
-                                   workingDirectory: root, label: "xcodebuild -scheme \(s)")
+            var args = [workspace != nil ? "-workspace" : "-project", container, "-scheme", s]
+            if let configuration { args += ["-configuration", configuration] }
+            args += ["-destination", "generic/platform=iOS Simulator",
+                     "-derivedDataPath", scratch.appendingPathComponent("DerivedData").path,
+                     "build",
+                     "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO",
+                     "COMPILER_INDEX_STORE_ENABLE=NO"]
+            return BuildInvocation(executable: "/usr/bin/xcodebuild", arguments: args, workingDirectory: root,
+                                   label: "xcodebuild -scheme \(s)" + (configuration.map { " -configuration \($0)" } ?? ""))
         }
         if entries.contains("Package.swift") {
+            let release = configuration.map { $0.lowercased() != "debug" } ?? false
             return BuildInvocation(executable: "/usr/bin/swift",
-                                   arguments: ["build", "--scratch-path", scratch.appendingPathComponent("spm").path],
-                                   workingDirectory: root, label: "swift build")
+                                   arguments: ["build", "--scratch-path", scratch.appendingPathComponent("spm").path]
+                                       + (release ? ["-c", "release"] : []),
+                                   workingDirectory: root, label: release ? "swift build -c release" : "swift build")
         }
         return nil
+    }
+
+    // MARK: - Which configurations to verify
+
+    /// What `--verify` builds. Debug proves the everyday build; the ARCHIVE configuration (usually
+    /// Release: `-O`, whole-module) is what ships — an optimizer-only compiler bug in generated code
+    /// breaks only that build, so verifying Debug alone can miss a break that stops an archive.
+    public enum ConfigurationPlan: String, Sendable, CaseIterable {
+        /// Debug only (one build).
+        case debug
+        /// The archive configuration only.
+        case release
+        /// Debug, then the archive configuration.
+        case all
+
+        /// `debug` / `release` (or `archive`) / `all` (or `both`).
+        public init?(argument: String) {
+            switch argument.lowercased() {
+            case "debug": self = .debug
+            case "release", "archive": self = .release
+            case "all", "both": self = .all
+            default: return nil
+            }
+        }
+    }
+
+    /// The configuration the project ARCHIVES with: the `ArchiveAction buildConfiguration` of the
+    /// shared (else per-user) scheme named `scheme` — else the scheme named like the container, else
+    /// the only scheme — in an `.xcworkspace`/`.xcodeproj` at `root`. "Release" when no scheme file
+    /// names one (Xcode's default) and for a Package.swift project.
+    public static func archiveConfiguration(root: URL, scheme: String?, fm: FileManager = .default) -> String {
+        let entries = ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).sorted()
+        let containers = entries.filter { $0.hasSuffix(".xcworkspace") } + entries.filter { $0.hasSuffix(".xcodeproj") }
+        var schemeDirs: [URL] = []
+        for c in containers {
+            let base = root.appendingPathComponent(c)
+            schemeDirs.append(base.appendingPathComponent("xcshareddata/xcschemes"))
+            let userData = base.appendingPathComponent("xcuserdata")
+            for u in ((try? fm.contentsOfDirectory(atPath: userData.path)) ?? []).sorted() {
+                schemeDirs.append(userData.appendingPathComponent(u).appendingPathComponent("xcschemes"))
+            }
+        }
+        let schemes = schemeDirs.flatMap { dir in
+            ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".xcscheme") }.sorted()
+                .map { dir.appendingPathComponent($0) }
+        }
+        func named(_ n: String?) -> [URL] {
+            guard let n, !n.isEmpty else { return [] }
+            return schemes.filter { $0.deletingPathExtension().lastPathComponent == n }
+        }
+        let stem = containers.first.map { ($0 as NSString).deletingPathExtension }
+        for url in named(scheme) + named(stem) + (schemes.count == 1 ? schemes : []) {
+            if let xml = try? String(contentsOf: url, encoding: .utf8), let config = archiveConfiguration(schemeXML: xml) {
+                return config
+            }
+        }
+        return "Release"
+    }
+
+    /// `<ArchiveAction buildConfiguration = "AppStore" …>` → "AppStore".
+    public static func archiveConfiguration(schemeXML: String) -> String? {
+        guard let tag = schemeXML.range(of: "<ArchiveAction") else { return nil }
+        let end = schemeXML.range(of: ">", range: tag.upperBound..<schemeXML.endIndex)?.lowerBound ?? schemeXML.endIndex
+        let attrs = schemeXML[tag.upperBound..<end]
+        guard let key = attrs.range(of: "buildConfiguration"),
+              let q1 = attrs.range(of: "\"", range: key.upperBound..<attrs.endIndex),
+              let q2 = attrs.range(of: "\"", range: q1.upperBound..<attrs.endIndex) else { return nil }
+        let value = attrs[q1.upperBound..<q2.lowerBound].trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : value
+    }
+
+    /// The builds `plan` verifies, in order: Debug first (cheaper, and it catches most breaks), then
+    /// the archive configuration. A project that archives with Debug is built once.
+    public static func verificationBuilds(root: URL, scheme: String?, plan: ConfigurationPlan,
+                                          fm: FileManager = .default) -> [BuildInvocation] {
+        let archive = archiveConfiguration(root: root, scheme: scheme, fm: fm)
+        let archiveIsDebug = archive.lowercased() == "debug"
+        let configs: [String?]
+        switch plan {
+        case .debug: configs = [nil]
+        case .release: configs = [archiveIsDebug ? nil : archive]
+        case .all: configs = archiveIsDebug ? [nil] : [nil, archive]
+        }
+        return configs.compactMap { detectBuild(root: root, scheme: scheme, configuration: $0, fm: fm) }
     }
 
     /// A stable per-project scratch dir (outside the project tree, so nothing Patch-owned lands in
@@ -309,7 +462,69 @@ public enum PrepareVerifier {
         /// diagnostics, iteration cap, …).
         public var inconclusive: String?
         public var builds = 0
+        /// Set when the failure is SYSTEMIC: more than half of the prepared views fail inside
+        /// Patch-generated code (or crash the compiler) in one build. Generated code has the same
+        /// shape for every view, so that is a Patch/toolchain bug — never the developer's code —
+        /// and nothing is demoted for it (keeping the whole app native would silently turn Patch
+        /// off); the caller reports it as a Patch bug instead.
+        public var systemic: SystemicFailure?
         public init() {}
+    }
+
+    public struct SystemicFailure: Sendable, Equatable {
+        /// Prepared views with an error (or compiler crash) in their generated code.
+        public var failingViews: [String]
+        /// Views prepared when it happened.
+        public var preparedCount: Int
+        /// At least one of those failures is a compiler crash.
+        public var compilerCrash: Bool
+        /// A representative diagnostic (a crash when there is one).
+        public var example: Diagnostic
+    }
+
+    /// A build is systemic when strictly more than this share of the prepared views fail in
+    /// generated code — and at least `systemicMinimumViews` do (two broken views out of three is
+    /// still worth demoting individually).
+    public static let systemicFraction = 0.5
+    public static let systemicMinimumViews = 3
+
+    /// The systemic-failure test (see `Report.systemic`): more than half of the prepared views (and
+    /// at least `systemicMinimumViews`) fail in generated code in this build — OR a compiler crash
+    /// in generated code hits a SECOND distinct view (`priorCrashViews` are views an earlier round
+    /// demoted for one). A whole-module (Release) compile stops at its first crash, so a crash on
+    /// the thunk pattern itself surfaces one view per build; the second is the proof.
+    static func systemicFailure(_ attribution: Attribution, prepared: Set<String>,
+                                readFile: (String) -> String?,
+                                priorCrashViews: Set<String> = []) -> SystemicFailure? {
+        var cache: [String: FileIndex] = [:]
+        var failing: [String] = []
+        var crash = false
+        var example: Diagnostic?
+        var crashViews = Set<String>()
+        for (view, ds) in attribution.byView.sorted(by: { $0.key < $1.key }) where prepared.contains(view) {
+            let generated = ds.filter { d in
+                if d.message == compilerCrashMessage { return true }
+                if cache[d.file] == nil, let text = readFile(d.file) { cache[d.file] = FileIndex(path: d.file, text: text) }
+                return cache[d.file]?.isGenerated(line: d.line) ?? false
+            }
+            guard !generated.isEmpty else { continue }
+            failing.append(view)
+            if let c = generated.first(where: { $0.message == compilerCrashMessage }) {
+                crash = true
+                crashViews.insert(view)
+                if example?.message != compilerCrashMessage { example = c }
+            } else if example == nil {
+                example = generated[0]
+            }
+        }
+        guard let example else { return nil }
+        let widespread = failing.count >= systemicMinimumViews
+            && Double(failing.count) > Double(prepared.count) * systemicFraction
+        let repeatedCrash = !crashViews.isEmpty && crashViews.union(priorCrashViews).count >= 2
+        guard widespread || repeatedCrash else { return nil }
+        let allFailing = repeatedCrash ? Array(Set(failing).union(priorCrashViews)).sorted() : failing
+        return SystemicFailure(failingViews: allFailing, preparedCount: prepared.count + priorCrashViews.count,
+                               compilerCrash: crash, example: example)
     }
 
     /// Drive build → attribute → demote → rebuild until clean / nothing attributable is left.
@@ -336,6 +551,18 @@ public enum PrepareVerifier {
         var repromoted = Set<String>()
         var preExisting: [Diagnostic] = []
         var preExistingKeys = Set<String>()
+        // Views demoted in an earlier round for a compiler crash in their generated code.
+        var crashDemoted = Set<String>()
+        // Views whose triggering diagnostics were ALL in generated code when they were demoted.
+        var generatedOnly = Set<String>()
+        var indexCache: [String: FileIndex] = [:]
+        func inGeneratedCode(_ d: Diagnostic) -> Bool {
+            if d.message == compilerCrashMessage, (d.file as NSString).lastPathComponent == ThunkGenerator.thunkFileName {
+                return true
+            }
+            if indexCache[d.file] == nil, let text = readFile(d.file) { indexCache[d.file] = FileIndex(path: d.file, text: text) }
+            return indexCache[d.file]?.isGenerated(line: d.line) ?? false
+        }
 
         for _ in 0..<maxIterations {
             let outcome = build()
@@ -345,7 +572,7 @@ public enum PrepareVerifier {
                 progress("Build timed out after \(Int(outcome.seconds))s — verification stopped.")
                 break
             }
-            let diags = parseDiagnostics(outcome.log)
+            let diags = parseDiagnostics(outcome.log) + parseCompilerCrashes(outcome.log)
             if outcome.exitCode == 0 && diags.isEmpty {
                 report.clean = true
                 report.unattributed = []
@@ -361,7 +588,13 @@ public enum PrepareVerifier {
             // prepared code was never the cause — give it back its thunk; the errors are the
             // project's own.
             var changed = false
-            for (view, trig) in demotedFor where Set(trig.map(\.stableKey)).isSubset(of: present) {
+            //
+            // Never for a view demoted ONLY for errors inside Patch-GENERATED code: removing the view
+            // regenerates that code, so another view's generated code now sits at the same file:line
+            // and can report the same message (the whole-module crash on the thunk pattern did exactly
+            // that) — it is not evidence the error is the project's own.
+            for (view, trig) in demotedFor where !generatedOnly.contains(view)
+                && Set(trig.map(\.stableKey)).isSubset(of: present) {
                 demotedFor[view] = nil
                 demotionOrder.removeAll { $0 == view }
                 native.remove(view)
@@ -372,9 +605,34 @@ public enum PrepareVerifier {
             }
             let attributable = diags.filter { !preExistingKeys.contains($0.stableKey) }
             let attribution = attribute(attributable, preparedViews: prepared, readFile: readFile)
+            // SYSTEMIC: most prepared views fail in generated code in this one build → a Patch bug.
+            // Stop without demoting (see `Report.systemic`).
+            if var systemic = systemicFailure(attribution, prepared: prepared, readFile: readFile,
+                                              priorCrashViews: crashDemoted) {
+                // Undo the demotions earlier rounds made for generated-code crashes: they were the
+                // same Patch bug (a whole-module build crashes once per build, so it surfaces one
+                // view per round), not a problem with those views.
+                let undo = crashDemoted.intersection(native)
+                if !undo.isEmpty {
+                    native.subtract(undo)
+                    for v in undo { demotedFor[v] = nil }
+                    demotionOrder.removeAll { undo.contains($0) }
+                    prepared = try apply(native)
+                }
+                systemic.preparedCount = max(systemic.preparedCount, prepared.count)
+                report.systemic = systemic
+                report.unattributed = attribution.unattributed + attribution.byView.flatMap { $0.value }
+                progress("\(systemic.failingViews.count) of \(systemic.preparedCount) prepared views "
+                         + (systemic.compilerCrash ? "crash the Swift compiler in" : "fail in")
+                         + " Patch-generated code (e.g. \(systemic.example)) — a Patch bug, not your code; "
+                         + "no view was kept native for it.")
+                break
+            }
             // A re-promoted view is never demoted again in this run (guarantees termination).
             let newDemotes = attribution.byView.filter { !native.contains($0.key) && !repromoted.contains($0.key) }
             for (view, ds) in newDemotes.sorted(by: { $0.key < $1.key }) {
+                if ds.contains(where: { $0.message == compilerCrashMessage }) { crashDemoted.insert(view) }
+                if ds.allSatisfy(inGeneratedCode) { generatedOnly.insert(view) }
                 native.insert(view)
                 demotedFor[view] = ds
                 demotionOrder.append(view)
@@ -386,7 +644,8 @@ public enum PrepareVerifier {
             guard changed else { break }
             prepared = try apply(native)
         }
-        if !report.clean && !report.timedOut && report.inconclusive == nil && report.builds >= maxIterations {
+        if !report.clean && !report.timedOut && report.inconclusive == nil && report.systemic == nil
+            && report.builds >= maxIterations {
             report.inconclusive = "stopped after \(maxIterations) builds"
         }
         report.demoted = demotionOrder.map { ($0, (demotedFor[$0] ?? []).sorted { $0.line < $1.line }) }

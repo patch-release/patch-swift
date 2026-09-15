@@ -779,65 +779,29 @@ public enum PatchAccessForwarding {
         return tail.isEmpty ? head + "\n" : head + "\n" + tail
     }
 
-    /// Strip BOTH kinds of prepare-generated in-file blocks (the forwarder block and a legacy /
-    /// fallback PATCH-THUNKS block), in any order.
+    /// Strip EVERY prepare-generated in-file block (the PATCH-ROUTE native-fallback block, the
+    /// forwarder block and a legacy / fallback PATCH-THUNKS block), in any order. The route block
+    /// is prepare's last append, so it is removed first (byte-exact when it is the file's suffix).
     public static func stripAllGeneratedBlocks(from source: String) -> String {
-        var s = source
+        var s = ThunkGenerator.stripRouteFallbackBlock(from: source)
         for _ in 0..<4 {   // bounded: at most one of each is ever generated
-            let next = stripBlock(from: ThunkGenerator.stripSameFileBlock(from: s))
+            let next = ThunkGenerator.stripRouteFallbackBlock(
+                from: stripBlock(from: ThunkGenerator.stripSameFileBlock(from: s)))
             if next == s { break }
             s = next
         }
         return s
     }
 
-    // MARK: - `dynamic` removal (unprepare / excluded files)
+    // MARK: - Body-edit removal (unprepare / excluded files)
 
-    /// Remove the `dynamic` modifier from `var body: some View` in the given View types (all View
-    /// types when `onlyTypes` is nil). Exact inverse of `ThunkGenerator.insertDynamic` — the
-    /// `dynamic ` token and its single trailing space are removed; nothing else moves. Returns the
-    /// new text and the type names whose body lost `dynamic`.
+    /// Remove prepare's body edits from `var body: some View` in the given View types (all View
+    /// types when `onlyTypes` is nil): the `__patchRoute { … }` wrapper and a legacy `dynamic`
+    /// modifier (an older CLI's edit). Exact inverse of both — nothing else moves. Returns the new
+    /// text and the type names whose body changed. (Name kept for callers; see
+    /// `ThunkGenerator.unrouteBodies`.)
     public static func removeDynamic(from source: String, onlyTypes: Set<String>?) -> (text: String, types: [String]) {
-        let tree = Parser.parse(source: source)
-        final class Finder: SyntaxVisitor {
-            var stack: [String] = []
-            var hits: [(Range<Int>, String)] = []
-            let only: Set<String>?
-            init(only: Set<String>?) { self.only = only; super.init(viewMode: .sourceAccurate) }
-            override func visit(_ n: StructDeclSyntax) -> SyntaxVisitorContinueKind { stack.append(n.name.text); return .visitChildren }
-            override func visitPost(_ n: StructDeclSyntax) { stack.removeLast() }
-            override func visit(_ n: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind { stack.append(ThunkGenerator.baseTypeName(n.extendedType)); return .visitChildren }
-            override func visitPost(_ n: ExtensionDeclSyntax) { stack.removeLast() }
-            override func visit(_ n: ClassDeclSyntax) -> SyntaxVisitorContinueKind { stack.append(n.name.text); return .visitChildren }
-            override func visitPost(_ n: ClassDeclSyntax) { stack.removeLast() }
-            override func visit(_ n: EnumDeclSyntax) -> SyntaxVisitorContinueKind { stack.append(n.name.text); return .visitChildren }
-            override func visitPost(_ n: EnumDeclSyntax) { stack.removeLast() }
-            override func visit(_ n: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
-                guard let type = stack.last, only == nil || only!.contains(type),
-                      n.bindings.count == 1, let b = n.bindings.first,
-                      b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == "body",
-                      b.typeAnnotation?.type.trimmedDescription == "some View",
-                      let dyn = n.modifiers.first(where: { $0.name.tokenKind == .keyword(.dynamic) }) else {
-                    return .visitChildren
-                }
-                let start = dyn.positionAfterSkippingLeadingTrivia.utf8Offset
-                var end = dyn.name.endPositionBeforeTrailingTrivia.utf8Offset
-                // Consume exactly the one space `insertDynamic` added (never a newline / comment).
-                if dyn.name.trailingTrivia.description.hasPrefix(" ") {
-                    end += 1
-                }
-                hits.append((start..<end, type))
-                return .visitChildren
-            }
-        }
-        let f = Finder(only: onlyTypes)
-        f.walk(tree)
-        guard !f.hits.isEmpty else { return (source, []) }
-        var bytes = Array(source.utf8)
-        for (r, _) in f.hits.sorted(by: { $0.0.lowerBound > $1.0.lowerBound }) where r.upperBound <= bytes.count {
-            bytes.removeSubrange(r)
-        }
-        return (String(decoding: bytes, as: UTF8.self), f.hits.map { $0.1 })
+        ThunkGenerator.unrouteBodies(in: source, onlyTypes: onlyTypes)
     }
 }
 

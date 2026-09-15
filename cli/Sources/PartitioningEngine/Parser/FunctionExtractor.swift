@@ -758,6 +758,9 @@ final class FunctionExtractor: SyntaxVisitor {
     // MARK: - Closures
 
     override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
+        // The `{ … }` of a prepared body's `__patchRoute { … }` wrapper is the developer's body
+        // itself, not a closure they wrote: no record (nested closures keep their legacy ids).
+        if Self.isRouteWrapperClosure(node) { return .visitChildren }
         let loc = converter.location(for: node.positionAfterSkippingLeadingTrivia)
         let simple = "closure@L\(loc.line)"
         emitRecord(
@@ -880,6 +883,19 @@ final class FunctionExtractor: SyntaxVisitor {
             for mod in modifiers where mod.name.text == "dynamic" {
                 nativeFlags.append("dynamic")
             }
+        }
+        // `patchcli prepare` ROUTES a view body (`var body: some View { __patchRoute { … } }`)
+        // where it used to insert `dynamic`. Classify a routed body exactly as the `dynamic` one
+        // it replaces (native), so partitioning — and the native-shell fingerprint built on it —
+        // is identical whichever CLI prepared the project. Prepare's route methods (the per-view
+        // thunk and the in-file native fallback, both named `__patchRoute`) are generated
+        // SwiftUI glue: always native.
+        if (kind == .computedProperty || kind == .accessor), (simpleName == "body" || simpleName == "body.get"),
+           !nativeFlags.contains("dynamic"), let body, Self.isRoutedBodyBlock(body) {
+            nativeFlags.append("dynamic")
+        }
+        if simpleName == Self.patchRouteName {
+            nativeFlags.append("patchcli prepare body route (generated)")
         }
 
         if let body {
@@ -1126,6 +1142,42 @@ final class FunctionExtractor: SyntaxVisitor {
     }
 
     // MARK: - Helpers
+
+    /// The method name `patchcli prepare` routes view bodies through (CodeGenerator
+    /// `ThunkGenerator.routeMethodName`; duplicated here — this module can't import it).
+    static let patchRouteName = "__patchRoute"
+
+    /// A getter / accessor body that is exactly `__patchRoute { … }` (prepare's body route).
+    static func isRoutedBodyBlock(_ body: Syntax) -> Bool {
+        let items: CodeBlockItemListSyntax?
+        if let block = body.as(CodeBlockSyntax.self) { items = block.statements }
+        else { items = body.as(CodeBlockItemListSyntax.self) }
+        guard let items, items.count == 1, let item = items.first,
+              let call = item.item.as(FunctionCallExprSyntax.self) else { return false }
+        return isRouteCall(call)
+    }
+
+    static func isRouteCall(_ call: FunctionCallExprSyntax) -> Bool {
+        guard let callee = call.calledExpression.as(DeclReferenceExprSyntax.self),
+              callee.baseName.text == patchRouteName, callee.argumentNames == nil,
+              call.leftParen == nil, call.arguments.isEmpty, call.trailingClosure != nil,
+              call.additionalTrailingClosures.isEmpty else { return false }
+        return true
+    }
+
+    /// The trailing closure of a `__patchRoute { … }` that is the sole statement of a `var body`
+    /// getter.
+    static func isRouteWrapperClosure(_ node: ClosureExprSyntax) -> Bool {
+        guard let call = node.parent?.as(FunctionCallExprSyntax.self), call.trailingClosure?.id == node.id,
+              isRouteCall(call),
+              let item = call.parent?.as(CodeBlockItemSyntax.self),
+              let list = item.parent?.as(CodeBlockItemListSyntax.self), list.count == 1 else { return false }
+        var p = list.parent
+        if p?.is(CodeBlockSyntax.self) == true { p = p?.parent?.parent?.parent }   // get { } → accessor → list → block
+        guard let accessorBlock = p?.as(AccessorBlockSyntax.self) ?? list.parent?.as(AccessorBlockSyntax.self),
+              let binding = accessorBlock.parent?.as(PatternBindingSyntax.self) else { return false }
+        return binding.pattern.trimmedDescription == "body"
+    }
 
     /// Does an attribute list carry a SwiftUI result-builder attribute? Such a
     /// member's body is view DSL (a chain of view literals), not a single liftable

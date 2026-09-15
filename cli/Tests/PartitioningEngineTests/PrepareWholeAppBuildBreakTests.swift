@@ -72,7 +72,8 @@ final class PrepareWholeAppBuildBreakTests: XCTestCase {
         try SwiftUIThunkCompileTests.hostStub.write(to: stub, atomically: true, encoding: .utf8)
         paths.append(stub.path)
         let log = SwiftUIThunkCompileTests.run("/usr/bin/swiftc",
-                                               ["-typecheck", "-sdk", sdk, "-target", target] + paths,
+                                               ["-typecheck", "-sdk", sdk, "-target", target] + paths
+                                                   + SwiftUIThunkCompileTests.envTypecheckFlags,
                                                captureStderr: true) ?? ""
         return Outcome(log: log, result: result, files: files, generated: result.generatedFileContents)
     }

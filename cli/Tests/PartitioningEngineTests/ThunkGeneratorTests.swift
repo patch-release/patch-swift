@@ -6,10 +6,10 @@ import PartitioningEngine
 import SwiftParser
 import SwiftSyntax
 
-/// Tests the build-time view-patching codegen: `dynamic` insertion + thunk
+/// Tests the build-time view-patching codegen: body routing + thunk
 /// generation, including the real-app skip-list (Scene/Commands, `#if`, generic
 /// `where`, duplicate names) and the lock-step rule (a thunk only for a body we
-/// actually made `dynamic`).
+/// actually routed).
 final class ThunkGeneratorTests: XCTestCase {
     // These tests validate the LEGACY separate-file thunk rendering (one
     // `PatchThunks.generated.swift`, `r.thunkFileContents`), which is still a supported
@@ -24,7 +24,7 @@ final class ThunkGeneratorTests: XCTestCase {
         r.modifiedFiles.first?.text ?? ""
     }
 
-    func testSimpleViewGetsDynamicAndThunk() {
+    func testSimpleViewGetsRoutedAndThunk() {
         let r = run(["A.swift": """
         import SwiftUI
         struct Hello: View {
@@ -33,8 +33,11 @@ final class ThunkGeneratorTests: XCTestCase {
         """])
         XCTAssertEqual(r.viewNames, ["Hello"])
         XCTAssertEqual(r.dynamicInsertions, 1)
-        XCTAssertTrue(newText(r).contains("dynamic var body: some View"), newText(r))
-        XCTAssertTrue(r.thunkFileContents.contains("@_dynamicReplacement(for: body)"))
+        XCTAssertTrue(newText(r).contains("var body: some View { __patchRoute { Text(\"hi\") } }"), newText(r))
+        XCTAssertFalse(newText(r).contains("dynamic"), newText(r))
+        XCTAssertTrue(newText(r).hasSuffix("\n" + ThunkGenerator.routeFallbackBlock), newText(r))
+        XCTAssertFalse(r.thunkFileContents.contains("_dynamicReplacement"))
+        XCTAssertTrue(r.thunkFileContents.contains("func __patchRoute<__PatchNativeBody: View>(@ViewBuilder _ __nativeBody: () -> __PatchNativeBody) -> some View {"))
         XCTAssertTrue(r.thunkFileContents.contains(#"typeName: "Hello""#))
         XCTAssertTrue(r.thunkFileContents.contains("Patch.shared.thunkBody("))
         XCTAssertTrue(r.thunkFileContents.contains("slots: { self.__patchSlots() }"))
@@ -44,10 +47,11 @@ final class ThunkGeneratorTests: XCTestCase {
         XCTAssertTrue(r.thunkFileContents.contains("func __patchSlots() -> [String: ([String]) -> AnyView]"))
     }
 
-    /// Swift 6.0.x crashes at -O/-Osize ("Global is external, but doesn't have external or
-    /// weak linkage") on a `private`/`fileprivate` opaque `@_dynamicReplacement(for: body)`
-    /// declared in a different file from the view. Debug builds are fine, so only a customer's
-    /// Release build would find it. The replacement property must stay internal.
+    /// The generated per-view route method must stay `internal`: it has to be visible to the
+    /// view's own file (the routed body calls it) AND out-rank that file's `fileprivate
+    /// extension View` fallback by overload specificity, not by access. (Historically: Swift
+    /// 6.0.x crashed at -O on a `private` opaque `@_dynamicReplacement(for: body)` declared in
+    /// another file — the same never-private rule, now for the route method.)
     func testReplacementPropertyIsNeverPrivate() {
         let r = run(["A.swift": """
         import SwiftUI
@@ -57,11 +61,12 @@ final class ThunkGeneratorTests: XCTestCase {
         }
         """])
         let lines = r.thunkFileContents.components(separatedBy: "\n")
-        let decls = lines.filter { $0.contains("var \(ThunkGenerator.replacementPropertyName)") }
+        let decls = lines.filter { $0.contains("func \(ThunkGenerator.replacementMethodName)<") }
         XCTAssertFalse(decls.isEmpty, r.thunkFileContents)
         for d in decls {
-            XCTAssertFalse(d.contains("private"), "replacement must be internal: \(d)")
+            XCTAssertFalse(d.contains("private"), "route method must be internal: \(d)")
         }
+        XCTAssertFalse(r.thunkFileContents.contains("_dynamicReplacement"), r.thunkFileContents)
     }
 
     func testMixedViewEmitsNativeSlot() {
@@ -117,7 +122,7 @@ final class ThunkGeneratorTests: XCTestCase {
             public var body: some View { Text("x") }
         }
         """])
-        XCTAssertTrue(newText(r).contains("public dynamic var body"), newText(r))
+        XCTAssertTrue(newText(r).contains("public var body: some View { __patchRoute { Text(\"x\") } }"), newText(r))
     }
 
     func testPriorLineAttributePreserved() {
@@ -128,8 +133,8 @@ final class ThunkGeneratorTests: XCTestCase {
             var body: some View { Text("x") }
         }
         """])
-        // `dynamic` is inserted before `var`, after the attribute line.
-        XCTAssertTrue(newText(r).contains("@ViewBuilder\n    dynamic var body"), newText(r))
+        // The attribute line is untouched; only the getter braces gain the route.
+        XCTAssertTrue(newText(r).contains("@ViewBuilder\n    var body: some View { __patchRoute { Text(\"x\") } }"), newText(r))
     }
 
     func testSkipsSceneAndCommands() {
@@ -193,22 +198,58 @@ final class ThunkGeneratorTests: XCTestCase {
         }
         """])
         XCTAssertEqual(r.viewNames, ["Row"])
-        XCTAssertTrue(newText(r).contains("dynamic var body"))
+        XCTAssertTrue(newText(r).contains("__patchRoute {"))
         XCTAssertTrue(r.thunkFileContents.contains("extension Row {"))
     }
 
-    func testIdempotentOnAlreadyDynamic() {
-        let r = run(["A.swift": """
+    func testIdempotentOnAlreadyRouted() {
+        let prepared = ThunkGenerator.appendingRouteFallback(to: """
+        import SwiftUI
+        struct V: View {
+            var body: some View { __patchRoute { Text("x") } }
+        }
+        """)
+        let r = run(["A.swift": prepared])
+        XCTAssertEqual(r.dynamicInsertions, 0, "should not re-route")
+        XCTAssertTrue(r.modifiedFiles.isEmpty, r.modifiedFiles.first?.text ?? "")
+        // But still gets a thunk (lock-step: body is routed).
+        XCTAssertEqual(r.viewNames, ["V"])
+        XCTAssertTrue(r.thunkFileContents.contains("extension V {"))
+    }
+
+    /// A body an OLDER CLI prepared (`dynamic var body`, listed in the prepare record) is migrated:
+    /// the `dynamic` goes and the body is routed in one edit (an opaque-result dynamic replacement
+    /// breaks Release builds). A `dynamic` the record doesn't list (the developer's own, or no
+    /// record) stays — `dynamic` alone builds + runs fine — and the body is still routed.
+    func testLegacyDynamicBodyIsMigratedToRoute() {
+        let legacy = """
         import SwiftUI
         struct V: View {
             dynamic var body: some View { Text("x") }
         }
-        """])
-        XCTAssertEqual(r.dynamicInsertions, 0, "should not re-insert dynamic")
-        XCTAssertTrue(r.modifiedFiles.isEmpty)
-        // But still gets a thunk (lock-step: body is dynamic).
+        """
+        let url = URL(fileURLWithPath: "/x/A.swift")
+        let r = ThunkGenerator().prepare(sources: [.init(url: url, text: legacy)], sameFile: false,
+                                         legacyDynamicTypes: [ThunkGenerator.normalizedPath(url.path): ["V"]])
+        XCTAssertEqual(r.dynamicInsertions, 1)
+        XCTAssertEqual(newText(r), ThunkGenerator.appendingRouteFallback(to: """
+        import SwiftUI
+        struct V: View {
+            var body: some View { __patchRoute { Text("x") } }
+        }
+        """))
+        XCTAssertEqual(r.legacyDynamicRemovedTypes[url], ["V"])
         XCTAssertEqual(r.viewNames, ["V"])
         XCTAssertTrue(r.thunkFileContents.contains("extension V {"))
+
+        let unrecorded = run(["A.swift": legacy])
+        XCTAssertEqual(newText(unrecorded), ThunkGenerator.appendingRouteFallback(to: """
+        import SwiftUI
+        struct V: View {
+            dynamic var body: some View { __patchRoute { Text("x") } }
+        }
+        """))
+        XCTAssertTrue(unrecorded.legacyDynamicRemovedTypes.isEmpty)
     }
 
     func testBodyInPlainExtension() {
@@ -223,7 +264,7 @@ final class ThunkGeneratorTests: XCTestCase {
         """])
         XCTAssertEqual(r.viewNames, ["Profile"])
         XCTAssertEqual(r.dynamicInsertions, 1)
-        XCTAssertTrue(newText(r).contains("dynamic var body"))
+        XCTAssertTrue(newText(r).contains("var body: some View { __patchRoute { Text(name) } }"))
     }
 
     func testExtensionDeclaredConformance() {

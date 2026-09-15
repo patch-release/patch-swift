@@ -167,6 +167,8 @@ final class UnprepareTests: XCTestCase {
         XCTAssertEqual(read(dir.appendingPathComponent("Sources/App/Hello.swift")), Self.hello)
     }
 
+    /// `--keep-dynamic` leaves prepare's body edits (the route) in place but removes the thunk blocks;
+    /// the kept route keeps its PATCH-ROUTE fallback so the file still builds.
     func testKeepDynamicLeavesDynamicButRemovesBlocks() throws {
         let dir = try tmp("keep-dyn")
         try write("// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"App\", targets: [ .target(name: \"App\") ])\n",
@@ -175,8 +177,10 @@ final class UnprepareTests: XCTestCase {
         try prepare(dir, target: "App")
         XCTAssertEqual(unprepare(dir, keepDynamic: true), [])
         let t = read(dir.appendingPathComponent("Sources/App/MixView.swift"))
-        XCTAssertTrue(t.contains("dynamic var body"))
+        XCTAssertTrue(t.contains("__patchRoute {"), t)
         XCTAssertFalse(t.contains(PatchAccessForwarding.beginMarker) || t.contains(ThunkGenerator.sameFileBeginMarker))
+        XCTAssertTrue(t.hasSuffix("\n" + ThunkGenerator.routeFallbackBlock), t)
+        XCTAssertTrue(ThunkGenerator.parses(t), t)
     }
 
     // MARK: - (13) Excluded files are cleaned automatically
@@ -212,12 +216,13 @@ final class UnprepareTests: XCTestCase {
         let d = PrepareVerifier.Diagnostic(file: "/p/MixView.swift", line: fwdLine, column: 5, message: "error: boom")
         let a = PrepareVerifier.attribute([d], preparedViews: ["MixView", "MixTrackRow"], readFile: { _ in text })
         XCTAssertEqual(a.byView["MixView"]?.count, 1, "an error inside the forwarder block belongs to its view")
-        // And keeping that view native restores its file (forwarders + dynamic gone).
+        // And keeping that view native restores its file (forwarders + body route gone).
         let native = ThunkGenerator().prepare(sources: [.init(url: URL(fileURLWithPath: "/p/MixView.swift"), text: text)],
                                               hybrid: true, nativeViews: ["MixView"])
         let restored = native.modifiedFiles.first?.text ?? text
         XCTAssertFalse(restored.contains(PatchAccessForwarding.beginMarker), restored)
-        XCTAssertFalse(restored.contains("dynamic var body: some View {\n        VStack"), restored)
+        XCTAssertFalse(restored.contains("var body: some View { __patchRoute {\n        VStack"), restored)
+        XCTAssertTrue(restored.contains("var body: some View {\n        VStack"), restored)
     }
 
     // MARK: - Pure transforms

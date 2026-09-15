@@ -54,9 +54,9 @@ final class PrepareHybridPlacementTests: XCTestCase {
         _ = try Prepare.execute(root: dir, excludes: [], target: "App",
                                 assumeYes: true, thunksOnly: false, check: false, quiet: true)
 
-        // (1) The view file got ONLY `dynamic` — no same-file block.
+        // (1) The view file got ONLY the body route (+ its fallback) — no same-file block.
         let view = read(viewURL)
-        XCTAssertTrue(view.contains("dynamic var body"), view)
+        XCTAssertTrue(view.contains("__patchRoute {"), view)
         XCTAssertFalse(view.contains(ThunkGenerator.sameFileBeginMarker), view)
 
         // (2) The generated file lives in Patch/Generated/ UNDER the view's source tree
@@ -64,7 +64,7 @@ final class PrepareHybridPlacementTests: XCTestCase {
         let genURL = dir.appendingPathComponent("Sources/App/Patch/Generated/PatchThunks.generated.swift")
         XCTAssertTrue(exists(genURL), "generated thunk file should be under the target's source tree")
         let gen = read(genURL)
-        XCTAssertTrue(gen.contains("@_dynamicReplacement(for: body)"), gen)
+        XCTAssertTrue(gen.contains("__PatchNativeBody) -> some View"), gen)
         XCTAssertTrue(ThunkGenerator.parses(gen), gen)
 
         // (3) The PatchSwiftUI product was wired into the SwiftPM target.
@@ -196,11 +196,11 @@ final class PrepareHybridPlacementTests: XCTestCase {
 
         // Only the real app view is prepared.
         XCTAssertEqual(prepared, 1, "only Hello should be prepared (test-file views excluded)")
-        XCTAssertTrue(read(appView).contains("dynamic var body"), read(appView))
-        // The test-file views were NOT touched (no `dynamic` inserted).
-        XCTAssertFalse(read(uiTestsView).contains("dynamic"),
+        XCTAssertTrue(read(appView).contains("__patchRoute {"), read(appView))
+        // The test-file views were NOT touched (no body route inserted).
+        XCTAssertFalse(read(uiTestsView).contains("__patchRoute"),
                        "a /UITests/ view must not be prepared:\n\(read(uiTestsView))")
-        XCTAssertFalse(read(xctestView).contains("dynamic var body"),
+        XCTAssertFalse(read(xctestView).contains("__patchRoute"),
                        "an XCTest-importing view must not be prepared:\n\(read(xctestView))")
         // The generated file routes ONLY the real view.
         let gen = read(dir.appendingPathComponent("Sources/App/Patch/Generated/PatchThunks.generated.swift"))

@@ -111,7 +111,7 @@ An OTA patch can't *introduce* a privacy-gated capability your app never declare
 </Aside>
 
 <Aside type="caution" title="2 · The internals of non-View.body native code">
-Patch hot-swaps `View.body` getters (via dynamic replacement, like Xcode Previews) and data-drives the renderer. It has no mechanism to rewrite arbitrary compiled native functions. So an OTA patch can't change the *body* of:
+Patch routes `View.body` getters through generated thunks and data-drives the renderer. It has no mechanism to rewrite arbitrary compiled native functions. So an OTA patch can't change the *body* of:
 
 - A `UIViewRepresentable`'s `makeUIView` / `updateUIView`.
 - A custom `ButtonStyle` / `ViewModifier`'s `makeBody` / `body(content:)`.

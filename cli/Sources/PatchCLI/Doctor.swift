@@ -21,7 +21,7 @@ import PartitioningEngine
 ///      linked into the target.
 ///   3. `Patch.configure(...)` + `Patch.shared.start()` in the `@main` App entry
 ///      (import PatchSDK).
-///   4. Views are patch-ready — bodies marked `dynamic` + thunks. (A ⚠, not a ✗:
+///   4. Views are patch-ready — bodies routed + thunks. (A ⚠, not a ✗:
 ///      `build`/`push`/`release` auto-run prepare, so this self-heals on next release.)
 ///   5. Fingerprint registered AND the current native-shell fingerprint matches
 ///      it (needs network to check the registration; degrades to a ⚠ offline).
@@ -117,7 +117,7 @@ struct Doctor: ParsableCommand {
             // 3) Patch.configure + start() in @main App entry.
             checks.append(checkConfigureCall(root: root))
 
-            // 4) prepare has been run (views dynamic + thunks).
+            // 4) prepare has been run (view bodies routed + thunks).
             checks.append(checkPrepared(root: root, config: config))
 
             // 5) Fingerprint registered + current.
@@ -490,7 +490,7 @@ struct Doctor: ParsableCommand {
         }
     }
 
-    // MARK: - Check 4: prepare has been run (views dynamic + thunks)
+    // MARK: - Check 4: prepare has been run (view bodies routed + thunks)
 
     func checkPrepared(root: URL, config: PatchConfig?) -> Check {
         let id = "prepare"
@@ -517,8 +517,8 @@ struct Doctor: ParsableCommand {
                          fix: "If this app has SwiftUI views, run `patchcli prepare`; otherwise OK.")
         }
 
-        // `dynamicInsertions` is the count of view bodies that are NOT yet `dynamic`
-        // (i.e. prepare WOULD add the keyword) — mirrors `prepare --check`.
+        // `dynamicInsertions` is the count of view bodies that are NOT yet routed
+        // (i.e. prepare WOULD route them) — mirrors `prepare --check`.
         //
         // This is a ⚠ (info), NOT a blocking ✗: `patchcli build`/`push`/`release` now
         // auto-run prepare before building, so an un-prepared view is fixed on the next
@@ -527,13 +527,13 @@ struct Doctor: ParsableCommand {
         // auto-prepare reality.
         if result.dynamicInsertions > 0 {
             return Check(id: id, title: title, status: .warn,
-                         detail: "\(result.dynamicInsertions) of \(result.viewNames.count) view bod(y/ies) aren't marked `dynamic` yet — prepare runs automatically on your next `patchcli release`.",
+                         detail: "\(result.dynamicInsertions) of \(result.viewNames.count) view bod(y/ies) aren't routed through Patch yet — prepare runs automatically on your next `patchcli release`.",
                          fix: "Nothing needed — `patchcli build`/`push`/`release` auto-prepare these. (Run `patchcli prepare` now, or `patchcli prepare --check` in CI, if you prefer.)")
         }
 
-        // Bodies are all `dynamic`. Now confirm the generated thunk blocks actually
+        // Bodies are all routed. Now confirm the generated thunk blocks actually
         // exist on disk (prepare's same-file thunks carry a BEGIN marker; the legacy
-        // mode writes PatchThunks.generated.swift). If `dynamic` is present but no
+        // mode writes PatchThunks.generated.swift). If the routes are present but no
         // thunk block is, the prepare run was incomplete.
         let hasThunkBlock = sourcesContain(root: root, needle: ThunkGenerator.sameFileBeginMarker)
             || FileManager.default.fileExists(atPath:
@@ -542,12 +542,12 @@ struct Doctor: ParsableCommand {
             || anyFileNamed(ThunkGenerator.thunkFileName, under: root)
         if !hasThunkBlock {
             return Check(id: id, title: title, status: .warn,
-                         detail: "All \(result.viewNames.count) view bod(y/ies) are `dynamic` but no generated thunk block was found.",
-                         fix: "Run `patchcli prepare` to (re)generate the dynamic-replacement thunks.")
+                         detail: "All \(result.viewNames.count) view bod(y/ies) are routed but no generated thunk block was found (they render natively).",
+                         fix: "Run `patchcli prepare` to (re)generate the body-route thunks.")
         }
 
         return Check(id: id, title: title, status: .pass,
-                     detail: "\(result.viewNames.count) SwiftUI view(s) are `dynamic` + have generated thunks.",
+                     detail: "\(result.viewNames.count) SwiftUI view(s) are routed + have generated thunks.",
                      fix: nil)
     }
 

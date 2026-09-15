@@ -1430,13 +1430,30 @@ public struct ProjectFingerprinter {
             guard let data = try? Data(contentsOf: url) else { return "" }
             return Fingerprinter.hashData(data)
         }
+        // PREPARE'S BODY ROUTING (`var body: some View { __patchRoute { … } }` + the file's
+        // PATCH-ROUTE fallback block) is hashed in its LEGACY canonical form — the text the older
+        // `dynamic`-based prepare produced (routes unwrapped, `dynamic ` at the `var` keyword, no
+        // route block). Every later step (literal ranges, body spans, scaffolding strip) then sees
+        // exactly the bytes it always saw, so a project's native-shell fingerprint is identical
+        // whichever CLI prepared it (both thunk kinds drive the same SDK entry point, so the OTA
+        // modules are compatible with both binaries). The edit is same-line, so the engine's line
+        // spans stay valid; its byte ranges (computed on the routed file) are mapped over.
+        var literalRanges = slotLiteralRanges
+        var routed = false
+        if let canonical = ThunkGenerator.legacyCanonicalForm(text) {
+            routed = true
+            text = canonical.text
+            literalRanges = literalRanges?.map {
+                canonical.mapOffset($0.lowerBound)..<canonical.mapOffset($0.upperBound)
+            }
+        }
         // PARAMETERIZED NATIVE SLOTS: normalize each lifted string literal to a stable
         // placeholder FIRST (it rides WASM via `slotArgs`; the native slot factory is
         // literal-independent). Done before line-span stripping so line numbers are
         // unaffected — a single-segment string literal is always on one line, and the
         // placeholder carries no newline, so line COUNT is invariant. Ranges are
         // applied in DESCENDING start order so earlier UTF-8 offsets stay valid.
-        if let lits = slotLiteralRanges, !lits.isEmpty {
+        if let lits = literalRanges, !lits.isEmpty {
             text = Self.normalizeByteRanges(in: text, ranges: lits)
         }
         let spans = eligibleSpans ?? []
@@ -1480,6 +1497,9 @@ public struct ProjectFingerprinter {
         // (When any of those applied, `text` is no longer the raw bytes / carries an appended
         // surface, so we must hash the normalized form — the slow path.)
         if spans.isEmpty && !isPrepared && !hasSlotLiterals && !hasNativeSurface && !hasConfigureFP {
+            // A routed file hashes its legacy canonical bytes (identical to the raw bytes of the
+            // same file prepared by an older CLI).
+            if routed { return Fingerprinter.hash(text) }
             guard let data = try? Data(contentsOf: url) else { return "" }
             return Fingerprinter.hashData(data)
         }

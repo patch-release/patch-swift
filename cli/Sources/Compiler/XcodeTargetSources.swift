@@ -167,6 +167,56 @@ public enum XcodeTargetSources {
         }
         return determinable ? files : nil
     }
+
+    /// The names of every `PBXNativeTarget` in the project (sorted).
+    public static func nativeTargetNames(pbxproj text: String) -> [String] {
+        guard let root = OpenStepPlist.parse(text) as? [String: Any],
+              let objects = root["objects"] as? [String: Any] else { return [] }
+        return objects.values.compactMap { value -> String? in
+            guard let o = value as? [String: Any], o["isa"] as? String == "PBXNativeTarget" else { return nil }
+            return o["name"] as? String
+        }.sorted()
+    }
+
+    /// Names of the native targets whose `packageProductDependencies` include `product` (a target
+    /// already linking PatchSwiftUI can compile Patch's in-file code, so sharing a file with it is safe).
+    public static func targetsLinking(product: String, pbxproj text: String) -> Set<String> {
+        guard let root = OpenStepPlist.parse(text) as? [String: Any],
+              let objects = root["objects"] as? [String: Any] else { return [] }
+        var out = Set<String>()
+        for value in objects.values {
+            guard let o = value as? [String: Any], o["isa"] as? String == "PBXNativeTarget",
+                  let name = o["name"] as? String else { continue }
+            let deps = o["packageProductDependencies"] as? [String] ?? []
+            if deps.contains(where: { (objects[$0] as? [String: Any])?["productName"] as? String == product }) {
+                out.insert(name)
+            }
+        }
+        return out
+    }
+
+    /// The `.swift` files `target` compiles that some OTHER native target (a widget / app extension,
+    /// a framework, a test bundle sharing a synchronized folder or file membership) compiles too.
+    /// Patch code that imports PatchSDK must never land in such a file — the other target doesn't
+    /// link it (`no such module 'PatchSDK'`). Empty when nothing is shared; nil when `target`'s
+    /// membership can't be determined.
+    public static func sharedSwiftFiles(projectURL: URL, target: String, fm: FileManager = .default) -> Set<String>? {
+        let pbx = projectURL.appendingPathComponent("project.pbxproj")
+        guard let text = try? String(contentsOf: pbx, encoding: .utf8) else { return nil }
+        return sharedSwiftFiles(pbxproj: text, projectDir: projectURL.deletingLastPathComponent(), target: target, fm: fm)
+    }
+
+    public static func sharedSwiftFiles(pbxproj text: String, projectDir: URL, target: String,
+                                        fm: FileManager = .default) -> Set<String>? {
+        guard let own = swiftFiles(pbxproj: text, projectDir: projectDir, target: target, fm: fm) else { return nil }
+        var shared = Set<String>()
+        let linked = targetsLinking(product: "PatchSwiftUI", pbxproj: text)
+        for other in nativeTargetNames(pbxproj: text) where other != target && !linked.contains(other) {
+            guard let files = swiftFiles(pbxproj: text, projectDir: projectDir, target: other, fm: fm) else { continue }
+            shared.formUnion(own.intersection(files))
+        }
+        return shared
+    }
 }
 
 /// A minimal parser for the OpenStep-style property list `.pbxproj` files use: dictionaries

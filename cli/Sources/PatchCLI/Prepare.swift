@@ -10,20 +10,21 @@ import PartitioningEngine
 ///
 /// Runs the build-time codegen that lets OTA patches re-render view bodies with
 /// NO changes to the views themselves (no `PatchView` wrapping):
-///   1. Inserts the `dynamic` keyword on every `var body: some View` (the same
-///      thing Xcode Previews does — it makes the body REPLACEABLE).
-///   2. Generates `PatchThunks.generated.swift` with one
-///      `@_dynamicReplacement(for: body)` per View that routes the body through
-///      the Patch renderer when a patch is live, else the original `body`.
+///   1. Routes every `var body: some View`: wraps the getter in `__patchRoute { … }` on
+///      the body's own lines, plus a small file-private native fallback (PATCH-ROUTE
+///      block) so the file always builds without generated code.
+///   2. Generates `PatchThunks.generated.swift` with one `__patchRoute` method per View
+///      that renders the Patch renderer's body when a patch is live, else the original
+///      body content.
 ///   3. Adds the generated file + the PatchSwiftUI product to the target.
 ///
-/// Idempotent + re-runnable: existing `dynamic` keywords are left alone and the
-/// thunk file is regenerated. Run it once at setup (it's also invoked by
-/// `patchcli init`), and again whenever you ADD a new View (so it gets a thunk).
+/// Idempotent + re-runnable: routed bodies are left alone (a legacy `dynamic` body from
+/// an older CLI is migrated) and the thunk file is regenerated. Run it once at setup
+/// (it's also invoked by `patchcli init`), and again whenever you ADD a new View.
 struct Prepare: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "prepare",
-        abstract: "Make this app's SwiftUI views patchable out of the box (dynamic-replacement thunks)."
+        abstract: "Make this app's SwiftUI views patchable out of the box (body-route thunks)."
     )
 
     @Argument(help: "Project directory (default: the directory of .Patch.yml, else CWD).")
@@ -35,7 +36,7 @@ struct Prepare: ParsableCommand {
     @Flag(name: .long, help: "Only regenerate the thunk file; never edit existing sources. (For a build phase.)")
     var thunksOnly: Bool = false
 
-    @Flag(name: .long, help: "Report views that aren't patch-ready (missing `dynamic`) and exit non-zero if any. (For CI / pre-push.)")
+    @Flag(name: .long, help: "Report views that aren't patch-ready (body not routed) and exit non-zero if any. (For CI / pre-push.)")
     var check: Bool = false
 
     @Flag(name: .long, help: "Less output.")
@@ -46,6 +47,9 @@ struct Prepare: ParsableCommand {
 
     @Option(name: .long, help: "Per-build timeout in seconds for --verify.")
     var verifyTimeout: Int = Int(PrepareVerifier.defaultTimeout)
+
+    @Option(name: .long, help: "Which builds --verify runs: `all` (Debug, then the configuration the scheme archives with — usually Release; roughly doubles verification time), `debug`, or `release`.")
+    var verifyConfig: String = PrepareVerifier.ConfigurationPlan.all.rawValue
 
     @Option(name: .long, help: "Also write the full per-view compatibility report (Markdown) to this path.")
     var report: String?
@@ -68,11 +72,21 @@ struct Prepare: ParsableCommand {
             root = cwd
         }
 
+        guard let plan = PrepareVerifier.ConfigurationPlan(argument: verifyConfig) else {
+            throw ValidationError("--verify-config must be one of: all, debug, release (got `\(verifyConfig)`).")
+        }
+        Self.lastVerifySystemicFailure = nil
         _ = try Self.execute(root: root, excludes: excludes, target: target,
                              assumeYes: assumeYes, thunksOnly: thunksOnly, check: check, quiet: quiet,
                              verify: verify, verifyTimeout: TimeInterval(max(verifyTimeout, 10)),
+                             verifyPlan: plan,
                              reportPath: report.map { URL(fileURLWithPath: $0, relativeTo: cwd).path })
+        if Self.lastVerifySystemicFailure != nil { throw ExitCode(1) }
     }
+
+    /// Set by `--verify` when a build failed SYSTEMICALLY in Patch-generated code (a Patch bug — see
+    /// `PrepareVerifier.Report.systemic`); `prepare` then exits non-zero. `init` reports and continues.
+    nonisolated(unsafe) static var lastVerifySystemicFailure: PrepareVerifier.SystemicFailure?
 
     /// The prepare pipeline, callable from `patchcli init` too. Returns the number
     /// of views thunked (0 if none / nothing to do).
@@ -81,12 +95,18 @@ struct Prepare: ParsableCommand {
                         assumeYes: Bool, thunksOnly: Bool, check: Bool, quiet: Bool,
                         verify: Bool = false,
                         verifyTimeout: TimeInterval = PrepareVerifier.defaultTimeout,
+                        verifyPlan: PrepareVerifier.ConfigurationPlan = .debug,
                         reportPath: String? = nil) throws -> Int {
         let fm = FileManager.default
         // Views `.Patch.yml` keeps native (`native_views:` — recorded by `--verify` when a view's
-        // prepared code broke the app build): no `dynamic`, no thunk. The build + fingerprint
+        // prepared code broke the app build): no body route, no thunk. The build + fingerprint
         // read the same list, so all three agree.
-        let keptNative = PatchConfig.nativeViewNames(near: root)
+        var keptNative = PatchConfig.nativeViewNames(near: root)
+        // App files ANOTHER target compiles too (a widget / extension / framework sharing a file or a
+        // synchronized folder). Nothing that imports PatchSDK may land in them (see below).
+        // Read BEFORE this run updates the record (a verify round must remove the same `dynamic`s).
+        let legacyDynamic = Self.recordedLegacyDynamic(root: root)
+        let sharedFiles = Self.sharedTargetFiles(root: root, target: target, fm: fm)
 
         // Scanning every Swift file + generating the thunks is the slow part; spin
         // while it runs. Stay silent under `quiet` (the auto-prepare path inside
@@ -99,19 +119,42 @@ struct Prepare: ParsableCommand {
             // HYBRID placement (the default): separate-file thunks in a dedicated
             // gitignored generated folder for views that need no private access; same-file
             // (factored helper methods + an actionable comment) only for private-member
-            // views. Keeps the developer's source files clean (just the `dynamic` keyword).
-            // Only views the build target actually COMPILES get `dynamic` + a thunk (a thunk
+            // views. Keeps the developer's source files clean (just the body route + a small
+            // PATCH-ROUTE fallback). Only views the build target actually COMPILES get routed + a thunk (a thunk
             // for a widget/watch/macOS/package view breaks the app build). All sources still
             // feed the cross-file lowering bundle, exactly as the build lowers.
             let result = ThunkGenerator().prepare(sources: sources.map {
                 ThunkGenerator.SourceFile(url: $0.url, text: $0.text)
             }, hybrid: true, nativeViews: keptNative, accessForwarding: Self.accessForwardingEnabled,
-               thunkableFiles: Self.targetCompileSet(root: root, target: target, sources: sources))
+               thunkableFiles: Self.targetCompileSet(root: root, target: target, sources: sources),
+               legacyDynamicTypes: legacyDynamic)
             return (sources, result)
         }
-        let (sources, result) = quiet
+        var (sources, result) = quiet
             ? try scan()
             : try Spinner.run("Scanning Swift sources for views", scan)
+
+        // SHARED-FILE GUARD: a view whose thunk must stay IN its own file (a compact PATCH-THUNKS
+        // block, which imports PatchSDK) can't be prepared when that file is also compiled by a
+        // target that doesn't link PatchSDK — that target would fail with `no such module
+        // 'PatchSDK'`. Keep such views native and record them under `native_views:` (so the build
+        // and fingerprint agree, exactly as `--verify` does). Separate-file / forwarded thunks put
+        // only the body route + its SwiftUI-only PATCH-ROUTE fallback + plain-Swift forwarders in the
+        // shared file, which every target compiles (without the generated file the route renders natively).
+        if !thunksOnly, !check {
+            let blocked = Self.inFileThunkViews(result, inFiles: sharedFiles).subtracting(keptNative)
+            if !blocked.isEmpty {
+                keptNative.formUnion(blocked)
+                let recorded = Self.recordNativeViews(blocked, root: root)
+                if !quiet {
+                    print("→ Kept \(blocked.count) view(s) native (\(blocked.sorted().joined(separator: ", "))): their file is also "
+                          + "compiled by another target (a widget, extension or framework) that doesn't link PatchSDK, "
+                          + "and their thunk has to live in that file."
+                          + (recorded ? " Recorded under `native_views:` in .Patch.yml." : ""))
+                }
+                (sources, result) = try scan()
+            }
+        }
 
         if !quiet {
             print("Patch prepare")
@@ -122,7 +165,7 @@ struct Prepare: ParsableCommand {
         }
 
         // Files matching `.Patch.yml` `exclude:` get no thunks — so any Patch artifacts an earlier
-        // prepare left in them (a PATCH-ACCESS / PATCH-THUNKS block, prepare's `dynamic`) are stale.
+        // prepare left in them (a PATCH-ROUTE / PATCH-ACCESS / PATCH-THUNKS block, a body route, a legacy `dynamic`) are stale.
         // Remove them automatically (never for `--check` / `--thunks-only`, which don't edit sources).
         if !check, !thunksOnly {
             Self.cleanExcludedFiles(root: root, excludes: excludes, quiet: quiet, assumeYes: assumeYes,
@@ -135,20 +178,20 @@ struct Prepare: ParsableCommand {
             return 0
         }
 
-        // --check: report any view bodies still missing `dynamic` and exit non-zero.
+        // --check: report any view bodies not yet routed and exit non-zero.
         if check {
             if result.dynamicInsertions == 0 {
-                print("✓ All \(result.viewNames.count) view(s) are patch-ready (`dynamic` present).")
+                print("✓ All \(result.viewNames.count) view(s) are patch-ready (bodies routed).")
                 return result.viewNames.count
             }
-            print("✗ \(result.dynamicInsertions) view bod(y/ies) are NOT patch-ready (missing `dynamic`).")
+            print("✗ \(result.dynamicInsertions) view bod(y/ies) are NOT patch-ready (body not routed).")
             print("  Run `patchcli prepare` to fix, then rebuild + ship.")
             throw ExitCode(2)
         }
 
         // HYBRID placement (the default): the bulk of every thunk lands in a dedicated,
         // gitignored `Patch/Generated/` folder so the developer's source files stay clean
-        // (just the `dynamic` keyword). A view whose helpers read `private` members gets a compact
+        // (just the body route + its PATCH-ROUTE fallback). A view whose helpers read `private` members gets a compact
         // PATCH-ACCESS forwarder extension in its file (`PatchAccessForwarding`); only a `private`
         // View type or an unforwardable member keeps a compact same-file thunk block. Those in-file
         // edits ride `result.modifiedFiles`.
@@ -169,19 +212,20 @@ struct Prepare: ParsableCommand {
             }
             .sorted { $0.0 < $1.0 }
 
-        // (1) Apply source edits (insert `dynamic`, append the factored same-file helper
+        // (1) Apply source edits (route bodies, append the factored same-file helper
         // block for private-member views). `--thunks-only` suppresses these source edits
         // (it's for a build phase that only regenerates the generated folder); the
         // generated file is still written below.
         // Files the backup-verify had to RESTORE (their source edit broke parsing) — tracked
         // so their views get dropped from the generated file below (else an orphaned
-        // @_dynamicReplacement over a now-non-`dynamic` body breaks the whole app build).
+        // route method calling a now-missing `__patchSlots` breaks the whole app build).
         var restoredFiles: [String] = []
         if !thunksOnly, !result.modifiedFiles.isEmpty {
             if !quiet {
-                print("The following source files get `dynamic` added to their view `body`"
-                      + (sameFileViews.isEmpty && forwardedViews.isEmpty ? " (one word each):"
-                         : " (and, for views reading private members, a small PATCH-ACCESS forwarder extension):"))
+                print("The following source files get their view `body` routed through Patch "
+                      + "(`__patchRoute {` … `}` on the body's own lines + a small PATCH-ROUTE fallback block)"
+                      + (sameFileViews.isEmpty && forwardedViews.isEmpty ? ":"
+                         : " and, for views reading private members, a small PATCH-ACCESS forwarder extension:"))
                 for f in result.modifiedFiles {
                     print("  • \(Self.relativePath(f.url, root: root))")
                 }
@@ -193,7 +237,7 @@ struct Prepare: ParsableCommand {
             }
             restoredFiles = try Self.writeSourcesWithBackupVerify(result.modifiedFiles, fm: fm)
             if !quiet, result.dynamicInsertions > 0 {
-                print("✓ Added `dynamic` to \(result.dynamicInsertions) view bod(y/ies).")
+                print("✓ Routed \(result.dynamicInsertions) view bod(y/ies) through Patch.")
             }
             // PER-FILE ISOLATION: a file whose same-file thunk block couldn't be appended
             // safely was RESTORED + SKIPPED (its view(s) stay native); the rest still got
@@ -203,16 +247,15 @@ struct Prepare: ParsableCommand {
                       + "safely; the rest are patchable): \(restoredFiles.joined(separator: ", "))")
             }
         } else if !thunksOnly, !quiet {
-            print("✓ All view bodies already marked `dynamic`.")
+            print("✓ All view bodies already routed.")
         }
 
         // (2) Write the dedicated generated-folder file (the separate-file thunks + every
-        // view's body-replacement) into `Patch/Generated/`, add that folder to the app's
+        // view's body route) into `Patch/Generated/`, add that folder to the app's
         // `.gitignore`, and wire it into the build target (both project shapes).
-        // Drop any RESTORED file's views from the generated file: their `dynamic` + same-file
-        // helpers were reverted, so emitting their `@_dynamicReplacement` here would orphan a
-        // now-non-`dynamic` body (and a call to a now-missing `__patchSlots`) → the whole app
-        // build breaks. Re-render the generated file without those views.
+        // Drop any RESTORED file's views from the generated file: their body route + same-file
+        // helpers were reverted, so emitting their route methods here would call a now-missing
+        // `__patchSlots` → the whole app build breaks. Re-render the generated file without those views.
         var generatedContents = result.generatedFileContents
         var restoredViews = Set<String>()
         if !restoredFiles.isEmpty, let regen = result.regenerateGeneratedFileExcluding {
@@ -222,20 +265,22 @@ struct Prepare: ParsableCommand {
                 .map { $0.key })
             if !restoredViews.isEmpty { generatedContents = regen(restoredViews) }
         }
-        // Record which `dynamic` keywords prepare inserted, so `patchcli unprepare` removes only its own.
+        // Record which view bodies prepare routed (`patchcli unprepare` uses it for legacy `dynamic` removal).
         if !thunksOnly {
             let restoredSet = Set(restoredFiles)
             PatchUninstaller.updateRecord(
-                genDir: Self.generatedDirectory(for: result, sources: sources, root: root, alsoAnchorOn: keptNative),
+                genDir: Self.generatedDirectory(for: result, sources: sources, root: root, alsoAnchorOn: keptNative, avoiding: sharedFiles),
                 root: root,
                 inserted: result.dynamicInsertedTypes.filter { !restoredSet.contains($0.key.lastPathComponent) },
-                droppingTypes: keptNative, fm: fm)
+                droppingTypes: keptNative.union(result.legacyDynamicRemovedTypes
+                    .filter { !restoredSet.contains($0.key.lastPathComponent) }.values.flatMap { $0 }),
+                fm: fm)
         }
-        let genURL = Self.generatedDirectory(for: result, sources: sources, root: root, alsoAnchorOn: keptNative)
+        let genURL = Self.generatedDirectory(for: result, sources: sources, root: root, alsoAnchorOn: keptNative, avoiding: sharedFiles)
             .appendingPathComponent(ThunkGenerator.thunkFileName)
         if !generatedContents.isEmpty {
             let genDir = Self.generatedDirectory(for: result, sources: Self.thunkableSources(sources, root: root, target: target),
-                                                 root: root, alsoAnchorOn: keptNative)
+                                                 root: root, alsoAnchorOn: keptNative, avoiding: sharedFiles)
             let genURL = genDir.appendingPathComponent(ThunkGenerator.thunkFileName)
             try fm.createDirectory(at: genDir, withIntermediateDirectories: true)
             try generatedContents.write(to: genURL, atomically: true, encoding: .utf8)
@@ -299,10 +344,10 @@ struct Prepare: ParsableCommand {
         if verify, !thunksOnly, !result.viewNames.isEmpty,
            ProcessInfo.processInfo.environment["PATCH_NO_VERIFY"] != "1" {
             preparedCount = Self.verifyPreparedProject(
-                root: root, target: target, sources: sources, genURL: genURL,
+                root: root, target: target, sources: sources, genURL: genURL, legacyDynamic: legacyDynamic,
                 preparedViews: Set(result.viewNames), keptNative: keptNative.union(restoredViews),
-                timeout: verifyTimeout, quiet: quiet, fm: fm)
-            // Views --verify demoted had their `dynamic` removed by Patch: forget them in the record.
+                timeout: verifyTimeout, plan: verifyPlan, quiet: quiet, fm: fm)
+            // Views --verify demoted had their body route removed by Patch: forget them in the record.
             let demoted = PatchConfig.nativeViewNames(near: root).subtracting(keptNative)
             if !demoted.isEmpty {
                 PatchUninstaller.updateRecord(genDir: genURL.deletingLastPathComponent(), root: root,
@@ -326,6 +371,17 @@ struct Prepare: ParsableCommand {
         return preparedCount
     }
 
+    /// Per source file (normalized absolute path), the view types whose `dynamic` on `var body`
+    /// an older CLI's prepare inserted (the prepare record) — routing those bodies removes it.
+    static func recordedLegacyDynamic(root: URL) -> [String: Set<String>] {
+        guard let record = PatchUninstaller.loadRecord(root: root) else { return [:] }
+        var out: [String: Set<String>] = [:]
+        for (rel, types) in record.dynamicInsertions where !types.isEmpty {
+            out[ThunkGenerator.normalizedPath(root.appendingPathComponent(rel).path), default: []].formUnion(types)
+        }
+        return out
+    }
+
     /// The generated-folder file written when no view needs a separate-file thunk (compiles to
     /// nothing; keeps an Xcode file reference valid).
     static let emptyGeneratedFile = """
@@ -343,10 +399,12 @@ struct Prepare: ParsableCommand {
     /// records the demoted views in `.Patch.yml` `native_views:` (so the next prepare/build/
     /// fingerprint keep them native too) and prints which views were kept native and why.
     /// Returns the number of views still prepared.
-    static func verifyPreparedProject(root: URL, target: String?, sources: [Src], genURL: URL,
+    static func verifyPreparedProject(root: URL, target: String?, sources: [Src], genURL: URL, legacyDynamic: [String: Set<String>] = [:],
                                       preparedViews: Set<String>, keptNative: Set<String>,
-                                      timeout: TimeInterval, quiet: Bool, fm: FileManager) -> Int {
-        guard let invocation = PrepareVerifier.detectBuild(root: root, scheme: target, fm: fm) else {
+                                      timeout: TimeInterval, plan: PrepareVerifier.ConfigurationPlan = .debug,
+                                      quiet: Bool, fm: FileManager) -> Int {
+        let invocations = PrepareVerifier.verificationBuilds(root: root, scheme: target, plan: plan, fm: fm)
+        guard !invocations.isEmpty else {
             if !quiet {
                 print("")
                 print("→ Skipped build verification: no .xcodeproj/.xcworkspace or Package.swift at \(root.lastPathComponent)/.")
@@ -355,34 +413,56 @@ struct Prepare: ParsableCommand {
         }
         if !quiet {
             print("")
-            print("Verifying the prepared project builds (\(invocation.label); up to \(Int(timeout))s per build — "
-                  + "skip with --no-verify / PATCH_NO_VERIFY=1)…")
+            print("Verifying the prepared project builds (\(invocations.map(\.label).joined(separator: ", then ")); "
+                  + "up to \(Int(timeout))s per build — skip with --no-verify / PATCH_NO_VERIFY=1)…")
+            if invocations.count > 1 {
+                print("  (The \(invocations.count - 1 == 1 ? "second" : "later") build uses the configuration the app "
+                      + "ARCHIVES with — an optimized build can break where Debug doesn't. `--verify-config debug` skips it.)")
+            }
         }
+        var prepared = preparedViews
+        var native = keptNative
+        var demoted: [(view: String, diagnostics: [PrepareVerifier.Diagnostic])] = []
         var buildNumber = 0
-        let report = PrepareVerifier.run(
-            preparedViews: preparedViews, keptNative: keptNative,
-            apply: { native in Self.reapplyPrepare(sources: sources, native: native, genURL: genURL, fm: fm,
-                                                   thunkableFiles: Self.targetCompileSet(root: root, target: target,
-                                                                                         sources: sources)) },
-            build: {
-                buildNumber += 1
-                let spin = quiet ? nil : Spinner("Build \(buildNumber) (\(invocation.label))")
-                spin?.start()
-                let outcome = PrepareVerifier.runBuild(invocation, timeout: timeout)
-                spin?.clear()
-                if !quiet {
-                    let errs = PrepareVerifier.parseDiagnostics(outcome.log).count
-                    let verdict = outcome.timedOut ? "timed out"
-                        : (outcome.exitCode == 0 && errs == 0 ? "succeeded" : "failed with \(errs) error(s)")
-                    print("  build \(buildNumber): \(verdict) in \(Int(outcome.seconds))s")
-                }
-                return outcome
-            },
-            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
-            progress: { if !quiet { print("  • \($0)") } })
+        var finalReport = PrepareVerifier.Report()
+        var failedLabel: String?
+        for invocation in invocations {
+            let report = PrepareVerifier.run(
+                preparedViews: prepared, keptNative: native,
+                apply: { native in Self.reapplyPrepare(sources: sources, native: native, genURL: genURL, fm: fm,
+                                                       legacyDynamic: legacyDynamic,
+                                                       thunkableFiles: Self.targetCompileSet(root: root, target: target,
+                                                                                             sources: sources)) },
+                build: {
+                    buildNumber += 1
+                    let spin = quiet ? nil : Spinner("Build \(buildNumber) (\(invocation.label))")
+                    spin?.start()
+                    let outcome = PrepareVerifier.runBuild(invocation, timeout: timeout)
+                    spin?.clear()
+                    if !quiet {
+                        let errs = PrepareVerifier.parseDiagnostics(outcome.log).count
+                        let crashes = PrepareVerifier.parseCompilerCrashes(outcome.log).count
+                        let verdict = outcome.timedOut ? "timed out"
+                            : (outcome.exitCode == 0 && errs == 0 ? "succeeded"
+                               : "failed with \(errs) error(s)" + (crashes > 0 ? " and \(crashes) compiler crash(es)" : ""))
+                        print("  build \(buildNumber) (\(invocation.label)): \(verdict) in \(Int(outcome.seconds))s")
+                    }
+                    return outcome
+                },
+                readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+                progress: { if !quiet { print("  • \($0)") } })
+            demoted += report.demoted
+            native.formUnion(report.demoted.map(\.view))
+            prepared.subtract(report.demoted.map(\.view))
+            finalReport = report
+            if !report.clean {
+                failedLabel = invocation.label
+                break   // don't spend another build on a configuration after a failed one
+            }
+        }
 
         // Persist the demotions so every later prepare/build/fingerprint agrees.
-        let demotedNames = report.demoted.map(\.view)
+        let demotedNames = demoted.map(\.view)
         var persisted = false
         if !demotedNames.isEmpty, let cfgURL = PatchConfig.find(startingAt: root),
            var cfg = try? PatchConfig.load(from: cfgURL) {
@@ -390,10 +470,16 @@ struct Prepare: ParsableCommand {
             persisted = (try? cfg.yamlString().write(to: cfgURL, atomically: true, encoding: .utf8)) != nil
         }
         let finalPrepared = preparedViews.subtracting(demotedNames).count
+        if let systemic = finalReport.systemic {
+            lastVerifySystemicFailure = systemic
+            // Printed even under `quiet`: a Patch bug that stops the app building must never be silent.
+            FileHandle.standardError.write(Data((Self.systemicFailureMessage(systemic, buildLabel: failedLabel ?? "build")
+                                                 + "\n").utf8))
+        }
         guard !quiet else { return finalPrepared }
-        if !report.demoted.isEmpty {
-            print("Kept \(report.demoted.count) view(s) native — their prepared code broke the build:")
-            for (view, diags) in report.demoted {
+        if !demoted.isEmpty {
+            print("Kept \(demoted.count) view(s) native — their prepared code broke the build:")
+            for (view, diags) in demoted {
                 print("  • \(view) — \(diags.first.map { "\($0)" } ?? "build error")"
                       + (diags.count > 1 ? " (+\(diags.count - 1) more)" : ""))
             }
@@ -401,14 +487,17 @@ struct Prepare: ParsableCommand {
                   ? "  Recorded under `native_views:` in .Patch.yml (remove a name to retry it with a newer patchcli)."
                   : "  (No .Patch.yml to record them in — run `patchcli init`, or they will be re-prepared next time.)")
         }
-        if report.clean {
-            print("✓ Verified: the prepared project builds cleanly.")
-        } else if report.timedOut {
-            print("⚠ Verification timed out — views left as prepared. Build in Xcode, or re-run "
+        if finalReport.systemic != nil {
+            // Already reported above.
+        } else if finalReport.clean {
+            print("✓ Verified: the prepared project builds cleanly"
+                  + (invocations.count > 1 ? " (\(invocations.map(\.label).joined(separator: " and ")))." : "."))
+        } else if finalReport.timedOut {
+            print("⚠ Verification timed out (\(failedLabel ?? "build")) — views left as prepared. Build in Xcode, or re-run "
                   + "`patchcli prepare --verify --verify-timeout \(Int(timeout) * 2)`.")
         } else {
-            let remaining = report.preExisting + report.unattributed
-            if let why = report.inconclusive { print("⚠ Verification inconclusive: \(why).") }
+            let remaining = finalReport.preExisting + finalReport.unattributed
+            if let why = finalReport.inconclusive { print("⚠ Verification inconclusive (\(failedLabel ?? "build")): \(why).") }
             if !remaining.isEmpty {
                 print("⚠ The build still fails with \(remaining.count) error(s) NOT caused by Patch's changes "
                       + "(present with them removed, or outside any prepared view):")
@@ -418,18 +507,52 @@ struct Prepare: ParsableCommand {
         return finalPrepared
     }
 
+    /// The actionable report for a SYSTEMIC verification failure — most views failing (or crashing the
+    /// compiler) in Patch-generated code. Names the patchcli + Xcode versions so the report is
+    /// actionable, and says plainly that it is Patch's bug.
+    static func systemicFailureMessage(_ s: PrepareVerifier.SystemicFailure, buildLabel: String) -> String {
+        let xcode = Self.xcodeVersionLine() ?? "the selected Xcode"
+        let what = s.compilerCrash ? "crashes the Swift compiler" : "fails to compile"
+        return """
+
+        ✗ PATCH BUG: the code patchcli \(Patch.configuration.version) generated \(what) in \
+        \(s.failingViews.count) of \(s.preparedCount) prepared view(s) (\(buildLabel), \(xcode)).
+            e.g. \(s.example)
+          This is not a problem with your code, so no view was kept native for it (that would silently \
+        switch Patch off for the whole app). Until it is fixed:
+            • update patchcli (`brew upgrade patchcli`) and re-run `patchcli prepare --verify`, or
+            • remove Patch's changes with `patchcli unprepare` so the app builds as before.
+          Please report it (patchcli version, Xcode version, the line above): https://github.com/patch-release/patch-swift/issues
+        """
+    }
+
+    /// First line of `xcodebuild -version` ("Xcode 26.0"), or nil.
+    static func xcodeVersionLine() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcodebuild")
+        p.arguments = ["-version"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)?.split(separator: "\n").first.map(String.init)
+    }
+
     /// Regenerate the prepared state from the ORIGINAL sources keeping `native` views native, and
     /// write every file whose on-disk text differs (so a view demoted after an earlier round gets
     /// its original source back). A file whose regenerated text would not parse is restored to
     /// its original text and its views are kept native too. Returns the views that carry a thunk.
     static func reapplyPrepare(sources: [Src], native: Set<String>, genURL: URL, fm: FileManager,
+                               legacyDynamic: [String: Set<String>] = [:],
                                thunkableFiles: Set<String>? = nil) -> Set<String> {
         // The SAME target-membership filter as the initial prepare — a verify round must never
         // re-thunk a widget/package view the first pass (correctly) left alone.
         let r = ThunkGenerator().prepare(sources: sources.map {
             ThunkGenerator.SourceFile(url: $0.url, text: $0.text)
         }, hybrid: true, nativeViews: native, accessForwarding: Self.accessForwardingEnabled,
-           thunkableFiles: thunkableFiles)
+           thunkableFiles: thunkableFiles, legacyDynamicTypes: legacyDynamic)
         var desired: [URL: String] = [:]
         for m in r.modifiedFiles { desired[m.url] = m.text }
         var broken = Set<String>()
@@ -446,7 +569,7 @@ struct Prepare: ParsableCommand {
         }
         if !broken.isEmpty, !broken.isSubset(of: native) {
             return reapplyPrepare(sources: sources, native: native.union(broken), genURL: genURL, fm: fm,
-                                  thunkableFiles: thunkableFiles)
+                                  legacyDynamic: legacyDynamic, thunkableFiles: thunkableFiles)
         }
         let gen = r.generatedFileContents.isEmpty ? Self.emptyGeneratedFile : r.generatedFileContents
         if fm.fileExists(atPath: genURL.path) || !r.generatedFileContents.isEmpty {
@@ -522,20 +645,51 @@ struct Prepare: ParsableCommand {
         Self.integrateUIKitIntoProject(root: root, target: target, thunkURL: thunkURL, fm: fm, quiet: quiet)
     }
 
-    /// Surface how to wire the UIKit thunk file + the PatchUIKit product into the build.
-    /// The thunk file is written into a cell file's directory, so SPM globs +
-    /// Xcode-16 synchronized folder groups + xcodegen pick it up by LOCATION; what a
-    /// dev must do is link the `PatchUIKit` product (the UIKit analogue of the
-    /// PatchSwiftUI link the SwiftUI path wires). We print that instruction rather than
-    /// extend the SwiftUI-specific `ProjectIntegrator` (which hardcodes PatchSwiftUI).
-    /// A classic (non-synchronized) pbxproj also needs the file added to the target's
-    /// Sources phase — the same one-time step the SwiftUI path documents.
+    /// Wire the UIKit thunk file + the `PatchUIKit` product into the build — the UIKit analogue
+    /// of `integrateIntoProject` (which links PatchSwiftUI). The thunk file `import PatchUIKit`s,
+    /// so an app target that doesn't link that product stops compiling ("no such module
+    /// 'PatchUIKit'") the moment prepare writes it: an `.xcodeproj` target gets the product link
+    /// (and, for a classic group, the file in its Sources phase); a Package.swift target gets the
+    /// `.product(name: "PatchUIKit", …)` dependency. When the wiring can't be done safely the
+    /// thunk file is REMOVED again (its cells stay native; the inserted `dynamic` is inert) and
+    /// the manual step is printed — prepare never leaves the app unbuildable.
     static func integrateUIKitIntoProject(root: URL, target: String?, thunkURL: URL, fm: FileManager, quiet: Bool) {
-        guard !quiet else { return }
+        let product = ProjectIntegrator.uikitProductName
         let rel = Self.relativePath(thunkURL, root: root)
-        print("→ UIKit cells need the PatchUIKit product linked: add it to the \(target ?? "app") "
-              + "target (Xcode: Frameworks/SwiftPM; Package.swift: a `.product(name: \"PatchUIKit\", package: \"patch-swift\")` dep).")
-        print("  (\(rel) is in the compile set by location for SPM / synchronized folder groups.)")
+        let projects = (try? fm.contentsOfDirectory(atPath: root.path))?.filter { $0.hasSuffix(".xcodeproj") }.sorted() ?? []
+        func fallBack(_ why: String) {
+            try? fm.removeItem(at: thunkURL)
+            if !quiet {
+                print("→ Kept UIKit cells native: \(why).")
+                print("  To patch them, link the \(product) product to the \(target ?? "app") target "
+                      + "(Package.swift: `.product(name: \"\(product)\", package: \"patch-swift\")`) and re-run `patchcli prepare`.")
+            }
+        }
+        guard let target else { return fallBack("no build target is configured in .Patch.yml") }
+        if let projName = projects.first {
+            do {
+                switch try ProjectIntegrator.wire(projectURL: root.appendingPathComponent(projName), target: target,
+                                                  fileURL: thunkURL, fm: fm, product: product) {
+                case .added: if !quiet { print("✓ Added \(thunkURL.lastPathComponent) + \(product) to target \(target).") }
+                case .alreadyPresent: if !quiet { print("✓ \(thunkURL.lastPathComponent) + \(product) already wired into \(target).") }
+                }
+            } catch {
+                fallBack("couldn't link \(product) into \(projName) automatically (\(error))")
+            }
+            return
+        }
+        if fm.fileExists(atPath: root.appendingPathComponent("Package.swift").path) {
+            do {
+                switch try ProjectIntegrator.wirePackage(packageDir: root, target: target, fm: fm, product: product) {
+                case .added: if !quiet { print("✓ Added the \(product) product to target \(target) in Package.swift.") }
+                case .alreadyPresent: if !quiet { print("✓ \(product) product present for target \(target).") }
+                }
+            } catch {
+                fallBack("couldn't add \(product) to Package.swift automatically (\(error))")
+            }
+            return
+        }
+        fallBack("no .xcodeproj or Package.swift at \(root.lastPathComponent)/ to link \(product) into (\(rel))")
     }
 
     /// Private-access forwarding is the default; `PATCH_ACCESS_FORWARDING=0` restores the legacy
@@ -545,10 +699,10 @@ struct Prepare: ParsableCommand {
         return !(v == "0" || v == "false" || v == "off" || v == "no")
     }
 
-    /// Strip Patch artifacts from files `.Patch.yml` excludes (see `execute`). Blocks always go;
-    /// `dynamic` goes when the prepare record lists it, or — with no record — when the file carries
-    /// a Patch block (proof prepare touched it). Parse-verified; a file that would stop parsing is
-    /// left untouched.
+    /// Strip Patch artifacts from files `.Patch.yml` excludes (see `execute`). Blocks and body
+    /// route wrappers always go; a legacy `dynamic` goes when the prepare record lists it, or —
+    /// with no record — when the file carries a Patch block (proof prepare touched it).
+    /// Parse-verified; a file that would stop parsing is left untouched.
     ///
     /// `targetCompileSet` (the build target's compile set, when known): scanned files OUTSIDE it —
     /// a widget/watch target's file, a local package, a file dropped from the project — get no
@@ -570,7 +724,8 @@ struct Prepare: ParsableCommand {
         for src in candidates {
             let text = src.text
             let hasBlock = text.contains(ThunkGenerator.sameFileBeginMarker) || text.contains(PatchAccessForwarding.beginMarker)
-            guard hasBlock || text.contains("dynamic var body") else { continue }
+            guard hasBlock || text.contains("dynamic var body")
+                    || text.contains(ThunkGenerator.routeMethodName) else { continue }
             let rel = PatchUninstaller.relativePath(src.url, root: root)
             let recorded = record.map { Set($0.dynamicInsertions[rel] ?? []) }
             let c = PatchUninstaller.cleanSource(text, dynamicTypes: recorded, hasEvidence: false, keepDynamic: false)
@@ -682,14 +837,49 @@ struct Prepare: ParsableCommand {
     /// surgery); a classic `.xcodeproj` gets the file wired in explicitly. Deterministic:
     /// anchored on the lexicographically-first view directory so re-runs land in the same
     /// place (idempotent regeneration). Falls back to `root`.
+    /// App-target files another native target also compiles (empty when none / not an .xcodeproj).
+    static func sharedTargetFiles(root: URL, target: String?, fm: FileManager = .default) -> Set<String> {
+        guard let target, !target.isEmpty else { return [] }
+        let projects = ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).filter { $0.hasSuffix(".xcodeproj") }.sorted()
+        for name in projects {
+            if let shared = XcodeTargetSources.sharedSwiftFiles(projectURL: root.appendingPathComponent(name), target: target, fm: fm) {
+                return Set(shared.map(ThunkGenerator.normalizedPath))
+            }
+        }
+        return []
+    }
+
+    /// Views whose thunk (or part of it) is written INTO their own source file (a PATCH-THUNKS
+    /// block) and whose declaring file is in `files`.
+    static func inFileThunkViews(_ result: ThunkGenerator.Result, inFiles files: Set<String>) -> Set<String> {
+        guard !files.isEmpty else { return [] }
+        return Set(result.placements.compactMap { view, placement -> String? in
+            guard case .sameFileBecausePrivate = placement,
+                  let url = result.viewDeclaringFile[view],
+                  files.contains(ThunkGenerator.normalizedPath(url.path)) else { return nil }
+            return view
+        })
+    }
+
+    /// Append `views` to `.Patch.yml` `native_views:`. Returns whether they were recorded.
+    static func recordNativeViews(_ views: Set<String>, root: URL) -> Bool {
+        guard let cfgURL = PatchConfig.find(startingAt: root), var cfg = try? PatchConfig.load(from: cfgURL) else { return false }
+        for v in views.sorted() where !cfg.nativeViews.contains(v) { cfg.nativeViews.append(v) }
+        return (try? cfg.yamlString().write(to: cfgURL, atomically: true, encoding: .utf8)) != nil
+    }
+
     static func generatedDirectory(for result: ThunkGenerator.Result, sources: [Src], root: URL,
-                                   alsoAnchorOn extraViews: Set<String> = []) -> URL {
+                                   alsoAnchorOn extraViews: Set<String> = [],
+                                   avoiding shared: Set<String> = []) -> URL {
         // The directories that actually declare a thunked view (deterministic, sorted). Kept-native
         // views (`alsoAnchorOn`) anchor too, so keeping a view native never MOVES the generated
         // folder (which would orphan the old file with stale thunks).
         let anchorViews = result.viewNames + extraViews.sorted()
         var viewDirs: [URL] = []
-        for src in sources where anchorViews.contains(where: { src.text.contains("struct \($0)") }) {
+        // Never anchor on a file another target also compiles: in a synchronized folder shared with
+        // that target, the generated file (which imports PatchSDK) would be compiled there too.
+        let unshared = sources.filter { !shared.contains(ThunkGenerator.normalizedPath($0.url.path)) }
+        for src in (unshared.isEmpty ? sources : unshared) where anchorViews.contains(where: { src.text.contains("struct \($0)") }) {
             let dir = src.url.deletingLastPathComponent()
             if !viewDirs.contains(dir) { viewDirs.append(dir) }
         }

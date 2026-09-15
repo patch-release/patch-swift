@@ -72,7 +72,7 @@ struct Release: ParsableCommand {
     var allowEmpty: Bool = false
 
     @Flag(name: .customLong("no-prepare"),
-          help: "Skip the automatic `prepare` step (don't add `dynamic`/thunks to new views before building).")
+          help: "Skip the automatic `prepare` step (don't route new views' bodies / generate their thunks before building).")
     var noPrepare: Bool = false
 
     func run() throws {
@@ -127,7 +127,7 @@ struct Release: ParsableCommand {
             buildRoot = cwd.appendingPathComponent(".Patch/build")
         }
 
-        // Auto-prepare: make any NEW SwiftUI views patchable (insert `dynamic` + thunks)
+        // Auto-prepare: make any NEW SwiftUI views patchable (route their bodies + thunks)
         // BEFORE we build, so the developer never has to remember `patchcli prepare`.
         // Idempotent + quiet (silent when nothing's new); degrades gracefully on failure.
         AutoPrepare.run(root: sourceDir, excludes: prepareExcludes, target: prepareTarget,
@@ -374,7 +374,7 @@ struct Ship: ParsableCommand {
     var allowEmpty: Bool = false
 
     @Flag(name: .customLong("no-prepare"),
-          help: "Skip the automatic `prepare` step (don't add `dynamic`/thunks to new views before building).")
+          help: "Skip the automatic `prepare` step (don't route new views' bodies / generate their thunks before building).")
     var noPrepare: Bool = false
 
     func run() throws {

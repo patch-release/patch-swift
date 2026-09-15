@@ -24,12 +24,17 @@ public enum ProjectIntegrator {
 
     /// Wire into an `.xcodeproj`: add `fileURL` to `target`'s Sources phase and
     /// link the PatchSwiftUI product. (Implemented in PBXThunkIntegration.)
-    public static func wire(projectURL: URL, target: String, fileURL: URL, fm: FileManager) throws -> Outcome {
-        try PBXThunkIntegration.wire(projectURL: projectURL, target: target, fileURL: fileURL, fm: fm)
+    public static func wire(projectURL: URL, target: String, fileURL: URL, fm: FileManager,
+                            product: String = "PatchSwiftUI") throws -> Outcome {
+        try PBXThunkIntegration.wire(projectURL: projectURL, target: target, fileURL: fileURL, fm: fm, product: product)
     }
 
+    /// The product UIKit cell thunks (`PatchUIKitThunks.generated.swift`) import.
+    public static let uikitProductName = "PatchUIKit"
+
     /// Ensure a SwiftPM target depends on the PatchSwiftUI product.
-    public static func wirePackage(packageDir: URL, target: String, fm: FileManager) throws -> Outcome {
-        try PBXThunkIntegration.wirePackage(packageDir: packageDir, target: target, fm: fm)
+    public static func wirePackage(packageDir: URL, target: String, fm: FileManager,
+                                   product: String = "PatchSwiftUI") throws -> Outcome {
+        try PBXThunkIntegration.wirePackage(packageDir: packageDir, target: target, fm: fm, product: product)
     }
 }

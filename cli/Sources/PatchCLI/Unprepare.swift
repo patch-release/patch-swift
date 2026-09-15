@@ -14,9 +14,10 @@ import CodeGenerator
 struct Unprepare: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unprepare",
-        abstract: "Remove Patch's generated code, `dynamic` keywords and project wiring (the inverse of `prepare`).",
+        abstract: "Remove Patch's generated code, view-body routes and project wiring (the inverse of `prepare`).",
         discussion: """
-        Removes the PATCH-ACCESS / PATCH-THUNKS blocks and the `dynamic` keywords prepare inserted, \
+        Removes the PATCH-ROUTE / PATCH-ACCESS / PATCH-THUNKS blocks and the `__patchRoute { … }` view-body \
+        wrappers prepare inserted (and an older CLI's `dynamic` keywords), \
         deletes Patch/Generated/ (and PatchUIKitThunks.generated.swift, .patch-backup copies), and \
         unwires the generated files + PatchSwiftUI from the Xcode project / Package.swift. \
         Add --remove-sdk to also remove the PatchSDK package and the injected Patch.configure startup code. \
@@ -37,7 +38,7 @@ struct Unprepare: ParsableCommand {
     @Flag(name: .long, help: "Also remove the PatchSDK package dependency and the injected `Patch.configure` code.")
     var removeSdk: Bool = false
 
-    @Flag(name: .long, help: "Leave every `dynamic` keyword in place.")
+    @Flag(name: .long, help: "Leave prepare's view-body edits (routes / legacy `dynamic` keywords) in place.")
     var keepDynamic: Bool = false
 
     func run() throws {

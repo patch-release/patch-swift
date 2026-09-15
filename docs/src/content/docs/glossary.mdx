@@ -123,13 +123,14 @@ instantiates each sub-module as its own WasmKit instance and routes calls to
 the right one. Sub-modules are kept separate rather than merged because two
 Swift modules cannot share one linear memory.
 
-## What is dynamic replacement, and what is a thunk?
+## What is a body route, and what is a thunk?
 
-Dynamic replacement is the Swift mechanism — the one Xcode Previews uses — that
-lets a marked `dynamic` function be substituted at runtime. `patchcli prepare`
-marks each `var body: some View` `dynamic` and generates a thunk: a small
-`@_dynamicReplacement(for: body)` function that asks the SDK whether a patched
-body exists and renders it, with the original native body as the fallback.
+`patchcli prepare` wraps each `var body: some View` getter in a route call —
+`var body: some View { __patchRoute { … } }` — and generates a thunk: a small
+per-view `__patchRoute` method that asks the SDK whether a patched body exists
+and renders it, with the original native body content as the fallback. (Older
+CLIs used Swift dynamic replacement — `dynamic` + `@_dynamicReplacement(for:
+body)` — which miscompiles or crashes in optimized Release builds.)
 Thunks are generated into `Patch/Generated/`. A view's `private` members are
 reached through a small `PATCH-ACCESS` forwarder extension in the view's own
 file.

@@ -68,17 +68,17 @@ frozen. See [the binary-symbol wall](/coverage/).
 
 ## Can Patch update SwiftUI views without wrapping them?
 
-Yes. `patchcli prepare` marks each `var body: some View` `dynamic` and
-generates `@_dynamicReplacement(for: body)` thunks — the same dynamic-replacement
-mechanism Xcode Previews uses. There is no `PatchView` wrapper and no change to
-how you write your views. The step runs automatically inside `patchcli build`,
+Yes. `patchcli prepare` routes each `var body: some View` through a generated
+per-view thunk (`var body: some View { __patchRoute { … } }`, on the body's own
+lines). There is no `PatchView` wrapper and no change to how you write your
+views, and it builds in Debug and optimized Release/archive builds alike. The step runs automatically inside `patchcli build`,
 `push` and `release`, so views you add later are picked up with no extra
 command. See [Quick Start](/quickstart/).
 
 ## Does prepare put generated code in my source files?
 
 Almost none. Thunks live in a gitignored `Patch/Generated/` folder. A view file
-gets `dynamic` on `var body`, and a view that uses `private` members also gets
+gets the body route plus a tiny `PATCH-ROUTE` native fallback, and a view that uses `private` members also gets
 one short, sorted `PATCH-ACCESS` extension of forwarders, so you never have to
 widen `private` to `internal`. A `private struct … : View` keeps a compact thunk
 in its own file, because no other file can extend it. `patchcli unprepare`
