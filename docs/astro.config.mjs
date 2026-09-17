@@ -9,6 +9,18 @@ import sitemap from '@astrojs/sitemap';
 const SITE = 'https://docs.patchrelease.com';
 const CONTENT = fileURLToPath(new URL('./src/content/docs/', import.meta.url));
 
+// ------------------------------------------------------------ code theme
+//
+// One theme for BOTH site themes: the code panel stays Xcode-dark on the light
+// page, the same way the marketing site's demo panel does. It is a real
+// TextMate theme (Xcode's own Default (Dark) values), so Expressive Code and
+// Shiki highlight with it directly rather than us re-colouring tokens in CSS.
+const xcodeDark = JSON.parse(
+  readFileSync(new URL('./src/styles/xcode-dark.json', import.meta.url), 'utf8')
+);
+
+const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace";
+
 // ---------------------------------------------------------------- lastmod
 //
 // Google only trusts a sitemap `lastmod` it can verify against the page, so the
@@ -92,7 +104,79 @@ export default defineConfig({
           tag: 'link',
           attrs: { rel: 'describedby', href: `${SITE}/llms.txt` },
         },
+        // Typefaces, matched to the marketing site: Figtree for display/UI,
+        // JetBrains Mono for code. Loaded as <link> (not a CSS @import) so the
+        // font request starts with the document rather than after the
+        // stylesheet has been fetched and parsed.
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+        },
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap',
+          },
+        },
       ],
+      // The code panel: Xcode Default (Dark), in both site themes.
+      expressiveCode: {
+        themes: [xcodeDark],
+        useDarkModeMediaQuery: false,
+        styleOverrides: {
+          borderRadius: '12px',
+          borderWidth: '1px',
+          borderColor: 'rgba(255, 255, 255, 0.09)',
+          codeFontFamily: MONO,
+          codeFontSize: '13px',
+          codeLineHeight: '1.66',
+          codePaddingInline: '1.15rem',
+          codePaddingBlock: '0.95rem',
+          uiFontFamily: "'Figtree', -apple-system, BlinkMacSystemFont, sans-serif",
+          uiFontSize: '12.5px',
+          focusBorder: '#0a7aff',
+          scrollbarThumbColor: 'rgba(255, 255, 255, 0.18)',
+          scrollbarThumbHoverColor: 'rgba(255, 255, 255, 0.3)',
+          frames: {
+            frameBoxShadowCssValue:
+              '0 1px 2px rgba(11, 13, 19, 0.06), 0 14px 32px -18px rgba(11, 13, 19, 0.34)',
+            editorTabBarBackground: '#252529',
+            editorTabBarBorderBottomColor: 'rgba(0, 0, 0, 0.45)',
+            editorActiveTabBackground: '#1f1f24',
+            editorActiveTabForeground: '#dfdfe0',
+            editorActiveTabBorderColor: 'transparent',
+            editorActiveTabIndicatorTopColor: '#f05138',
+            editorActiveTabIndicatorBottomColor: 'transparent',
+            editorActiveTabIndicatorHeight: '2px',
+            editorTabBorderRadius: '0',
+            inactiveTabBackground: '#252529',
+            inactiveTabForeground: 'rgba(255, 255, 255, 0.45)',
+            editorBackground: '#1f1f24',
+            terminalBackground: '#1f1f24',
+            terminalTitlebarBackground: '#2c2c31',
+            terminalTitlebarForeground: 'rgba(255, 255, 255, 0.62)',
+            terminalTitlebarBorderBottomColor: 'rgba(0, 0, 0, 0.45)',
+            terminalTitlebarDotsForeground: 'rgba(255, 255, 255, 0.26)',
+            terminalTitlebarDotsOpacity: '1',
+            tooltipSuccessBackground: '#12a05b',
+            inlineButtonForeground: '#dfdfe0',
+            inlineButtonBorder: 'rgba(255, 255, 255, 0.22)',
+          },
+          textMarkers: {
+            markBackground: 'rgba(10, 122, 255, 0.16)',
+            markBorderColor: '#0a7aff',
+            insBackground: 'rgba(65, 182, 69, 0.14)',
+            insBorderColor: '#41b645',
+            delBackground: 'rgba(252, 106, 93, 0.14)',
+            delBorderColor: '#fc6a5d',
+          },
+        },
+      },
       // Array form since Starlight 0.33 — the old object shape is a build error.
       social: [
         {

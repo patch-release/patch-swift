@@ -510,6 +510,16 @@ struct Renderer {
             payload.append(.int(destination))
             if let onMove { d?.send(onMove, .array(payload)) }
         }
+        // BUG (destructive dead affordance): R2-#134 stopped attaching an affordance whose
+        // EVENT is absent, but not one whose DISPATCHER is absent. `context.dispatcher` is nil
+        // for any view rendered without a dispatch export, and then `d?.send` is a silent no-op
+        // — while `.onDelete` is still attached. The user swipes, SwiftUI ANIMATES THE ROW OUT,
+        // the data never changes, and the row SNAPS BACK: precisely the "animates out then
+        // REAPPEARS" data-integrity failure the `thunkSafe` gate exists to prevent (bug #71).
+        // With no dispatcher there is nothing an affordance could ever do, so don't offer it.
+        // (`PatchedBodyHost` additionally DEMOTES such a view to its native body; this is the
+        // renderer-level net for the hand-wired `Patch.patchView` path, which shares this code.)
+        guard d != nil else { return AnyView(base()) }
         switch (onDelete, onMove) {
         case (.some, .some):
             return AnyView(base().onDelete(perform: deleteAction).onMove(perform: moveAction))

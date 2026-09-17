@@ -156,8 +156,6 @@ enum PushFlow {
             throw ValidationError("No .wasm at \(moduleURL.path). Run `patchcli build` first (or pass --module).")
         }
         let wasm = try Data(contentsOf: moduleURL)
-        let rawSHA = Fingerprinter.hash(String(decoding: wasm, as: UTF8.self))  // informational only
-        _ = rawSHA
 
         // --- 1. Fingerprint compatibility gate (BEFORE upload) -------------
         // Hashing the native shell + the backend round-trip are silent; spin so the
@@ -469,10 +467,25 @@ enum PushFlow {
         return answer == "y" || answer == "yes"
     }
 
-    static func defaultVersion() -> String {
+    /// The timestamp version used when `--version` is absent.
+    ///
+    /// The formatter is pinned to POSIX + Gregorian + UTC. A `DateFormatter`
+    /// otherwise inherits the PROCESS locale's calendar and numbering system, so the
+    /// default version depended on the developer's region:
+    ///   * `th_TH` → `2568.06.15…` (Buddhist year) — passes the backend's charset
+    ///     check, so it silently ships a wrong version that sorts before every other
+    ///     release for the next 500 years;
+    ///   * `ar_SA` / `fa_IR` → `١٤٤٦.١٢.١٩…` (Hijri + Arabic-Indic digits) — rejected
+    ///     by the backend's `^[A-Za-z0-9._-]+$` with a 422, AFTER the full ~2-minute
+    ///     build, and `validate(version:)` never saw it because it only checks an
+    ///     EXPLICIT `--version`.
+    /// `now` is injectable so the regression test can pin an exact expected string.
+    static func defaultVersion(now: Date = Date()) -> String {
         let f = DateFormatter()
-        f.dateFormat = "yyyy.MM.dd.HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.timeZone = TimeZone(identifier: "UTC")
-        return f.string(from: Date())
+        f.dateFormat = "yyyy.MM.dd.HHmmss"
+        return f.string(from: now)
     }
 }

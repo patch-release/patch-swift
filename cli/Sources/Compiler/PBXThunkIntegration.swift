@@ -349,12 +349,17 @@ enum PBXThunkIntegration {
             out = try XcodeProjectEditor.addProjectPackageReference(refID: refID, to: out)
         }
 
-        // 2. XCSwiftPackageProductDependency for PatchSwiftUI.
+        // 2. XCSwiftPackageProductDependency for PatchSwiftUI. The `package = …`
+        //    annotation names the reference's actual kind (a reused LOCAL reference
+        //    is an XCLocalSwiftPackageReference, not a remote one).
         let prodID = XcodeProjectEditor.generateID(excluding: out + refID)
+        let refKind = (objectBlock(id: refID, in: out)?
+            .contains("isa = XCLocalSwiftPackageReference;") ?? false)
+            ? "XCLocalSwiftPackageReference" : "XCRemoteSwiftPackageReference"
         let prodEntry = """
         \t\t\(prodID) /* \(productName) */ = {
         \t\t\tisa = XCSwiftPackageProductDependency;
-        \t\t\tpackage = \(refID) /* XCRemoteSwiftPackageReference "\(packageName)" */;
+        \t\t\tpackage = \(refID) /* \(refKind) "\(packageName)" */;
         \t\t\tproductName = \(productName);
         \t\t};
         """
@@ -379,12 +384,20 @@ enum PBXThunkIntegration {
         return out
     }
 
-    /// The object ID of an EXISTING patch-swift XCRemoteSwiftPackageReference,
-    /// if the project already references the package. (Lets a second product
-    /// from the same package share one reference rather than duplicating it.)
+    /// The object ID of an EXISTING patch-swift package reference — the remote
+    /// `XCRemoteSwiftPackageReference`, or (Xcode 15+) an
+    /// `XCLocalSwiftPackageReference` whose `relativePath` names a local
+    /// `patch-swift` checkout. Lets a second product from the same package share
+    /// one reference rather than duplicating it: two references to the same package
+    /// is exactly what Xcode reports as a duplicate/ambiguous product.
     static func existingPatchSwiftReferenceID(_ text: String) -> String? {
-        guard let sectionStart = text.range(of: "/* Begin XCRemoteSwiftPackageReference section */"),
-              let sectionEnd = text.range(of: "/* End XCRemoteSwiftPackageReference section */") else {
+        if let remote = referenceID(in: text, section: "XCRemoteSwiftPackageReference") { return remote }
+        return referenceID(in: text, section: "XCLocalSwiftPackageReference")
+    }
+
+    private static func referenceID(in text: String, section name: String) -> String? {
+        guard let sectionStart = text.range(of: "/* Begin \(name) section */"),
+              let sectionEnd = text.range(of: "/* End \(name) section */") else {
             return nil
         }
         let section = String(text[sectionStart.upperBound..<sectionEnd.lowerBound])
@@ -398,13 +411,21 @@ enum PBXThunkIntegration {
                 lineStart = section.index(before: lineStart)
             }
             let block = section[lineStart..<close.upperBound]
-            if block.contains(packageURL) || block.contains("patch-release/patch-swift") {
+            if blockIsPatchSwift(String(block)) {
                 let token = block.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).first
                 if let token { return String(token) }
             }
             search = close.upperBound
         }
         return nil
+    }
+
+    /// Does this package-reference block point at patch-swift — by repository URL,
+    /// or (a LOCAL reference) by a `relativePath` whose folder is named `patch-swift`?
+    static func blockIsPatchSwift(_ block: String) -> Bool {
+        if block.contains(packageURL) || block.contains("patch-release/patch-swift") { return true }
+        guard let path = quotedOrBareValue(of: "relativePath", in: block) else { return false }
+        return ((path as NSString).standardizingPath as NSString).lastPathComponent == packageName
     }
 
     // MARK: - Target-block helpers (PatchSwiftUI-named; mirror XcodeProjectEditor)
@@ -652,9 +673,10 @@ enum PBXThunkIntegration {
     static func addProduct(to manifest: String, targetName: String,
                            product: String = productName) throws -> (Outcome, String) {
         let productLine = productLine(for: product)
-        // Already wired? The product line is what we ensure; if it's present the
-        // target already depends on PatchSwiftUI.
-        if manifest.contains(productLine) {
+        // Already wired? The product line must be on THIS target — a multi-target
+        // package where another target already links it is not "already present"
+        // for this one (that read left the target unwired while reporting success).
+        if targetLinks(manifest, targetName: targetName, productLine: productLine) {
             return (.alreadyPresent, manifest)
         }
 
@@ -662,11 +684,26 @@ enum PBXThunkIntegration {
         var text = try addProductToTarget(in: manifest, targetName: targetName, product: product)
 
         // 2. The package dependency, only if patch-swift isn't already declared
-        //    (a prior PatchSDK add may have added it).
-        if !text.contains("patch-release/patch-swift") {
+        //    (a prior PatchSDK add may have added it — or the developer declared it
+        //    LOCALLY as `.package(path: "../patch-swift")`; declaring it twice is a
+        //    hard SwiftPM error).
+        if !PackageManifestEditor.declaresPatchSwiftPackage(text) {
             text = try addPackageDependency(in: text)
         }
         return (.added, text)
+    }
+
+    /// True when `targetName`'s own dependency list already carries `productLine`.
+    /// Falls back to a whole-manifest check when the target can't be located, so an
+    /// unusual manifest shape behaves exactly as before.
+    static func targetLinks(_ manifest: String, targetName: String, productLine: String) -> Bool {
+        guard let packageCall = PackageManifestEditor.argumentRange(ofCall: "Package", in: manifest),
+              let targetsArg = PackageManifestEditor.labeledArguments(in: manifest, range: packageCall)["targets"],
+              let targetCall = PackageManifestEditor.targetEntry(
+                named: targetName, in: manifest, targetsArray: targetsArg.value) else {
+            return manifest.contains(productLine)
+        }
+        return manifest[targetCall].contains(productLine)
     }
 
     /// Append `.product(name: "PatchSwiftUI", …)` to the target's dependencies,

@@ -237,7 +237,18 @@ public struct SwiftUIGuestEmitter {
             case "\n": out += "\\n"
             case "\r": out += "\\r"
             case "\t": out += "\\t"
-            default: out.append(c)
+            default:
+                // Any OTHER control scalar (C0, DEL) emitted raw is `unprintable ASCII
+                // character found in source file` — it fails the WHOLE guest module, so the
+                // convergence loop silently drops every view. `\u{XX}` is the exact same
+                // runtime value in valid source. (U+0001 is also the lifted-arg placeholder
+                // sentinel, so this is belt-and-braces with the lifter's own refusal.)
+                if let scalar = c.unicodeScalars.first, c.unicodeScalars.count == 1,
+                   scalar.value < 0x20 || scalar.value == 0x7F {
+                    out += "\\u{\(String(scalar.value, radix: 16))}"
+                } else {
+                    out.append(c)
+                }
             }
         }
         return out

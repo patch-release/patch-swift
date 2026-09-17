@@ -394,7 +394,7 @@ struct Emitter {
             : "N.group([\n" + nodes.map { indent($0) }.joined(separator: ",\n") + "\n])"
         guard !letBindings.isEmpty else { return viewExpr }
         // Wrap the bindings + node expression in an immediately-invoked closure so the
-        // `let`s are real in-scope guest bindings (`GuestBoundNameCollector` picks them
+        // `let`s are real in-scope guest bindings (`FreeIdentifierScanner` resolves them
         // up; the guest function compiles them). `[ViewNode]`/`ViewNode` return type is
         // inferred from the closure body's single `return`.
         var out = "{ () -> ViewNode in\n"
@@ -714,7 +714,7 @@ struct Emitter {
         // Used for the per-row indexed-slot guard (`AccountSwitcher`). If a body-local
         // reference in the condition CAN'T be projected, the rewrite returns nil and the
         // whole `if` demotes to a native slot (faithful over a free-identifier leak).
-        let rawCond = ifExpr.conditions.trimmedDescription
+        let rawCond = Self.guestConditionSource(ifExpr.conditions)
         // A body-local the GUEST can't resolve (a DROPPED `let owners = schedule.…`, not a
         // G33-emitted binding, not a loop/closure var in scope) would leak as a free guest
         // identifier in the verbatim ternary. The guest-resolvable body-locals (emitted
@@ -981,7 +981,9 @@ struct Emitter {
     private mutating func hostProjectCollectionGuard(_ conditions: ConditionElementListSyntax,
                                                      unresolvable: Set<String>) -> String? {
         // Parse the condition list as an expression list so we can locate member accesses.
-        let condSource = conditions.trimmedDescription
+        // `&&`-joined, NOT comma-joined — the result is spliced into a guest TERNARY condition,
+        // where a comma list is a TUPLE (see `guestConditionSource`).
+        let condSource = Self.guestConditionSource(conditions)
         let probe = Parser.parse(source: "let __patch_cond = (\(condSource))")
         guard let valueExpr = Self.tokenProbeValueExpr(probe) else { return nil }
         // Find every `<base>.count` / `<base>.isEmpty` whose base is a bare NON-resolvable
@@ -1191,6 +1193,21 @@ struct Emitter {
     /// `if case` pattern, or an availability `#available` is NOT — those make the whole
     /// `if` demote to a native slot (never a broken ternary). Multiple comma-separated
     /// boolean conditions are fine (they join as `&&` inside the ternary).
+    /// The guest-ternary source for an `if`'s condition clause.
+    ///
+    /// Swift's `if a, b { … }` is an AND of two clauses, but its SOURCE is comma-separated —
+    /// and the emitted guest form is `((<cond>) ? then : else)`, where a comma list is a
+    /// **tuple**, not a conjunction. Splicing the raw source therefore emitted
+    /// `((a, b) ? … : …)` → `cannot convert value of type '(Bool, Bool)' to expected condition
+    /// type 'Bool'`, which fails the WHOLE guest module (all of that app's views ship native).
+    /// Each clause is parenthesized and joined with `&&`, which is what `isPlainBooleanCondition`
+    /// always documented ("they join as `&&` inside the ternary") and what Swift itself means.
+    /// Short-circuiting matches Swift's own left-to-right clause evaluation.
+    static func guestConditionSource(_ conditions: ConditionElementListSyntax) -> String {
+        let clauses = conditions.map { $0.condition.trimmedDescription }
+        return clauses.count == 1 ? clauses[0] : clauses.map { "(\($0))" }.joined(separator: " && ")
+    }
+
     static func isPlainBooleanCondition(_ conditions: ConditionElementListSyntax) -> Bool {
         for c in conditions {
             switch c.condition {
@@ -1211,9 +1228,39 @@ struct Emitter {
     static func isSoleAvailabilityCondition(_ conditions: ConditionElementListSyntax) -> Bool {
         guard conditions.count == 1, let only = conditions.first else { return false }
         if case .availability(let avail) = only.condition {
-            return avail.availabilityKeyword.tokenKind == .poundAvailable
+            guard avail.availabilityKeyword.tokenKind == .poundAvailable else { return false }
+            // SOUNDNESS: resolving the AVAILABLE branch drops the `else`, so the ONLY thing
+            // keeping an older device faithful is the manifest `minOS` the SDK gates on. If we
+            // can't derive a minOS for EVERY platform the condition names, that gate doesn't
+            // exist and the patched view would render the available branch on a device that
+            // natively renders the `else` — a WRONG RENDER. Fall through to the normal handling
+            // (slot/demote), which is always allowed.
+            return Self.availabilityIsMinOSDerivable(avail)
         }
         return false
+    }
+
+    /// True iff every platform spec in `avail` (other than the `*` wildcard) is one
+    /// `BodyLowering.minimumOS` recognizes AND parses — so the resolved branch is protected by
+    /// a manifest `minOS` entry on every platform it names. `#available(macCatalyst 16.0, *)`
+    /// (an unmodelled platform) and a version the parser rejects both return false.
+    static func availabilityIsMinOSDerivable(_ avail: AvailabilityConditionSyntax) -> Bool {
+        var named = 0
+        for arg in avail.availabilityArguments {
+            switch arg.argument {
+            case .token:
+                continue                       // the `*` wildcard — adds no floor
+            case .availabilityVersionRestriction(let r):
+                named += 1
+                let spec = "\(r.platform.text) \(r.version?.trimmedDescription ?? "")"
+                guard !BodyLowering.minimumOS(fromAvailabilityConditions: ["(\(spec))"]).isEmpty else {
+                    return false
+                }
+            case .availabilityLabeledArgument:
+                return false                   // `#available(_iOS9Available: …)` — not modelled
+            }
+        }
+        return named > 0
     }
 
     private mutating func emitCall(_ call: FunctionCallExprSyntax) -> String {
@@ -7367,7 +7414,8 @@ struct Emitter {
         // marshalling registers `vm` carrying ONLY its collection fields, so `.padding(vm.spacing)` /
         // `VStack(spacing: vm.gap)` lands here — it must fall through to the reactive host-projection
         // (b2), never leak `vm.spacing` verbatim (which fails the whole guest compile → ships 0 views).
-        if asWritten.isCompilable, !flatStructInputMemberLeaks(trimmed) { return trimmed }
+        if asWritten.isCompilable, Self.numericExprIsGuestTypeSafe(trimmed),
+           !flatStructInputMemberLeaks(trimmed) { return trimmed }
         // (b) A bare reference to a NUMERIC computed scalar property (G42:
         // `.padding(inset)` where `var inset: CGFloat { … }` reads state) → host-project
         // it. The thunk's `__patchTokens()` evaluates `self.inset` natively → a Double the
@@ -7417,6 +7465,70 @@ struct Emitter {
         guard let id = recordNumericTokenIfResolvable(trimmed) else { return nil }
         return BodyLowering.numericTokenInputKey(id)
     }
+
+    /// Whether a numeric expression is safe to emit VERBATIM into the guest's numeric position
+    /// (the emitter wraps it as `Double(<expr>)`).
+    ///
+    /// `SwiftUIGuestScopeCheck` is a NAME resolver: it answers "is every identifier in scope",
+    /// not "does this type-check". Two shapes pass it and still fail the guest compile — and a
+    /// guest compile failure is not a local one, it drops the WHOLE module (every view in the
+    /// app ships native, silently):
+    ///
+    ///   * a `nil` literal — `.frame(height: isHidden ? 0 : nil)` became
+    ///     `Double((… ) ? 0 : nil)` → `'nil' cannot be used in context expecting type 'Double'`.
+    ///     `nil` is in `safeGlobals`, so the name check waves it through;
+    ///   * a bare IMPLICIT-MEMBER access — `HStack(spacing: .horizontalSpacing)` over an app's
+    ///     `extension CGFloat { static let horizontalSpacing }` became `Double(.horizontalSpacing)`,
+    ///     which the guest resolves against whatever `Double.init` overload wins
+    ///     (`type 'Substring' has no member 'horizontalSpacing'`). It has no base identifier, so
+    ///     the name check sees nothing to resolve. This is the same class as the input-default
+    ///     `?? .zero` fix, in the modifier-VALUE position.
+    ///
+    /// Rejecting here just means the expression is not "resolvable as written": it falls through
+    /// to the host NUMERIC TOKEN path (which evaluates it natively — the right channel for a
+    /// design-system constant) and, failing that, to the caller's native slot. The implicit
+    /// members that DO type-check under `Double(_:)` stay allowed.
+    static func numericExprIsGuestTypeSafe(_ source: String) -> Bool {
+        guard Self.mayHoldNilOrImplicitMember(source) else { return true }
+        let probe = Parser.parse(source: "let __patch_numsafe = (\(source))")
+        let scanner = NumericGuestTypeSafetyScanner(viewMode: .sourceAccurate)
+        scanner.walk(probe)
+        return scanner.isSafe
+    }
+
+    /// Cheap pre-filter for `numericExprIsGuestTypeSafe`: does `source` even LOOK like it could
+    /// hold a `nil` or a bare implicit member? A decimal point (`0.5`) and a member access
+    /// (`geo.size.width`) are both preceded by an identifier/digit character, so the overwhelmingly
+    /// common numeric expressions skip the parse entirely.
+    static func mayHoldNilOrImplicitMember(_ source: String) -> Bool {
+        let bytes = Array(source.utf8)
+        var previous: UInt8 = 0
+        for (index, byte) in bytes.enumerated() {
+            if byte == UInt8(ascii: ".") {
+                // A leading `.`, or one preceded by anything that can't end an operand, opens an
+                // implicit member (`(.gutter)`, `? .a : .b`, `max(.x, 2)`).
+                let isOperandTail = previous.isPatchIdentifierByte || previous == UInt8(ascii: ")")
+                    || previous == UInt8(ascii: "]")
+                if !isOperandTail { return true }
+            }
+            if byte == UInt8(ascii: "n"), index + 2 < bytes.count,
+               bytes[index + 1] == UInt8(ascii: "i"), bytes[index + 2] == UInt8(ascii: "l"),
+               !previous.isPatchIdentifierByte,
+               index + 3 >= bytes.count || !bytes[index + 3].isPatchIdentifierByte {
+                return true
+            }
+            if byte != UInt8(ascii: " ") { previous = byte }
+        }
+        return false
+    }
+
+    /// Implicit members that genuinely type-check as `Double(.x)` in the guest (stdlib
+    /// `FloatingPoint` statics). Everything else implicit is an app/design-system constant the
+    /// guest does not have.
+    static let guestSafeImplicitNumericMembers: Set<String> = [
+        "infinity", "pi", "nan", "signalingNaN",
+        "greatestFiniteMagnitude", "leastNormalMagnitude", "leastNonzeroMagnitude", "ulpOfOne",
+    ]
 
     /// The input-computed-member base names (`size`) — the struct/enum INPUT params that
     /// carry a host-projectable computed scalar/Font member. Derived from the path keys.
@@ -9418,16 +9530,52 @@ final class StringLiteralLifter: SyntaxRewriter {
                            thenRange: then.range, elseRange: els.range)
     }
 
-    /// A single PLAIN (non-interpolated) string-literal arm → its unquoted value + the
-    /// ORIGINAL byte range of the full literal (quotes included). Nil for an interpolated
-    /// or non-string-literal arm.
+    /// A single PLAIN (non-interpolated) string-literal arm → its DECODED value + the
+    /// ORIGINAL byte range of the full literal (quotes/`#` delimiters included). Nil for an
+    /// interpolated or non-string-literal arm, or one whose value can't be decoded.
+    /// See `liftableLiteral` for why the value must be the DECODED one.
     private static func plainStringArm(_ expr: ExprSyntax) -> (value: String, range: Range<Int>)? {
-        guard let lit = expr.as(StringLiteralExprSyntax.self),
-              lit.segments.count == 1,
-              let seg = lit.segments.first?.as(StringSegmentSyntax.self) else { return nil }
+        guard let lit = expr.as(StringLiteralExprSyntax.self) else { return nil }
+        return liftableLiteral(lit)
+    }
+
+    /// The DECODED value + ORIGINAL byte range of a PLAIN (non-interpolated) string literal
+    /// that is safe to lift, or nil when it must stay baked.
+    ///
+    /// ## The value must be DECODED (`representedLiteralValue`), not the source text
+    /// A lifted value rides WASM in `BodyEmission.slotArgs`, and the guest emitter bakes it
+    /// back out through `SwiftUIGuestEmitter.swiftStringLiteralBody` — i.e. it RE-ESCAPES it
+    /// as a Swift literal. Recording the raw SOURCE text (`segment.content.text`, which for
+    /// `"Line1\nLine2"` is the eight characters `Line1\nLine2` with a literal backslash)
+    /// therefore double-escapes: the guest bakes `"Line1\\nLine2"` and the device renders the
+    /// characters `\n` instead of a line break — a WRONG RENDER of a view that reported
+    /// shipped. `representedLiteralValue` gives the real runtime value, which re-escapes back
+    /// to the developer's own literal.
+    ///
+    /// ## Excluded (conservative — the literal stays baked, an edit MISMATCHes)
+    /// * a literal `representedLiteralValue` can't decode (nil);
+    /// * a literal whose SOURCE SPANS A NEWLINE (a `"""` multi-line literal). Its byte range
+    ///   is handed to the fingerprint walker, which replaces it with a newline-free
+    ///   placeholder BEFORE the line-based body-span strip — collapsing the file's line
+    ///   numbering and neutralizing the WRONG lines (a native edit could then ship with a
+    ///   stale fingerprint). Keeping the lift to single-line literals preserves the
+    ///   "a normalized literal never changes the line count" invariant at its source;
+    /// * a value carrying a control character the guest's literal escaper would emit raw
+    ///   (`\u{1}` is also the placeholder sentinel) — belt-and-braces with the escaper's own
+    ///   hardening.
+    static func liftableLiteral(_ lit: StringLiteralExprSyntax) -> (value: String, range: Range<Int>)? {
+        guard !lit.segments.contains(where: { $0.is(ExpressionSegmentSyntax.self) }),
+              let value = lit.representedLiteralValue, !value.isEmpty else { return nil }
+        if value.unicodeScalars.contains(where: { $0.value < 0x20 && $0 != "\n" && $0 != "\t" && $0 != "\r" }) {
+            return nil
+        }
         let lo = lit.positionAfterSkippingLeadingTrivia.utf8Offset
         let hi = lit.endPositionBeforeTrailingTrivia.utf8Offset
-        return (seg.content.text, lo..<hi)
+        guard lo < hi else { return nil }
+        // Single-line SOURCE span only (see the doc comment): a `"""` literal's range would
+        // shift the fingerprint's line numbering.
+        if lit.description.contains("\n") || lit.trimmedDescription.contains("\n") { return nil }
+        return (value, lo..<hi)
     }
 
     /// Scan the ORIGINAL (un-rewritten) call for liftable arguments.
@@ -9510,23 +9658,18 @@ final class StringLiteralLifter: SyntaxRewriter {
             if !hasExprInterpolation {
                 // PLAIN literal (possibly with escape sequences like `\n`, `\t`, or `\"` that
                 // SwiftSyntax may parse as multiple StringSegmentSyntax rather than one):
-                // treat the WHOLE literal as a single atomic value. Join all StringSegmentSyntax
-                // tokens to get the display text; use the whole quoted literal's byte range.
-                // This lifts `"Find MY best\ntime to post."` correctly — a `\n` in a non-raw
-                // string literal is just an escape, not a runtime interpolation, so the string
-                // is fully static and OTA-editable (no wrong-render risk).
-                let lo = lit.positionAfterSkippingLeadingTrivia.utf8Offset
-                let hi = lit.endPositionBeforeTrailingTrivia.utf8Offset
-                // Concatenate segment text to reconstruct the escaped content (e.g. "Hello\nWorld"
-                // → content text "Hello\nWorld" — the source-form escape characters, not a real
-                // newline). The SDK and WASM receive this string as a slotArg; the thunk substitutes
-                // it verbatim via `a[k]` so it appears correctly in the native call.
-                let value = lit.segments.compactMap { $0.as(StringSegmentSyntax.self)?.content.text }.joined()
-                guard !value.isEmpty else { continue }
+                // treat the WHOLE literal as a single atomic value — its DECODED runtime value
+                // (`representedLiteralValue`) plus the whole literal's byte range. The value is
+                // re-escaped by the guest emitter when it bakes `slotArgs`, so it MUST be the
+                // decoded one; see `liftableLiteral` (recording the raw source text made
+                // `"Line1\nLine2"` render as the characters `\n`). `liftableLiteral` also
+                // refuses a multi-LINE literal (it would shift the fingerprint's line numbering)
+                // and an undecodable one — both stay baked, which is the safe failure.
+                guard let lifted = Self.liftableLiteral(lit) else { continue }
                 result.append(PendingLift(
                     argIndex: idx, spec: spec,
-                    staticRanges: [lo..<hi],
-                    staticValues: [value],
+                    staticRanges: [lifted.range],
+                    staticValues: [lifted.value],
                     interpolatedTemplate: nil,
                     ternaryArmTemplate: nil))
             } else {
@@ -9849,6 +9992,35 @@ extension StringLiteralLifter {
 // To lift Text(verbatim:"lit") as a String position we need an explicit spec.
 // However: Text(verbatim:) falling to opaqueExpr is rare (only for non-literal verbatim
 // args, per line 1241-1243 — these aren't string literals). We defer this case.
+
+extension UInt8 {
+    /// An ASCII byte that can appear inside a Swift identifier or number literal — i.e. one that
+    /// can END an operand, so a `.` right after it is a member access, not an implicit member.
+    var isPatchIdentifierByte: Bool {
+        (self >= UInt8(ascii: "a") && self <= UInt8(ascii: "z"))
+            || (self >= UInt8(ascii: "A") && self <= UInt8(ascii: "Z"))
+            || (self >= UInt8(ascii: "0") && self <= UInt8(ascii: "9"))
+            || self == UInt8(ascii: "_") || self >= 0x80
+    }
+}
+
+/// Rejects the two shapes that pass the guest NAME check but cannot type-check inside the
+/// emitted `Double(<expr>)` — a `nil` literal and a bare implicit-member access that isn't a
+/// stdlib `FloatingPoint` static. See `SwiftUIEmitter.numericExprIsGuestTypeSafe`.
+final class NumericGuestTypeSafetyScanner: SwiftSyntax.SyntaxVisitor {
+    private(set) var isSafe = true
+
+    override func visit(_ node: NilLiteralExprSyntax) -> SyntaxVisitorContinueKind {
+        isSafe = false; return .skipChildren
+    }
+
+    override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        guard node.base == nil else { return .visitChildren }
+        let member = node.declName.baseName.text
+        if !Emitter.guestSafeImplicitNumericMembers.contains(member) { isSafe = false }
+        return .visitChildren
+    }
+}
 
 /// Detects a `return` STATEMENT anywhere in a syntax subtree. Used by the slot
 /// AnyView-wrappability gate: a `switch` body whose arms `return` (`switch r { case 1:

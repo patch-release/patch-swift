@@ -153,6 +153,14 @@ public struct WasmModuleMerger {
         }
         modules.append([UInt8](try Data(contentsOf: secondary)))
 
+        // Every sub-module must still be a real wasm binary at THIS point (the file
+        // could have been truncated/replaced since `looksLikeWasm` read its header).
+        // `PatchModuleContainer.encode` traps on a non-wasm sub-module, and trapping
+        // would kill the CLI mid-build; failing here degrades to "gain not shipped",
+        // which is the documented contract.
+        guard modules.allSatisfy({ $0.count >= 4 && Array($0.prefix(4)) == Self.wasmMagic }) else {
+            throw MergeError.notWasm(secondary)
+        }
         let container = PatchModuleContainer.encode(modules)
 
         // Write atomically — to a temp file, then replace in place — so a partial/failed

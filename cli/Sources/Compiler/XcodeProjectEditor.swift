@@ -30,7 +30,7 @@ public enum XcodeProjectEditor {
     public static let productName = "PatchSDK"
     // The SDK floor `init` writes. Keep it at the oldest SDK this CLI's generated thunks
     // compile against (one tag ships both CLI and SDK since 1.7.0).
-    public static let minimumVersion = "1.7.3"
+    public static let minimumVersion = "1.8.0"
 
     public enum EditResult: Sendable, Equatable {
         case added
@@ -63,8 +63,28 @@ public enum XcodeProjectEditor {
                 "project.pbxproj is not in the OpenStep plist format Xcode writes "
                 + "(unexpected header) — add the package in Xcode instead.")
         }
-        if pbxproj.contains(packageURL) || pbxproj.contains("patch-release/patch-swift") {
+        // "Already present" means THIS TARGET links the PatchSDK product. The old
+        // check — "the file mentions patch-swift anywhere" — reported
+        // `.alreadyPresent` whenever the project already referenced the package for
+        // ANY reason (most commonly `patchcli prepare`, which adds the same
+        // patch-swift reference to link PatchSwiftUI). PatchSDK was then never
+        // linked, so `init` printed success and the app failed to compile the
+        // `import PatchSDK` it had just injected.
+        if PBXThunkIntegration.productAlreadyLinked(pbxproj, targetName: targetName, product: productName) {
             return (.alreadyPresent, pbxproj)
+        }
+        // The package IS referenced (remote or local) but this target doesn't link
+        // PatchSDK: add only the product, reusing the existing reference. Creating a
+        // second reference to the same package is what Xcode reports as a duplicate.
+        if PBXThunkIntegration.existingPatchSwiftReferenceID(pbxproj) != nil {
+            do {
+                return (.added, try PBXThunkIntegration.addProductLink(
+                    to: pbxproj, target: targetName, product: productName))
+            } catch {
+                throw EditError.unsupported(
+                    "project.pbxproj already references \(packageName), but the \(productName) "
+                    + "product could not be linked to `\(targetName)` (\(error)) — add it in Xcode instead.")
+            }
         }
 
         let refID = generateID(excluding: pbxproj)

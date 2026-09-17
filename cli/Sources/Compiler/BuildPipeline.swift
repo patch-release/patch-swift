@@ -328,6 +328,32 @@ public struct BuildPipeline {
             }
             return nil
         }
+
+        /// Gains the build PRODUCED but did not SHIP: a lowering compiled a guest
+        /// module, yet combining it into the shippable `module.wasm` failed, so the
+        /// artifact that goes to devices does NOT carry those exports.
+        ///
+        /// `build` prints this per section; `release`/`push` used to print nothing at
+        /// all, so a failed SwiftUI/UIKit/real-source combine shipped a module with
+        /// none of the view patches in it while the command reported success. The
+        /// degenerate-coverage gate doesn't catch it: it only fires when NOTHING
+        /// shipped, and an app whose general logic compiled has real exports.
+        public var unshippedGainWarnings: [String] {
+            var out: [String] = []
+            if loweredViewBodies > 0, !swiftUIMergedIntoDefault {
+                out.append("\(loweredViewBodies) lowered SwiftUI view bod(y/ies) are NOT in the shipped "
+                           + "module — the combine into module.wasm failed, so this patch changes no views.")
+            }
+            if loweredCells > 0, !uikitMergedIntoDefault {
+                out.append("\(loweredCells) lowered UIKit cell(s) are NOT in the shipped module — "
+                           + "the combine into module.wasm failed.")
+            }
+            if realSourceCompiledUnits > 0, !realSourceMergedIntoDefault {
+                out.append("\(realSourceCompiledUnits) real-source unit(s) are NOT in the shipped module — "
+                           + "the combine into module.wasm failed.")
+            }
+            return out
+        }
     }
 
     /// Run the full pipeline.

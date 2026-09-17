@@ -262,6 +262,31 @@ struct Build: ParsableCommand {
             try data.write(to: URL(fileURLWithPath: report))
             print("\nWrote report: \(report)")
         }
+
+        // EXIT CODE: a compile that ran and emitted NOTHING is a failed build. It used
+        // to print "No module emitted." and exit 0, so a CI step running `patchcli
+        // build` went green on a build that produced no artifact at all (the failure
+        // only surfaced later, at `push`: "No .wasm at …"). A dry run / absent
+        // toolchain is NOT a failure — neither is expected to emit a module.
+        if !dryRun, compiler.toolchainAvailable, let outcome = result.compileOutcome,
+           !outcome.toolchainUnavailable, !Self.emittedModule(result) {
+            print("\n✗ Build FAILED — no .wasm was produced, so there is nothing to push.")
+            if !outcome.reclassifiedNative.isEmpty {
+                print("  Every OTA candidate was demoted to native after a failed WASM compile:")
+                for d in outcome.reclassifiedNative.prefix(10) { print("    - \(d.functionID)") }
+                if outcome.reclassifiedNative.count > 10 {
+                    print("    … and \(outcome.reclassifiedNative.count - 10) more")
+                }
+            }
+            print("  Run with --verbose for the generated sources, or `patchcli doctor` for setup checks.")
+            throw ExitCode(2)
+        }
+    }
+
+    /// Did the build actually write a module file?
+    static func emittedModule(_ result: BuildPipeline.Result) -> Bool {
+        guard let url = result.moduleURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     private func printCoverage(_ report: CoverageReport, split: [String]) {
@@ -426,7 +451,7 @@ struct Build: ParsableCommand {
     /// source tree by location). Mirrors `Prepare.integrateIntoProject`.
     private static func integrateHostBridgeFile(root: URL, target: String?, fileURL: URL, fm: FileManager) {
         let rel = Prepare.relativePath(fileURL, root: root)
-        let projects = (try? fm.contentsOfDirectory(atPath: root.path))?.filter { $0.hasSuffix(".xcodeproj") } ?? []
+        let projects = ((try? fm.contentsOfDirectory(atPath: root.path))?.filter { $0.hasSuffix(".xcodeproj") } ?? []).sorted()
 
         if let projName = projects.first, let target {
             do {

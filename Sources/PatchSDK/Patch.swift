@@ -262,6 +262,15 @@ public final class Patch: @unchecked Sendable {
     /// production.
     var _onInstantiateForTesting: (@Sendable () -> Void)?
 
+    /// TEST-ONLY: fired at the START of `prewarmViewBodyExports()` — i.e. INSIDE the
+    /// window between the module-set swap (which already bumped `moduleEpoch`) and the
+    /// point where the new module's manifest bytes land in `_cachedManifestBytes`. A test
+    /// uses it to assert the epoch/manifest-cache invariant holds throughout that window
+    /// (a STALE manifest read against the NEW epoch pins the previous module's view
+    /// entries for the whole epoch — see the `_cachedManifestBytes` clear in `activate`/
+    /// `hotSwapBody`). Never set in production.
+    var _onPrewarmForTesting: (@Sendable () -> Void)?
+
     // MARK: - Cold-start pre-warm (W5a/W5b)
     //
     // The SDK pre-warms two things immediately after a module activates on the
@@ -328,6 +337,7 @@ public final class Patch: @unchecked Sendable {
     /// fires on main. Errors/traps from pre-warm invocations are silently discarded
     /// (the real body call will surface any real failure via the demote path).
     private func prewarmViewBodyExports() {
+        lock.read { _onPrewarmForTesting }?()
         // W5b: load and cache the manifest bytes.
         let manifestBytes: [UInt8]?
         if hasFunction(Self._viewManifestExportName),
@@ -465,9 +475,15 @@ public final class Patch: @unchecked Sendable {
         shared.lock.write {
             shared.configuration = configuration
             shared._storage = try? ModuleStorage(appKey: configuration.appKey)
-            if let base = configuration.apiBaseURL {
-                shared._updateChecker = UpdateChecker(baseURL: base)
-            }
+            // BUG: this used to be `if let base = … { shared._updateChecker = … }`, which never
+            // CLEARED an existing checker. `PatchConfiguration.apiBaseURL` documents `nil` as
+            // "disable remote update checks entirely", but a second `configure(…)` that passed
+            // `nil` left the checker from the FIRST call installed — so `start()` /
+            // `checkForUpdate()` kept polling the old backend after the app explicitly turned
+            // remote checks off. (`_storage` was already replaced unconditionally here; the
+            // checker's `if let` was the asymmetry.) Assign unconditionally so `nil` means what
+            // it says.
+            shared._updateChecker = configuration.apiBaseURL.map { UpdateChecker(baseURL: $0) }
         }
         // Install the default bridges (idempotent registration is fine — apps
         // that pre-registered customs keep them; later defines win at link time).
@@ -587,6 +603,21 @@ public final class Patch: @unchecked Sendable {
                 // set, so the named-lookup redirection (colors/strings/images) reflects the
                 // newly-active artifact (nil overlay ⇒ no overrides, falls through to bundle).
                 self._activeOverlay = built.overlay
+                // W5b STALE-MANIFEST FIX: invalidate the cached `patch_view_manifest` bytes in
+                // the SAME critical section that bumps the epoch. `prewarmViewBodyExports()`
+                // refills it, but that runs AFTER this lock is released — so without this clear
+                // there is a window in which `moduleEpoch` already names the NEW module while
+                // `cachedManifestBytes()` still returns the PREVIOUS module's manifest. A SwiftUI
+                // body evaluation landing in that window (activation runs on a background queue,
+                // the UI renders concurrently) makes `PatchViewPatchRegistry.syncWithModuleEpoch`
+                // load the OLD entries and stamp them with the NEW epoch — and since it only
+                // reloads on an epoch CHANGE, those stale entries are pinned for the whole epoch.
+                // Consequences: a view the new patch changed keeps the old `bodyHash`, so the
+                // native-fast-path gate returns nil and the PATCH IS SILENTLY NOT APPLIED; and a
+                // stale `minVersion`/`minOS`/`isStructurallyStatic` mis-routes others. Clearing
+                // here makes the window read nil, which falls back to calling the LIVE module's
+                // manifest export — always the correct one.
+                self._cachedManifestBytes = nil
                 // Drop the per-pass value cache INSIDE the swap critical section (BUG-9):
                 // clearing it after releasing the lock races a concurrent value reader that
                 // observed the freshly-swapped `active` but still hits a STALE cache entry
@@ -753,6 +784,10 @@ public final class Patch: @unchecked Sendable {
                     self.active = prior.0
                     self.additional = prior.1
                     self._activeOverlay = prior.2
+                    // Same W5b invariant as `activate()`: never let a bumped epoch coexist with
+                    // manifest bytes that may not belong to the now-active set. nil ⇒ the
+                    // registry re-reads the LIVE module's manifest export.
+                    self._cachedManifestBytes = nil
                     return bumpModuleEpochLocked()
                 }
                 // Restore the PRIOR overlay in the redirection (clean rollback).
@@ -776,6 +811,12 @@ public final class Patch: @unchecked Sendable {
             prior.1.forEach { $0.teardown() }
             return lock.write {
                 valueCache.clear()
+                // W5b STALE-MANIFEST FIX (see `activate()`): the cached manifest bytes still
+                // describe the PRIOR module here; `prewarmViewBodyExports()` refills them only
+                // after this `callQueue.sync` block returns. Clearing them inside the same
+                // critical section as the epoch bump makes it impossible for the registry to
+                // pin the previous module's view entries against the new epoch.
+                self._cachedManifestBytes = nil
                 return bumpModuleEpochLocked()
             }
         }
@@ -1398,6 +1439,15 @@ public final class Patch: @unchecked Sendable {
         if response.revert {
             deactivate()
             storage.clearCurrent()
+            // BUG (a recalled patch could come BACK): the imperative `checkForUpdate()` revert
+            // path clears `_pendingResponse`/`_staged` too, but this one did not. An app that
+            // uses BOTH flows — `start()`/auto-apply plus a "Download now / Reload" button —
+            // could have already STAGED the very bytes the server is now recalling. Those
+            // staged bytes survived the recall in memory, so the next `reloadAsync()` (e.g.
+            // the user tapping "Reload", or `enforceMandatoryUpdates()`) re-activated the
+            // KNOWN-BAD module the rollback existed to remove. Clear them, exactly as the
+            // imperative path does.
+            lock.write { self._pendingResponse = nil; self._staged = nil }
             return storage.currentVersion.map { .activated(version: $0) } ?? .noModule
         }
 
@@ -1696,7 +1746,7 @@ public final class Patch: @unchecked Sendable {
     }
 
     /// The SDK version reported in the update-check payload (`sdk_version`).
-    public static let sdkVersion = "1.7.3"
+    public static let sdkVersion = "1.8.0"
 
     // MARK: - Release-targeting client facts (os_version / app_version)
     //

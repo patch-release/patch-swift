@@ -157,7 +157,7 @@ enum CLISupport {
         if (config.workspaceId ?? "").isEmpty, !app.workspaceId.isEmpty {
             config.workspaceId = app.workspaceId
         }
-        try? config.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
+        try? config.write(to: configURL)
         print("Resolved app_id from bundle_id `\(bundleId)` → \(app.id) (cached in .Patch.yml).")
         return app.id
     }

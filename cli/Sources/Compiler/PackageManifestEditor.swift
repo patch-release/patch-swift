@@ -37,16 +37,76 @@ public enum PackageManifestEditor {
     public static func addPackage(
         to manifest: String, targetName: String
     ) throws -> (result: EditResult, contents: String) {
-        if manifest.contains("patch-release/patch-swift") {
+        // "Already present" means THIS TARGET links the PatchSDK product — not
+        // merely that the package is declared somewhere. The old check was the
+        // latter, so a manifest that already depended on patch-swift (a second
+        // target wired earlier, `patchcli prepare` having added PatchSwiftUI, or a
+        // hand-written dependency) reported `.alreadyPresent` and the target never
+        // got `.product(name: "PatchSDK", …)` — the app then failed to build with
+        // `no such module 'PatchSDK'` and `init` claimed success.
+        if targetLinksPatchSDK(manifest, targetName: targetName) {
             return (.alreadyPresent, manifest)
         }
 
         // Two independent edits. Each re-scans the (possibly already mutated)
         // text from scratch — String indices do not survive mutation, so no
         // range from one scan is ever used after an insertion.
-        let afterTargetEdit = try addProductToTarget(in: manifest, targetName: targetName)
-        let afterPackageEdit = try addPackageDependency(in: afterTargetEdit)
-        return (.added, afterPackageEdit)
+        var text = try addProductToTarget(in: manifest, targetName: targetName)
+        // Declare the package only when it isn't already declared — INCLUDING as a
+        // LOCAL package (`.package(path: "../patch-swift")`, the shape someone
+        // developing against a checkout uses). Adding a second declaration of the
+        // same package name makes SwiftPM refuse the manifest outright.
+        if !declaresPatchSwiftPackage(text) {
+            text = try addPackageDependency(in: text)
+        }
+        return (.added, text)
+    }
+
+    /// True when `targetName`'s dependency list already carries the PatchSDK
+    /// product. Falls back to a whole-manifest check when the target can't be
+    /// located (an unusual manifest shape) so behavior there is unchanged.
+    static func targetLinksPatchSDK(_ manifest: String, targetName: String) -> Bool {
+        guard let packageCall = argumentRange(ofCall: "Package", in: manifest),
+              let targetsArg = labeledArguments(in: manifest, range: packageCall)["targets"],
+              let targetCall = targetEntry(named: targetName, in: manifest,
+                                           targetsArray: targetsArg.value) else {
+            return manifest.contains(productDependencyLine)
+        }
+        return manifest[targetCall].contains(productDependencyLine)
+    }
+
+    /// True when the manifest already declares the `patch-swift` package — as the
+    /// canonical remote URL, or as a LOCAL path dependency whose directory is
+    /// named `patch-swift` (`.package(path: "../patch-swift")`). A second
+    /// declaration of the same package is a hard SwiftPM error, so this is the
+    /// guard that keeps the edit additive.
+    static func declaresPatchSwiftPackage(_ manifest: String) -> Bool {
+        if manifest.contains("patch-release/patch-swift") { return true }
+        // An explicitly-named local package (`.package(name: "patch-swift", path: …)`)
+        // claims the same package name, wherever its folder lives.
+        if manifest.contains(".package(name: \"\(XcodeProjectEditor.packageName)\"") { return true }
+        return localPatchSwiftPaths(manifest).isEmpty == false
+    }
+
+    /// Every `.package(path: "…")` / `.package(name:…, path: "…")` value whose
+    /// last path component is `patch-swift`.
+    static func localPatchSwiftPaths(_ manifest: String) -> [String] {
+        var found: [String] = []
+        var search = manifest.startIndex
+        while let hit = manifest.range(of: "path:", range: search..<manifest.endIndex) {
+            search = hit.upperBound
+            guard let q1 = manifest.range(of: "\"", range: hit.upperBound..<manifest.endIndex),
+                  let q2 = manifest.range(of: "\"", range: q1.upperBound..<manifest.endIndex) else { continue }
+            // Only a `path:` that belongs to a `.package(` call counts — a target's
+            // `path: "Sources/Tool"` must never be mistaken for one.
+            let prefix = manifest[manifest.startIndex..<hit.lowerBound]
+            guard let dot = prefix.range(of: ".package(", options: .backwards) else { continue }
+            guard !prefix[dot.upperBound...].contains(")") else { continue }
+            let value = String(manifest[q1.upperBound..<q2.lowerBound])
+            let base = ((value as NSString).standardizingPath as NSString).lastPathComponent
+            if base == XcodeProjectEditor.packageName { found.append(value) }
+        }
+        return found
     }
 
     /// Append `.product(name: "PatchSDK", …)` to the target's dependencies.

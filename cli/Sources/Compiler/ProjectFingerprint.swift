@@ -1542,17 +1542,28 @@ public struct ProjectFingerprinter {
     /// hash — worst case it's left hashed, never a crash). The placeholder is a fixed
     /// token, so two source variants differing ONLY in lifted literals normalize
     /// byte-identically.
+    ///
+    /// LINE COUNT IS PRESERVED. This runs BEFORE the line-based `eligibleSpans` strip, so a
+    /// replacement that swallowed a newline would renumber every following line and neutralize
+    /// the WRONG function bodies — a native edit could then ship with a stale fingerprint. The
+    /// lifter only offers single-line literals (see `StringLiteralLifter.liftableLiteral`), so
+    /// for every range this engine produces the padding below is empty and the output is
+    /// byte-identical to the historical form; it is the belt-and-braces net for any range whose
+    /// span does contain a newline.
     static func normalizeByteRanges(in text: String, ranges: [Range<Int>]) -> String {
         guard !ranges.isEmpty else { return text }
         var bytes = Array(text.utf8)
         let placeholder = Array("\u{1}LIT\u{1}".utf8)
+        let newline = UInt8(ascii: "\n")
         // Sort descending by start; drop invalid / overlapping (defensive).
         let sorted = ranges.sorted { $0.lowerBound > $1.lowerBound }
         var lastLower = bytes.count + 1
         for r in sorted {
             guard r.lowerBound >= 0, r.upperBound <= bytes.count, r.lowerBound < r.upperBound,
                   r.upperBound <= lastLower else { continue }
-            bytes.replaceSubrange(r.lowerBound..<r.upperBound, with: placeholder)
+            let newlines = bytes[r.lowerBound..<r.upperBound].reduce(0) { $0 + ($1 == newline ? 1 : 0) }
+            bytes.replaceSubrange(r.lowerBound..<r.upperBound,
+                                  with: placeholder + Array(repeating: newline, count: newlines))
             lastLower = r.lowerBound
         }
         return String(decoding: bytes, as: UTF8.self)

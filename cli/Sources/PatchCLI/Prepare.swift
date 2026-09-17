@@ -467,7 +467,7 @@ struct Prepare: ParsableCommand {
         if !demotedNames.isEmpty, let cfgURL = PatchConfig.find(startingAt: root),
            var cfg = try? PatchConfig.load(from: cfgURL) {
             for v in demotedNames where !cfg.nativeViews.contains(v) { cfg.nativeViews.append(v) }
-            persisted = (try? cfg.yamlString().write(to: cfgURL, atomically: true, encoding: .utf8)) != nil
+            persisted = (try? cfg.write(to: cfgURL)) != nil
         }
         let finalPrepared = preparedViews.subtracting(demotedNames).count
         if let systemic = finalReport.systemic {
@@ -865,7 +865,7 @@ struct Prepare: ParsableCommand {
     static func recordNativeViews(_ views: Set<String>, root: URL) -> Bool {
         guard let cfgURL = PatchConfig.find(startingAt: root), var cfg = try? PatchConfig.load(from: cfgURL) else { return false }
         for v in views.sorted() where !cfg.nativeViews.contains(v) { cfg.nativeViews.append(v) }
-        return (try? cfg.yamlString().write(to: cfgURL, atomically: true, encoding: .utf8)) != nil
+        return (try? cfg.write(to: cfgURL)) != nil
     }
 
     static func generatedDirectory(for result: ThunkGenerator.Result, sources: [Src], root: URL,
@@ -947,7 +947,9 @@ struct Prepare: ParsableCommand {
     ///   • Xcode project (.xcodeproj): add the file to the target's Sources phase
     ///     and link the PatchSwiftUI product (handles classic + synchronized groups).
     static func integrateIntoProject(root: URL, target: String?, thunkURL: URL, fm: FileManager, quiet: Bool) throws {
-        let projects = (try? fm.contentsOfDirectory(atPath: root.path))?.filter { $0.hasSuffix(".xcodeproj") } ?? []
+        // Sorted: `contentsOfDirectory` promises NO order, and prepare must wire the
+        // SAME project `prepare --verify` builds and `doctor` checks (both sort).
+        let projects = ((try? fm.contentsOfDirectory(atPath: root.path))?.filter { $0.hasSuffix(".xcodeproj") } ?? []).sorted()
         let rel = Self.relativePath(thunkURL, root: root)
 
         if let projName = projects.first, let target {

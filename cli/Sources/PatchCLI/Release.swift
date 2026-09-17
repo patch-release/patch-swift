@@ -198,6 +198,12 @@ struct Release: ParsableCommand {
         let size = (try? FileManager.default.attributesOfItem(atPath: moduleURL.path)[.size] as? Int) ?? nil
         print("Build OK — module: \(moduleURL.path)\(size.map { " (\($0) bytes)" } ?? "")")
         print("Compiled OTA units: \(result.compileOutcome?.compiled.count ?? 0)")
+        // A lowering that compiled but could not be combined into module.wasm is NOT
+        // in the artifact we are about to upload. `build` says so; `release` said
+        // nothing, so a patch that changes no views at all read as a clean success.
+        for warning in result.unshippedGainWarnings {
+            print("⚠️  \(warning)")
+        }
 
         // R4 #161: wrap the built module with the configured resource overlay, mirroring
         // `Patch build`, so a release ships the SAME artifact as a build of the same sources

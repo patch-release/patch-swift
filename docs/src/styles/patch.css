@@ -1,191 +1,821 @@
 /* ========================================================
    Patch Docs — house theme for Starlight.
 
-   Mirrors web/css/main.css and docs-site/css/docs.css exactly: same blue accent
-   (named --orange there for legacy reasons — it is blue), same neutrals, same
-   font stack. Starlight's own tokens are remapped onto ours rather than a new
-   palette being introduced.
+   Aligned with the 2026 marketing redesign (web/index.redesign-canvas.html):
+   the same tokens (type, colour, radii, shadows), applied to a documentation
+   layout rather than copied from a landing page. Everything here works by
+   remapping Starlight's own custom properties — `--sl-color-*`, `--sl-text-*`,
+   `--sl-font*` — and by styling Starlight's real class names, so search,
+   sidebar, mobile nav, ToC, edit links, pagination and the theme toggle keep
+   working untouched. There is deliberately no `!important` anywhere.
+
+   Fonts are loaded from the <head> (astro.config.mjs), not by @import.
+
+   READABILITY FIRST. Body copy is 15.5px/1.68 on a ~72ch measure; body text is
+   ≥ 10:1 against its ground in both themes; nothing here adds motion.
    ======================================================== */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap');
+/* ========================================================
+   1. TOKENS — the values are the marketing redesign's
+   ======================================================== */
 
 :root {
-  /* House tokens (identical values to web/css/main.css) */
-  --patch-bg: #fbfbfb;
-  --patch-paper: #fff;
-  --patch-ink: #2a2d33;
-  --patch-sub: #5b6066;
-  --patch-faint: #9aa0a7;
-  --patch-line: #ededee;
-  --patch-line2: #e2e2e4;
+  /* brand */
   --patch-blue: #0a7aff;
   --patch-blue-d: #0a61cf;
-  --patch-blue-soft: #e8f1ff;
+  --patch-blue-soft: #e9f2ff;
   --patch-blue-line: #cfe0fb;
-  --patch-green: #1f9d57;
-  --patch-green-soft: #e7f4ed;
-  --patch-gray-soft: #f1f2f3;
 
-  --sans: 'Space Grotesk', system-ui, sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
-  --disp: 'Instrument Sans', system-ui, -apple-system, sans-serif;
+  /* the energy accent */
+  --patch-swift: #f05138;
+  --patch-swift-2: #ff9330;
+  --patch-swift-soft: #fff1ec;
+  --patch-swift-line: #fadbd1;
+  --patch-swift-ink: #bf3a22;
 
-  /* Starlight accent ramp -> house blue */
+  /* neutrals (light) */
+  --patch-ink: #0b0d13;
+  --patch-ink-2: #333b49;
+  --patch-mut: #666f7e;
+  --patch-faint: #767f8e;
+  --patch-line: #e6e9ef;
+  --patch-line-2: #d9dde5;
+  --patch-paper: #ffffff;
+  --patch-cream: #fcf9f4;
+  --patch-page: #f5f7fc;
+  --patch-surface: #f0f3f9;
+
+  --patch-ok: #12a05b;
+  --patch-bad: #e0342a;
+
+  /* radii + shadows */
+  --patch-r-lg: 24px;
+  --patch-r-md: 18px;
+  --patch-r-sm: 12px;
+  --patch-r-xs: 8px;
+  --patch-sh-1: 0 1px 2px rgba(11, 13, 19, 0.05), 0 10px 26px -14px rgba(11, 13, 19, 0.2);
+  --patch-sh-2: 0 2px 5px rgba(11, 13, 19, 0.06), 0 30px 70px -28px rgba(11, 13, 19, 0.34);
+
+  /* type */
+  --patch-disp: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --patch-sans: -apple-system, BlinkMacSystemFont, 'Figtree', 'Segoe UI', sans-serif;
+  --patch-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+
+  --sl-font: var(--patch-sans);
+  --sl-font-mono: var(--patch-mono);
+
+  /* Starlight's accent ramp -> house blue */
   --sl-color-accent-low: var(--patch-blue-soft);
   --sl-color-accent: var(--patch-blue);
   --sl-color-accent-high: var(--patch-blue-d);
 
-  --sl-font: var(--sans);
-  --sl-font-mono: var(--mono);
+  /* Layout rhythm: a slightly wider measure than the default so the reference
+     tables have room, and a touch more air around the content column. */
+  --sl-content-width: 46rem;
+  --sl-content-pad-x: 1.5rem;
+  --sl-nav-height: 3.75rem;
+  --sl-nav-pad-x: 1.25rem;
 }
 
-/* Light theme — the house default */
+@media (min-width: 72rem) {
+  :root {
+    --sl-content-pad-x: 2.25rem;
+  }
+}
+
+/* ---- Light: the house default ------------------------------------------
+   NB: in Starlight, --sl-color-white is the MAX-contrast text colour and
+   --sl-color-black is the page ground; the pair inverts between themes. */
 :root[data-theme='light'] {
-  /* NB: in Starlight --sl-color-white is the MAX-contrast text colour and
-     --sl-color-black is the page ground; they invert between themes. */
-  --sl-color-white: #14171c;
-  --sl-color-gray-1: var(--patch-ink);
-  --sl-color-gray-2: var(--patch-sub);
+  --sl-color-white: var(--patch-ink);
+  --sl-color-gray-1: var(--patch-ink-2);
+  --sl-color-gray-2: var(--patch-mut);
   --sl-color-gray-3: var(--patch-faint);
-  --sl-color-gray-4: var(--patch-line2);
+  --sl-color-gray-4: var(--patch-line-2);
   --sl-color-gray-5: var(--patch-line);
-  --sl-color-gray-6: var(--patch-gray-soft);
-  --sl-color-gray-7: #f7f7f8;
-  --sl-color-black: var(--patch-bg);
-  --sl-color-text: var(--patch-ink);
+  --sl-color-gray-6: var(--patch-surface);
+  --sl-color-gray-7: var(--patch-page);
+  --sl-color-black: var(--patch-paper);
+
+  --sl-color-text: var(--patch-ink-2);
   --sl-color-text-accent: var(--patch-blue-d);
-  --sl-color-bg: var(--patch-bg);
-  --sl-color-bg-nav: rgba(251, 251, 251, 0.86);
-  --sl-color-bg-sidebar: var(--patch-bg);
+  --sl-color-text-invert: #ffffff;
+
+  /* The colour block: content on paper, chrome on the cool page tint. */
+  --sl-color-bg: var(--patch-paper);
+  --sl-color-bg-nav: color-mix(in srgb, var(--patch-page) 92%, transparent);
+  --sl-color-bg-sidebar: var(--patch-page);
+  --sl-color-bg-inline-code: var(--patch-swift-soft);
+
   --sl-color-hairline: var(--patch-line);
   --sl-color-hairline-light: var(--patch-line);
-  --sl-color-hairline-shade: var(--patch-line2);
+  --sl-color-hairline-shade: var(--patch-line-2);
+
+  /* Aside / badge families */
+  --sl-color-blue: var(--patch-blue);
+  --sl-color-blue-low: var(--patch-blue-soft);
+  --sl-color-blue-high: #0a55b3;
+  --sl-color-green: var(--patch-ok);
+  --sl-color-green-low: #e6f6ee;
+  --sl-color-green-high: #0a6b3c;
+  --sl-color-orange: #ed8b16;
+  --sl-color-orange-low: #fff4e4;
+  --sl-color-orange-high: #8f4e00;
+  --sl-color-red: var(--patch-bad);
+  --sl-color-red-low: #fdecea;
+  --sl-color-red-high: #a3231b;
+  --sl-color-purple: #7a2ff0;
+  --sl-color-purple-low: #f2ecff;
+  --sl-color-purple-high: #551abd;
+
+  --patch-code-ink: var(--patch-swift-ink);
+  --patch-code-line: var(--patch-swift-line);
+  --patch-shadow-card: var(--patch-sh-1);
+  /* Cards/panels sit ON the ground in light and slightly ABOVE it in dark,
+     because a shadow does no separating work on a near-black page. */
+  --patch-raised: var(--patch-paper);
 }
 
-/* Dark theme — kept legible rather than a naive inversion. Neutrals are given a
-   slight blue bias so the accent still reads as the same hue on a dark ground. */
+/* ---- Dark: the redesign's dark palette, not a naive inversion ---------- */
 :root[data-theme='dark'] {
-  --sl-color-white: #f2f5f9;
-  --sl-color-gray-1: #e4e9f0;
-  --sl-color-gray-2: #b6bfcc;
-  --sl-color-gray-3: #8b95a5;
-  --sl-color-gray-4: #4d5768;
-  --sl-color-gray-5: #2c3442;
-  --sl-color-gray-6: #1d232e;
-  --sl-color-gray-7: #171c25;
-  --sl-color-black: #10141b;
-  --sl-color-text: #dfe5ee;
+  --patch-ink: #f3f5f9;
+  --patch-ink-2: #c7cedb;
+  --patch-mut: #a2abbb;
+  --patch-faint: #8b94a6;
+  --patch-line: #242938;
+  --patch-line-2: #2f3546;
+  --patch-paper: #12151f;
+  --patch-cream: #171a24;
+  --patch-page: #080a10;
+  --patch-surface: #171b27;
+  --patch-blue-soft: #12233c;
+  --patch-blue-line: #1d3a5e;
+  --patch-swift-soft: #2a1710;
+  --patch-swift-line: #40241a;
+  --patch-swift-ink: #ff9b7a;
+  --patch-sh-1: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 26px -14px rgba(0, 0, 0, 0.8);
+  --patch-sh-2: 0 2px 5px rgba(0, 0, 0, 0.5), 0 30px 70px -28px rgba(0, 0, 0, 0.9);
+
+  --sl-color-white: var(--patch-ink);
+  --sl-color-gray-1: var(--patch-ink-2);
+  --sl-color-gray-2: var(--patch-mut);
+  --sl-color-gray-3: var(--patch-faint);
+  --sl-color-gray-4: var(--patch-line-2);
+  --sl-color-gray-5: var(--patch-line);
+  --sl-color-gray-6: var(--patch-surface);
+  --sl-color-gray-7: var(--patch-paper);
+  --sl-color-black: #0b0e17;
+
+  --sl-color-text: var(--patch-ink-2);
   --sl-color-text-accent: #6fb2ff;
-  --sl-color-bg: #10141b;
-  --sl-color-bg-nav: rgba(16, 20, 27, 0.86);
-  --sl-color-bg-sidebar: #10141b;
-  --sl-color-hairline: #222a36;
-  --sl-color-hairline-light: #222a36;
-  --sl-color-hairline-shade: #2c3442;
+  --sl-color-text-invert: #07090f;
+
+  --sl-color-bg: #0b0e17;
+  --sl-color-bg-nav: color-mix(in srgb, var(--patch-page) 92%, transparent);
+  --sl-color-bg-sidebar: var(--patch-page);
+  --sl-color-bg-inline-code: var(--patch-swift-soft);
+
+  --sl-color-hairline: var(--patch-line);
+  --sl-color-hairline-light: var(--patch-line);
+  --sl-color-hairline-shade: var(--patch-line-2);
+
   --sl-color-accent-low: #12314f;
   --sl-color-accent: #3d9bff;
   --sl-color-accent-high: #b8d9ff;
+
+  --sl-color-blue: #3d9bff;
+  --sl-color-blue-low: #12233c;
+  --sl-color-blue-high: #b8d9ff;
+  --sl-color-green: #35c07d;
+  --sl-color-green-low: #0e2a1d;
+  --sl-color-green-high: #a9edc8;
+  --sl-color-orange: #ff9330;
+  --sl-color-orange-low: #2a1c10;
+  --sl-color-orange-high: #ffc79a;
+  --sl-color-red: #ff6a5e;
+  --sl-color-red-low: #2c1211;
+  --sl-color-red-high: #ffb5ad;
+  --sl-color-purple: #a97bff;
+  --sl-color-purple-low: #1e1533;
+  --sl-color-purple-high: #d9c4ff;
+
+  --patch-code-ink: var(--patch-swift-ink);
+  --patch-code-line: var(--patch-swift-line);
+  --patch-shadow-card: var(--patch-sh-1);
+  --patch-raised: #12151f;
 }
 
-/* ---- Typography ---- */
+/* ========================================================
+   2. TYPOGRAPHY
+   Display type takes its confidence from SIZE + TIGHT TRACKING, not weight —
+   weight 500 on the big sizes, 600 once the type gets small enough that 500
+   stops holding on a light ground.
+   ======================================================== */
+
+body {
+  letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.content-panel h1,
 .sl-markdown-content h1,
 .sl-markdown-content h2,
 .sl-markdown-content h3,
 .sl-markdown-content h4,
-.content-panel h1 {
-  font-family: var(--disp);
-  letter-spacing: -0.025em;
-  font-weight: 600;
+.sl-markdown-content h5,
+.sl-markdown-content h6 {
+  font-family: var(--patch-disp);
+  color: var(--sl-color-white);
+  text-wrap: balance;
 }
+
+.content-panel h1,
+.sl-markdown-content h1 {
+  font-size: clamp(2.05rem, 1.55rem + 1.9vw, 2.75rem);
+  font-weight: 500;
+  letter-spacing: -0.042em;
+  line-height: 1.06;
+}
+
 .sl-markdown-content h2 {
-  padding-top: 0.35em;
+  font-size: clamp(1.5rem, 1.32rem + 0.72vw, 1.85rem);
+  font-weight: 500;
+  letter-spacing: -0.034em;
+  line-height: 1.18;
+  /* A hairline rule above every H2: the cheapest scannability win on a long
+     reference page, and it is the marketing page's own divider treatment. */
+  padding-top: 0.5em;
   border-top: 1px solid var(--sl-color-hairline);
-  margin-top: 2.4em;
+  margin-top: 2.6em;
 }
-.sl-markdown-content h2:first-of-type { border-top: 0; margin-top: 1.4em; }
-.sl-markdown-content { font-size: 15.5px; line-height: 1.68; }
-.sl-markdown-content p { max-width: 74ch; }
+.sl-markdown-content h2:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 1.5em;
+}
 
-/* ---- Code ---- */
+.sl-markdown-content h3 {
+  font-size: 1.24rem;
+  font-weight: 600;
+  letter-spacing: -0.026em;
+  line-height: 1.3;
+  margin-top: 2em;
+}
+
+.sl-markdown-content h4 {
+  font-size: 1.03rem;
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+
+.sl-markdown-content h5,
+.sl-markdown-content h6 {
+  font-size: 0.94rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--sl-color-gray-2);
+}
+
+.sl-markdown-content {
+  font-size: 15.5px;
+  line-height: 1.68;
+}
+/* Measure: prose is capped, tables and code are not. */
+.sl-markdown-content p,
+.sl-markdown-content li > p,
+.sl-markdown-content blockquote {
+  max-width: 72ch;
+  text-wrap: pretty;
+}
+.sl-markdown-content ul,
+.sl-markdown-content ol {
+  max-width: 74ch;
+}
+.sl-markdown-content strong,
+.sl-markdown-content b {
+  font-weight: 600;
+  color: var(--sl-color-white);
+}
+
+/* Links: underlined in prose so they are findable without relying on hue. */
+.sl-markdown-content a:not(:where(.sl-link-card, .card *, .not-content *)) {
+  color: var(--sl-color-text-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, currentColor 34%, transparent);
+  transition: text-decoration-color 0.15s ease, color 0.15s ease;
+}
+.sl-markdown-content a:not(:where(.sl-link-card, .card *, .not-content *)):hover {
+  text-decoration-color: currentColor;
+}
+
+/* Heading anchor links stay quiet until hovered. */
+.sl-markdown-content .sl-anchor-link {
+  text-decoration: none;
+}
+
+/* Lead paragraph: the first paragraph of a page reads as a standfirst, which
+   is the marketing page's `.lede`, sized for reading rather than for a hero. */
+.sl-markdown-content > p:first-child {
+  font-size: 1.06rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-2);
+  max-width: 62ch;
+}
+.sl-markdown-content > p:first-child strong {
+  color: var(--sl-color-white);
+}
+
+.sl-markdown-content blockquote {
+  border-inline-start-color: var(--sl-color-gray-4);
+  border-inline-start-width: 2px;
+  color: var(--sl-color-gray-2);
+  font-style: normal;
+}
+
+/* ========================================================
+   3. CODE
+   Block code is Expressive Code, themed in astro.config.mjs (Xcode dark, in
+   both site themes). Inline code is ours: the marketing FAQ's warm chip, which
+   is where the Swift accent lands in prose.
+   ======================================================== */
+
 .sl-markdown-content code:not(:where(.expressive-code *)) {
-  font-family: var(--mono);
-  font-size: 0.875em;
-  background: var(--sl-color-gray-6);
-  border: 1px solid var(--sl-color-hairline);
-  border-radius: 5px;
-  padding: 0.12em 0.38em;
+  font-family: var(--patch-mono);
+  font-size: 0.855em;
+  font-variant-ligatures: none;
+  background: var(--sl-color-bg-inline-code);
+  color: var(--patch-code-ink);
+  border: 1px solid var(--patch-code-line);
+  border-radius: 6px;
+  padding: 0.1em 0.38em;
+  word-break: break-word;
 }
-.expressive-code .frame pre { font-family: var(--mono); font-size: 13px; }
+/* Inside a link, the link colour wins — a link must stay recognisable. */
+.sl-markdown-content a code:not(:where(.expressive-code *)) {
+  color: inherit;
+  background: color-mix(in srgb, var(--sl-color-accent) 11%, transparent);
+  border-color: color-mix(in srgb, var(--sl-color-accent) 26%, transparent);
+}
+/* Inside a heading, code is part of the heading, not a chip. */
+.sl-markdown-content :where(h1, h2, h3, h4, h5, h6) code:not(:where(.expressive-code *)) {
+  font-size: 0.9em;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+}
+/* Inside an aside, the chip sits on the aside's own ground. */
+.sl-markdown-content .starlight-aside code:not(:where(.expressive-code *)) {
+  background: color-mix(in srgb, var(--sl-color-white) 7%, transparent);
+  border-color: color-mix(in srgb, var(--sl-color-white) 12%, transparent);
+  color: inherit;
+}
 
-/* ---- Tables: the reference pages are mostly tables ---- */
+.sl-markdown-content kbd {
+  font-family: var(--patch-mono);
+  font-size: 0.8em;
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline-shade);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 0.12em 0.4em;
+}
+
+/* The code panel itself: an IDE window floating on the page. */
+.expressive-code .frame {
+  --code-border-radius: var(--patch-r-sm);
+}
+.expressive-code figure.frame {
+  margin-block: 1.5rem;
+}
+.expressive-code .frame pre {
+  font-family: var(--patch-mono);
+}
+.expressive-code .frame.is-terminal .header,
+.expressive-code .frame:not(.is-terminal) .header {
+  font-family: var(--patch-disp);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+/* Starlight puts a light-theme border on EC frames; the panel is dark in both
+   themes, so the border is a highlight rather than an outline. */
+:root[data-theme='light'] .expressive-code .frame {
+  --code-background: #1f1f24;
+}
+
+/* Raw <pre> written directly in MDX — the CLI reference renders every
+   command's captured `--help` this way, so it never reaches Expressive Code.
+   It gets the same panel, and crucially the same `overflow-x: auto`: without
+   it, a long USAGE line pushed the whole CLI page sideways (the page scrolled
+   horizontally at every width, worst on a phone). */
+.sl-markdown-content pre:not(:where(.expressive-code *)) {
+  background: #1f1f24;
+  color: #dfdfe0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--patch-r-sm);
+  box-shadow: var(--patch-sh-1);
+  padding: 0.95rem 1.15rem;
+  overflow-x: auto;
+  font-family: var(--patch-mono);
+  font-size: 12.5px;
+  line-height: 1.66;
+  tab-size: 2;
+}
+.sl-markdown-content pre:not(:where(.expressive-code *)) code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  word-break: normal;
+  white-space: pre;
+}
+
+/* ========================================================
+   4. TABLES — the reference pages are mostly tables
+   ======================================================== */
+
 .sl-markdown-content table {
   border-collapse: collapse;
   width: 100%;
   font-size: 14px;
-  display: block;
-  overflow-x: auto;
+  line-height: 1.55;
+  /* Real table layout at reading widths: the columns get distributed properly
+     and the header band fills the rounded border. (`display: block` — the
+     usual way to make a table scroll — turns the table into a shrink-to-fit
+     anonymous box, which leaves a dead gutter inside the border.) The sideways
+     scroll is kept for narrow screens, where a reference table genuinely is
+     wider than the viewport and shrink-to-fit is what you want. */
+  display: table;
+  table-layout: auto;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: var(--patch-r-sm);
+  background: var(--sl-color-bg);
+}
+@media (max-width: 50rem) {
+  .sl-markdown-content table {
+    display: block;
+    overflow-x: auto;
+  }
 }
 .sl-markdown-content th,
 .sl-markdown-content td {
   border: 0;
   border-bottom: 1px solid var(--sl-color-hairline);
-  padding: 10px 14px;
+  padding: 11px 15px;
   text-align: left;
   vertical-align: top;
 }
-.sl-markdown-content th {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
+.sl-markdown-content tbody tr:last-child td {
+  border-bottom: 0;
+}
+.sl-markdown-content thead th {
+  background: var(--sl-color-gray-7);
+  font-family: var(--patch-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
   text-transform: uppercase;
   color: var(--sl-color-gray-3);
   font-weight: 500;
   white-space: nowrap;
 }
-.sl-markdown-content tbody tr:hover { background: var(--sl-color-gray-7); }
+.sl-markdown-content tbody tr:hover {
+  background: var(--sl-color-gray-7);
+}
 
-/* ---- Asides ---- */
-.starlight-aside { border-radius: 8px; border-inline-start-width: 2px; }
-.starlight-aside__title { font-family: var(--disp); letter-spacing: -0.01em; }
+/* ========================================================
+   5. ASIDES
+   ======================================================== */
 
-/* ---- Sidebar / nav ---- */
-.sidebar-content a { font-size: 14px; }
+.starlight-aside {
+  border-radius: var(--patch-r-sm);
+  border-inline-start-width: 3px;
+  padding: 1rem 1.15rem;
+  font-size: 14.8px;
+  line-height: 1.62;
+}
+.starlight-aside p {
+  max-width: 68ch;
+}
+.starlight-aside__title {
+  font-family: var(--patch-disp);
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  align-items: center;
+  gap: 0.45rem;
+}
+.starlight-aside__icon {
+  font-size: 1.05em;
+}
+
+/* ========================================================
+   6. CARDS + LINK CARDS
+   ======================================================== */
+
+.sl-markdown-content .card,
+.sl-markdown-content .sl-link-card {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: var(--patch-r-md);
+  background: var(--patch-raised);
+  box-shadow: var(--patch-shadow-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.sl-markdown-content .sl-link-card {
+  padding: 1.1rem 1.25rem;
+}
+.sl-markdown-content .sl-link-card:hover {
+  border-color: var(--patch-blue-line);
+  box-shadow: var(--patch-sh-2);
+}
+.sl-markdown-content .card .title,
+.sl-markdown-content .sl-link-card .title {
+  font-family: var(--patch-disp);
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  font-size: 1.04rem;
+  line-height: 1.3;
+  color: var(--sl-color-white);
+}
+.sl-markdown-content .sl-link-card .description {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--sl-color-gray-2);
+  margin-top: 0.3rem;
+}
+.sl-markdown-content .sl-link-card .icon {
+  color: var(--sl-color-accent);
+}
+.sl-markdown-content .card .icon {
+  color: var(--sl-color-accent);
+}
+
+/* ========================================================
+   7. HEADER / NAV
+   ======================================================== */
+
+header.header {
+  border-bottom: 1px solid var(--sl-color-hairline);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  backdrop-filter: saturate(180%) blur(14px);
+}
+.site-title,
+a.site-title {
+  font-family: var(--patch-disp);
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: -0.03em;
+  color: var(--sl-color-white);
+}
+.site-title img {
+  border-radius: 8px;
+}
+
+/* Search: the marketing nav's pill. */
+site-search button[data-open-modal] {
+  border-radius: 999px;
+  border-color: var(--sl-color-hairline-shade);
+  background-color: var(--sl-color-bg);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+site-search button[data-open-modal]:hover {
+  border-color: var(--patch-blue-line);
+}
+site-search button[data-open-modal] > kbd {
+  font-family: var(--patch-mono);
+  font-size: 0.72rem;
+  background-color: var(--sl-color-gray-6);
+  border-radius: 5px;
+  padding: 0.1rem 0.32rem;
+}
+/* The Pagefind modal inherits Starlight's tokens; only its chrome is ours. */
+dialog[aria-label='Search'] {
+  border-radius: var(--patch-r-md);
+  border: 1px solid var(--sl-color-hairline);
+  box-shadow: var(--patch-sh-2);
+}
+
+/* The theme toggle + language picker selects. */
+starlight-theme-select > label,
+.social-icons a {
+  color: var(--sl-color-gray-2);
+}
+.social-icons a:hover {
+  color: var(--sl-color-white);
+}
+
+/* Mobile menu button: round, like the marketing nav's. */
+starlight-menu-button button {
+  border-radius: 999px;
+  border-color: var(--sl-color-hairline-shade);
+  background-color: var(--sl-color-bg);
+  box-shadow: var(--patch-sh-1);
+}
+
+/* ========================================================
+   8. SIDEBAR
+   ======================================================== */
+
+.sidebar-pane {
+  border-inline-end: 1px solid var(--sl-color-hairline);
+}
+.sidebar-content {
+  padding-top: 1.35rem;
+}
+.sidebar-content a {
+  font-size: 14px;
+  border-radius: 999px;
+  padding-block: 0.32em;
+  padding-inline: 0.7em;
+  margin-inline-start: -0.7em;
+  color: var(--sl-color-gray-2);
+  transition: background-color 0.13s ease, color 0.13s ease;
+}
+.sidebar-content a:hover,
+.sidebar-content a:focus-visible {
+  color: var(--sl-color-white);
+  background-color: color-mix(in srgb, var(--sl-color-accent) 9%, transparent);
+}
+/* The current page: a soft pill, not a saturated block — the marketing nav's
+   active-link treatment, and far easier to read than white-on-blue. */
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+  color: var(--sl-color-text-accent);
+  background-color: var(--sl-color-accent-low);
+  font-weight: 600;
+}
+/* Group labels: the small mono eyebrow used across the marketing page. */
 .sidebar-content summary,
-.sidebar-content .large {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
+.sidebar-content .large,
+.sidebar-content details > summary > .group-label > span {
+  font-family: var(--patch-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--sl-color-gray-3);
 }
-header.header { border-bottom: 1px solid var(--sl-color-hairline); }
-site-title span { font-family: var(--disp); font-weight: 600; letter-spacing: -0.02em; }
+.sidebar-content ul.top-level > li + li {
+  margin-top: 1.1rem;
+}
 
-/* ---- The measured-coverage callout, used on the coverage page ---- */
+/* Mobile: the disclosure that holds the nav on small screens. */
+.mobile-preferences {
+  border-top: 1px solid var(--sl-color-hairline);
+}
+
+/* ========================================================
+   9. RIGHT SIDEBAR — table of contents
+   ======================================================== */
+
+starlight-toc nav > h2,
+mobile-starlight-toc nav > h2 {
+  font-family: var(--patch-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  margin-bottom: 0.4rem;
+}
+starlight-toc a {
+  font-size: 13.2px;
+  line-height: 1.45;
+  border-inline-start: 2px solid transparent;
+  padding-block: 0.36rem;
+  color: var(--sl-color-gray-2);
+  transition: color 0.13s ease, border-color 0.13s ease;
+}
+starlight-toc a:hover {
+  color: var(--sl-color-white);
+}
+starlight-toc a[aria-current='true'],
+starlight-toc a[aria-current='true']:hover {
+  color: var(--sl-color-text-accent);
+  border-inline-start-color: var(--sl-color-accent);
+  font-weight: 500;
+}
+/* The mobile ToC disclosure. */
+mobile-starlight-toc nav summary {
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+/* ========================================================
+   10. PAGE FURNITURE — pagination, edit link, last updated
+   ======================================================== */
+
+.pagination-links a {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: var(--patch-r-md);
+  background: var(--patch-raised);
+  box-shadow: var(--patch-sh-1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.pagination-links a:hover {
+  border-color: var(--patch-blue-line);
+  box-shadow: var(--patch-sh-2);
+}
+.pagination-links a > span {
+  font-family: var(--patch-disp);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.pagination-links svg {
+  color: var(--sl-color-gray-3);
+}
+
+footer .meta {
+  font-size: 13px;
+  color: var(--sl-color-gray-3);
+}
+footer .meta a {
+  color: var(--sl-color-gray-2);
+}
+footer .meta a:hover {
+  color: var(--sl-color-text-accent);
+}
+
+/* The content panels' dividers */
+.content-panel {
+  border-top-color: var(--sl-color-hairline);
+}
+
+/* ========================================================
+   11. PAGE-LEVEL COMPONENTS used in the MDX
+   ======================================================== */
+
+/* The measured-coverage callout on the coverage page. */
 .patch-stat-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1px;
   background: var(--sl-color-hairline);
   border: 1px solid var(--sl-color-hairline);
-  border-radius: 8px;
+  border-radius: var(--patch-r-sm);
   overflow: hidden;
-  margin: 1.6rem 0;
+  margin: 1.7rem 0;
+  box-shadow: var(--patch-sh-1);
 }
 .patch-stat {
-  background: var(--sl-color-bg);
-  padding: 16px 18px;
+  background: var(--patch-raised);
+  padding: 17px 19px;
+  /* Starlight gives every adjacent element inside .sl-markdown-content a
+     1rem top margin; inside a grid that pushes cells 2..n down by a line. */
+  margin-top: 0;
 }
 .patch-stat b {
   display: block;
-  font-family: var(--mono);
-  font-size: 24px;
+  font-family: var(--patch-disp);
+  font-size: 27px;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
+  line-height: 1.12;
+  color: var(--sl-color-white);
   font-variant-numeric: tabular-nums;
 }
-.patch-stat span { font-size: 12.5px; color: var(--sl-color-gray-3); }
+.patch-stat span {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--sl-color-gray-3);
+  display: block;
+  margin-top: 3px;
+}
+
+/* Tabs, Steps and the other Starlight components inherit the tokens above;
+   only their radii are nudged onto the house scale. */
+starlight-tabs .tablist-wrapper ul {
+  border-bottom-color: var(--sl-color-hairline);
+}
+starlight-tabs [role='tab'] {
+  font-family: var(--patch-disp);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.sl-steps > li::before {
+  font-family: var(--patch-mono);
+}
+
+/* ========================================================
+   12. FOCUS + MOTION
+   ======================================================== */
+
+:focus-visible {
+  outline: 2px solid var(--sl-color-accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation: none !important; transition: none !important; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms;
+    animation-iteration-count: 1;
+    transition-duration: 0.001ms;
+    scroll-behavior: auto;
+  }
 }

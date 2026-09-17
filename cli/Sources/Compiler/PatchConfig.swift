@@ -221,6 +221,134 @@ public struct PatchConfig: Sendable, Equatable {
         return out
     }
 
+    /// Write this config to `url`, PRESERVING whatever is already there that the CLI
+    /// doesn't own (comments, key order, unknown keys) — see `yamlString(mergedInto:)`.
+    /// A file that doesn't exist yet gets the canonical `yamlString()` rendering.
+    public func write(to url: URL) throws {
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try yamlString(mergedInto: existing).write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Render this config INTO an existing `.Patch.yml`, preserving everything the
+    /// CLI doesn't own: comments, blank lines, key order, and any key this schema
+    /// doesn't know about.
+    ///
+    /// Every incremental write site (caching `app_id`/`workspace_id` on the first
+    /// push, `login` storing the publish token, `prepare` recording `native_views:`)
+    /// used to write `yamlString()` over the whole file. That silently deleted the
+    /// developer's comments and any unrecognized key — a `release` could wipe the
+    /// notes someone wrote in their own config. Only the values that actually
+    /// changed are rewritten here; a key that is absent is appended, and a key whose
+    /// value is unchanged is left byte-identical.
+    ///
+    /// Falls back to `yamlString()` when `existing` is empty or doesn't parse (there
+    /// is nothing to preserve then).
+    public func yamlString(mergedInto existingRaw: String) -> String {
+        // Normalize line endings before splitting: "\r\n" is a single Swift grapheme
+        // cluster, so a CRLF file would otherwise look like ONE line and the merge
+        // would overwrite the whole config with a single key. (The merged output is
+        // written with LF, which is what every other writer here emits.)
+        let existing = existingRaw.contains("\r")
+            ? existingRaw.replacingOccurrences(of: "\r\n", with: "\n")
+                         .replacingOccurrences(of: "\r", with: "\n")
+            : existingRaw
+        guard !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (try? PatchConfig.parse(existing)) != nil else { return yamlString() }
+
+        // The top-level scalar keys this method maintains, in the order `yamlString`
+        // emits them (used when a key has to be appended).
+        let scalars: [(key: String, value: String?)] = [
+            ("version", String(version)),
+            ("app_key", appKey.isEmpty ? nil : appKey),
+            ("project", project.isEmpty ? nil : project),
+            ("target", target.isEmpty ? nil : target),
+            ("app_id", appId), ("workspace_id", workspaceId), ("bundle_id", bundleId),
+            ("api_base_url", apiBaseURL), ("api_key", apiKey),
+            ("publish_token", publishToken), ("overlay", overlaySpec),
+        ]
+        let managed = Set(scalars.map(\.key))
+
+        var lines = existing.components(separatedBy: "\n")
+        var seen = Set<String>()
+        var i = 0
+        var lastTopLevelScalar = -1
+        var nativeViewsBlock: Range<Int>?
+        while i < lines.count {
+            let raw = lines[i]
+            let stripped = PatchConfig.stripComment(raw)
+            let trimmed = stripped.trimmingCharacters(in: .whitespaces)
+            // Only TOP-LEVEL keys (no indentation) are ours to rewrite.
+            guard !trimmed.isEmpty, !(stripped.first?.isWhitespace ?? true), !trimmed.hasPrefix("-"),
+                  let colon = trimmed.firstIndex(of: ":") else { i += 1; continue }
+            let key = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+            if key == "native_views" {
+                var end = i
+                while end + 1 < lines.count {
+                    let next = PatchConfig.stripComment(lines[end + 1])
+                    let nextTrimmed = next.trimmingCharacters(in: .whitespaces)
+                    if nextTrimmed.isEmpty || next.first == " " || next.first == "\t" { end += 1 } else { break }
+                }
+                // Trailing blank lines belong to the NEXT key, not to this block.
+                while end > i, PatchConfig.stripComment(lines[end]).trimmingCharacters(in: .whitespaces).isEmpty {
+                    end -= 1
+                }
+                nativeViewsBlock = i..<(end + 1)
+                i = end + 1
+                continue
+            }
+            if managed.contains(key) {
+                seen.insert(key)
+                lastTopLevelScalar = i
+                if let entry = scalars.first(where: { $0.key == key }) {
+                    let comment = raw.count > stripped.count ? String(raw.dropFirst(stripped.count)) : ""
+                    if let value = entry.value {
+                        // Compare the PARSED value, so an unchanged key keeps its exact
+                        // spelling (quotes, spacing) and the line stays byte-identical.
+                        let current = PatchConfig.unquote(
+                            String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces))
+                        if current != value {
+                            lines[i] = "\(key): \(value)" + comment
+                        }
+                    }
+                    // A now-nil value is LEFT ALONE: this method never deletes a key
+                    // the developer wrote (nothing in the CLI clears one).
+                }
+            }
+            i += 1
+        }
+
+        // Append any managed scalar that has a value but no line yet, right after the
+        // last top-level scalar we saw (so it lands in the header block, not inside a
+        // sub-map like `bridges:`).
+        var additions: [String] = []
+        for (key, value) in scalars {
+            guard let value, !seen.contains(key) else { continue }
+            additions.append("\(key): \(value)")
+        }
+        if !additions.isEmpty {
+            let at = lastTopLevelScalar >= 0 ? lastTopLevelScalar + 1 : 0
+            lines.insert(contentsOf: additions, at: at)
+            if let block = nativeViewsBlock, block.lowerBound >= at {
+                nativeViewsBlock = (block.lowerBound + additions.count)..<(block.upperBound + additions.count)
+            }
+        }
+
+        // `native_views:` — replace the existing block, add one when it's new, drop it
+        // when the list is now empty.
+        let nativeBlock = nativeViews.isEmpty ? [] : ["native_views:"] + nativeViews.map { "  - \($0)" }
+        if let block = nativeViewsBlock {
+            lines.replaceSubrange(block, with: nativeBlock)
+        } else if !nativeBlock.isEmpty {
+            // Before `bridges:` when present (matching `yamlString`'s order), else at the end.
+            let anchor = lines.firstIndex { PatchConfig.stripComment($0).trimmingCharacters(in: .whitespaces) == "bridges:" }
+            lines.insert(contentsOf: nativeBlock, at: anchor ?? lines.count)
+        }
+
+        var out = lines.joined(separator: "\n")
+        if !out.hasSuffix("\n") { out += "\n" }
+        return out
+    }
+
     // MARK: - Parsing
 
     public enum ConfigError: Error, CustomStringConvertible {
@@ -275,7 +403,17 @@ public struct PatchConfig: Sendable, Equatable {
         enum Section { case top, exclude, nativeViews, bridges, build }
         var section: Section = .top
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        // NORMALIZE LINE ENDINGS FIRST. Swift treats "\r\n" as ONE grapheme cluster,
+        // so `split(separator: "\n")` finds NO line breaks in a CRLF file — the whole
+        // config parsed as a single `version:` line and every other key (app_key,
+        // app_id, publish_token, build settings) was silently dropped, leaving the
+        // developer with "No publish token found" / "No app_id in .Patch.yml" on a
+        // config that looks perfectly fine. A CRLF `.Patch.yml` comes from a Windows
+        // editor or a git checkout with `core.autocrlf=true`.
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
             // Strip trailing comments per the YAML rule: a `#` starts a comment only
             // at the start of the line or when PRECEDED BY WHITESPACE. A `#` that is
             // part of a value token (`api_key: sk-live-abc#def`, a URL fragment

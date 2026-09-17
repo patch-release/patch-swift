@@ -270,6 +270,14 @@ extension Patch {
             PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
             return decline()
         }
+        // Every lowered `UIButton` with a real action must have a native handler. The
+        // dispatcher is `w.actions[event.id]?()` — a SILENT no-op on a miss — so without
+        // this the patch would ship a button that renders and does NOTHING on tap. Demote
+        // to the native construction instead (see `collectButtonActionIDs`).
+        if Self.collectButtonActionIDs(emission.root).contains(where: { w.actions[$0] == nil }) {
+            PatchUIKitCellRegistry.shared.markFailed(typeName: typeName)
+            return decline()
+        }
 
         // Build the render context: the slot table + the token table + the dispatcher.
         let slotTable = UIKitSlotTable()
@@ -379,6 +387,31 @@ extension Patch {
             case .button(_, let titleColor, _, _): tokenID(titleColor)
             case .imageView(_, let tintColor, _): tokenID(tintColor)
             default: break
+            }
+            for child in n.childNodes { walk(child) }
+        }
+        walk(node)
+        return out
+    }
+
+    /// Every NON-EMPTY `.button(action:)` EventID in the tree — the native handlers the
+    /// thunk's `actions` table must cover.
+    ///
+    /// BUG (dead button): `installPatchedCell` gated customSlots and color tokens but NOT
+    /// action ids, and the dispatcher is `w.actions[event.id]?()` — a silent no-op on a
+    /// miss. So a patch that adds a `UIButton`, or renames the handler the action id is
+    /// derived from, shipped a button that RENDERS CORRECTLY AND DOES NOTHING when tapped,
+    /// with no demote. That is the worst outcome the sibling nets exist to prevent (the
+    /// SwiftUI `actionSlotButton` net says so in as many words). Gate it the same way.
+    ///
+    /// EMPTY ids are deliberately excluded: the emitter writes `action: ""` for a button the
+    /// source never gave an `addTarget`, and the thunk correspondingly records nothing — so
+    /// requiring coverage for those would demote cells that are correct today.
+    nonisolated static func collectButtonActionIDs(_ node: UIKitNode) -> [String] {
+        var out: [String] = []
+        func walk(_ n: UIKitNode) {
+            if case .button(_, _, _, let action) = n.kind, !action.id.isEmpty {
+                out.append(action.id)
             }
             for child in n.childNodes { walk(child) }
         }

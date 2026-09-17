@@ -131,7 +131,14 @@ struct Init: ParsableCommand {
             cfg = Self.freshConfig(detected: detected, targetName: targetName, bundleId: bundleId)
         }
         cfg.apiBaseURL = baseURL ?? cfg.apiBaseURL ?? Init.productionBaseURL
-        try cfg.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
+        if reusedConfig {
+            // Re-running init: keep the developer's comments / unknown keys.
+            try cfg.write(to: configURL)
+        } else {
+            // A new file, or `--force` ("start fresh") — the canonical rendering, so
+            // --force genuinely discards the previous identity instead of merging it.
+            try cfg.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
+        }
 
         // The bundle id driving registration: project discovery when it can see
         // one (Xcode projects), else whatever the developer pinned in
@@ -499,7 +506,7 @@ struct Init: ParsableCommand {
                 cfg.publishToken = token
             }
             do {
-                try cfg.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
+                try cfg.write(to: configURL)
             } catch {
                 // Never print the publish token in an error path — it is a live
                 // secret and CLI output lands in scrollback, CI logs and pasted
@@ -668,8 +675,8 @@ struct Init: ParsableCommand {
         case .xcodeproj:
             return root.appendingPathComponent(detected.project)
         case .xcworkspace:
-            let candidates = (try? fm.contentsOfDirectory(atPath: root.path))?
-                .filter { $0.hasSuffix(".xcodeproj") } ?? []
+            let candidates = ((try? fm.contentsOfDirectory(atPath: root.path))?
+                .filter { $0.hasSuffix(".xcodeproj") } ?? []).sorted()
             return candidates.count == 1 ? root.appendingPathComponent(candidates[0]) : nil
         case .swiftPackage, .none:
             return nil

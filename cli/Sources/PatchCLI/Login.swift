@@ -104,7 +104,7 @@ struct Login: ParsableCommand {
             if !Init.isRealKey(config.appKey) { config.appKey = app.appKey }
 
             do {
-                try config.yamlString().write(to: configURL, atomically: true, encoding: .utf8)
+                try config.write(to: configURL)
             } catch {
                 // Deliberately does NOT echo the token — CLI output ends up in
                 // scrollback, CI logs and pasted bug reports.

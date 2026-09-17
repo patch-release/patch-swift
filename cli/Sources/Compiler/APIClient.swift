@@ -518,7 +518,9 @@ public struct HTTPPatchAPI: PatchAPI {
 
     /// Direct-to-storage upload. Returns nil when the backend has no direct path
     /// (the caller then falls back to multipart); throws on a genuine failure.
-    private func uploadModuleResumable(
+    // Internal (not private) so the upload-protocol tests can drive it directly
+    // with a small payload instead of a >24 MiB fixture.
+    func uploadModuleResumable(
         metadata: ModuleUploadMetadata, wasm: Data, sha256: String
     ) throws -> ModuleRecord? {
         // 1. Ask for an upload URL.
@@ -559,38 +561,62 @@ public struct HTTPPatchAPI: PatchAPI {
     ///   - GCS replies 308 "Resume Incomplete" while bytes are still owed — this is
     ///     NORMAL, not an error, so it must not throw. We read the committed offset
     ///     (the `Range` header, `bytes=0-<end>`) and re-PUT the remaining tail.
-    ///   - On a transport error or 308 we retry with backoff up to `maxAttempts`,
-    ///     each time first querying the session for the committed offset so we resume
-    ///     from where it left off rather than re-sending the whole body.
+    ///   - On a transport error, a 308, or a RETRYABLE status we retry with backoff up
+    ///     to `maxAttempts`, each time first querying the session for the committed
+    ///     offset so we resume from where it left off rather than re-sending the body.
+    ///   - A PERMANENT status (an expired/wrong session URI: 400/401/403/404/410/…)
+    ///     fails IMMEDIATELY with that status. Retrying it re-sends the WHOLE module
+    ///     four more times — minutes of upload on a large one — and can never succeed.
     /// Completion is 200/201. The session URI is its own credential (no X-API-Key).
-    private func putBytes(to url: URL, data: Data) throws {
+    func putBytes(to url: URL, data: Data) throws {
         let n = data.count
         let maxAttempts = 5
         var offset = 0
         var lastError: Error = APIError.transport("upload did not complete")
 
         for attempt in 0..<maxAttempts {
+            var shouldResync = false
             do {
-                let (_, http) = try sendRaw(uploadChunkRequest(url: url, data: data, from: offset, total: n))
+                let (body, http) = try sendRaw(uploadChunkRequest(url: url, data: data, from: offset, total: n))
                 let status = http.statusCode
                 if (200..<300).contains(status) { return }  // upload complete
                 if status == 308 {
                     // Resume Incomplete: advance to the committed offset and continue.
-                    offset = Self.committedOffset(from: http) ?? offset
+                    let committed = min(Self.committedOffset(from: http) ?? offset, n)
+                    if committed >= n {
+                        // The session already holds EVERY byte. Re-PUTting from `n`
+                        // would emit an invalid `bytes n-(n-1)/n` range that the
+                        // server rejects, so the upload could never finish. Ask the
+                        // session for its status instead; `complete` means we're done
+                        // (and `finalize` verifies the sha over the staged object, so
+                        // an incomplete object still fails loudly there).
+                        if case .complete = sessionStatus(url: url, total: n) { return }
+                    }
+                    offset = committed
                     lastError = APIError.http(status: 308, body: "resume incomplete at offset \(offset)")
                     continue
                 }
-                // A genuine 4xx/5xx — surface it (idempotent: a later retry re-uploads).
-                throw APIError.http(status: status, body: "")
-            } catch let err as APIError {
+                let err = APIError.http(status: status, body: String(data: body, encoding: .utf8) ?? "")
+                guard Self.isRetryableUploadStatus(status) else { throw err }
                 lastError = err
-                // Before retrying, ask the session how many bytes it actually committed
-                // so we resume from the right place (best-effort).
-                if attempt + 1 < maxAttempts, let committed = querySessionOffset(url: url, total: n) {
-                    offset = committed
-                }
+                shouldResync = true
+            } catch let err as APIError {
+                // A permanent HTTP status thrown above must escape the retry loop.
+                if case .http(let status, _) = err, !Self.isRetryableUploadStatus(status) { throw err }
+                lastError = err
+                shouldResync = true
             } catch {
                 lastError = APIError.transport(String(describing: error))
+                shouldResync = true
+            }
+            // Before retrying, ask the session how many bytes it actually committed
+            // so we resume from the right place (best-effort).
+            if shouldResync, attempt + 1 < maxAttempts {
+                switch sessionStatus(url: url, total: n) {
+                case .complete: return
+                case .incomplete(let committed): offset = min(committed, n)
+                case .unknown: break
+                }
             }
             // Backoff before the next attempt (skip the wait after the final attempt).
             if attempt + 1 < maxAttempts {
@@ -600,41 +626,62 @@ public struct HTTPPatchAPI: PatchAPI {
         throw lastError
     }
 
-    /// Build a resumable-PUT request for the byte range `[from, total)`.
-    private func uploadChunkRequest(url: URL, data: Data, from: Int, total: Int) -> URLRequest {
+    /// Is an upload-session status worth another attempt? Only a timeout, a rate
+    /// limit, or a server-side error is transient; every other 4xx means this
+    /// session URI will never accept these bytes (expired signature, wrong object,
+    /// cancelled session), so re-uploading the module is pure waste.
+    static func isRetryableUploadStatus(_ status: Int) -> Bool {
+        status == 408 || status == 429 || status >= 500
+    }
+
+    /// Build a resumable-PUT request for the byte range `[from, total)`. When every
+    /// byte is already committed (`from >= total`) this is a STATUS PROBE
+    /// (`bytes */total`) — never the invalid `bytes total-(total-1)/total` range the
+    /// arithmetic would otherwise produce.
+    func uploadChunkRequest(url: URL, data: Data, from: Int, total: Int) -> URLRequest {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.timeoutInterval = Self.uploadTimeout(default: timeout)
         let start = max(0, min(from, total))
         let chunk = start < total ? data.subdata(in: start..<total) : Data()
         req.setValue("\(chunk.count)", forHTTPHeaderField: "Content-Length")
-        if total > 0 {
+        if total > 0, start < total {
             req.setValue("bytes \(start)-\(total - 1)/\(total)", forHTTPHeaderField: "Content-Range")
         } else {
-            req.setValue("bytes */0", forHTTPHeaderField: "Content-Range")
+            req.setValue("bytes */\(total)", forHTTPHeaderField: "Content-Range")
         }
         req.setValue("application/wasm", forHTTPHeaderField: "Content-Type")
         req.httpBody = chunk
         return req
     }
 
-    /// Query a resumable session for how many bytes it has committed: a zero-length
-    /// PUT with `Content-Range: bytes */total`. GCS replies 308 with a `Range` header.
-    /// Returns the next byte offset to send, or nil when it can't be determined.
-    private func querySessionOffset(url: URL, total: Int) -> Int? {
+    /// What a resumable session says about its own progress.
+    enum SessionStatus: Equatable {
+        /// The object is complete — nothing left to send.
+        case complete
+        /// The next byte the session expects.
+        case incomplete(offset: Int)
+        /// Could not be determined (transport error, no `Range` header).
+        case unknown
+    }
+
+    /// Query a resumable session: a zero-length PUT with `Content-Range: bytes */total`.
+    /// GCS answers 200/201 when the object is complete, else 308 + a `Range` header.
+    func sessionStatus(url: URL, total: Int) -> SessionStatus {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.timeoutInterval = timeout
         req.setValue("0", forHTTPHeaderField: "Content-Length")
         req.setValue("bytes */\(total)", forHTTPHeaderField: "Content-Range")
-        guard let (_, http) = try? sendRaw(req) else { return nil }
-        if (200..<300).contains(http.statusCode) { return total }  // already complete
-        return Self.committedOffset(from: http)
+        guard let (_, http) = try? sendRaw(req) else { return .unknown }
+        if (200..<300).contains(http.statusCode) { return .complete }
+        guard let committed = Self.committedOffset(from: http) else { return .unknown }
+        return committed >= total ? .complete : .incomplete(offset: committed)
     }
 
     /// Parse the committed offset from a GCS resumable `Range: bytes=0-<end>` header.
     /// The next byte to send is `end + 1`. Returns nil when absent/unparseable.
-    private static func committedOffset(from http: HTTPURLResponse) -> Int? {
+    static func committedOffset(from http: HTTPURLResponse) -> Int? {
         guard let range = (http.value(forHTTPHeaderField: "Range")
                            ?? http.value(forHTTPHeaderField: "range")) else { return nil }
         // Format: "bytes=0-<end>".

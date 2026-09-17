@@ -1,7 +1,7 @@
 {
   "generatedBy": "scripts/gen-cli-help.mjs",
   "cli": "patchcli",
-  "version": "1.7.3",
+  "version": "1.8.0",
   "commandCount": 22,
   "commands": [
     {

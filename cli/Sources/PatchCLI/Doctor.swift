@@ -284,8 +284,8 @@ struct Doctor: ParsableCommand {
         // Xcode project: scan project.pbxproj for the patch-swift package reference
         // and the PatchSDK product link. Same signals the XcodeProjectEditor uses to
         // decide `.alreadyPresent`.
-        let xcodeprojs = (try? fm.contentsOfDirectory(atPath: root.path))?
-            .filter { $0.hasSuffix(".xcodeproj") } ?? []
+        let xcodeprojs = ((try? fm.contentsOfDirectory(atPath: root.path))?
+            .filter { $0.hasSuffix(".xcodeproj") } ?? []).sorted()
         if let projName = xcodeprojs.first {
             let pbxURL = root.appendingPathComponent(projName).appendingPathComponent("project.pbxproj")
             guard let pbx = try? String(contentsOf: pbxURL, encoding: .utf8) else {

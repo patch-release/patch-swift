@@ -91,10 +91,28 @@ public final class ModuleLoader: @unchecked Sendable {
     /// Inflate if brotli, else return as-is. Brotli is detected from the URL
     /// suffix `.br` (the backend's `module.wasm.br`) or `forceBrotli`.
     private func maybeDecompress(_ data: Data, url: String, sizeHint: Int, forceBrotli: Bool) throws -> Data {
-        let isBrotli = forceBrotli || url.hasSuffix(".br")
+        let isBrotli = forceBrotli || Self.urlPathIndicatesBrotli(url)
         guard isBrotli else { return data }
         do { return try Brotli.decompress(data, sizeHint: sizeHint) }
         catch { throw LoadError.decompression(error) }
+    }
+
+    /// Whether `urlString`'s PATH ends in `.br` (the backend serves `module.wasm.br`).
+    ///
+    /// BUG: this used to test `urlString.hasSuffix(".br")` on the WHOLE URL. A download URL
+    /// that carries a query or fragment — a GCS/S3 **signed URL**
+    /// (`…/module.wasm.br?X-Goog-Signature=…`), a CDN cache-buster (`?v=3`), any
+    /// self-hosted backend's presigned link — does not end in `.br`, so the brotli payload
+    /// was handed to SHA-256 verification UNINFLATED. The hash never matches, `fetchFull`
+    /// throws `hashMismatch`, and the device REJECTS every patch forever (silently: the
+    /// user just never receives updates, and the dashboard sees a stream of `error` events).
+    /// Testing only the path component fixes it; behaviour for a plain `…/module.wasm.br`
+    /// (today's production shape) is byte-identical.
+    static func urlPathIndicatesBrotli(_ urlString: String) -> Bool {
+        var path = Substring(urlString)
+        if let hash = path.firstIndex(of: "#") { path = path[path.startIndex..<hash] }
+        if let q = path.firstIndex(of: "?") { path = path[path.startIndex..<q] }
+        return path.hasSuffix(".br")
     }
 
     // MARK: - Verify

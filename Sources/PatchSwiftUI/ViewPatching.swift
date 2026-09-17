@@ -743,6 +743,64 @@ func _patchDecodeJSON<V>(_ type: V.Type, from jsonFragment: String) -> V? {
        let decoded = try? decoder.decode(decodableType, from: reshaped) {
         return decoded as? V
     }
+    // BUG: the bare-string reshape above only round-trips an enum whose SYNTHESIZED decoder
+    // accepts a bare string — i.e. a `String`-RAW enum. Measured behaviour of Swift's
+    // synthesized `Codable` for a no-payload case:
+    //     enum S: String, Codable  →  "beta"      (the reshape works)
+    //     enum I: Int,    Codable  →  1           (a NUMBER — the reshape fails)
+    //     enum P:         Codable  →  {"beta":{}} (an OBJECT  — the reshape fails)
+    // So a `Picker`/segmented control bound to an `Int`-raw or plain (non-`RawRepresentable`)
+    // enum `@State`/`@Binding` had a DEAD write-back: the patched view moved but the native
+    // `@State` never did, so native siblings, `.onChange`, `didSet` and any persistence kept
+    // the OLD value and the app's two halves diverged. (`String`-raw enums worked, which is
+    // why this went unnoticed.)
+    //
+    // Recover the case from its LABEL — the only thing the envelope carries — in the two
+    // ways that are provably exact:
+    //   1. `CaseIterable` (what a Picker-backed enum virtually always is): find the unique
+    //      case whose runtime name matches. Uses the SAME `swift_EnumCaseName` the encoder
+    //      used, so the match is exact rather than a raw-value guess.
+    //   2. the non-`RawRepresentable` synthesized shape `{"<label>":{}}`.
+    // Both are tried ONLY for a bare `{"case":"<label>"}` envelope (no associated values), so
+    // a struct/associated-value payload can never be mis-decoded. On failure we still return
+    // nil and the write-back is SKIPPED — never wrong.
+    if let label = _patchBareEnumCaseLabel(jsonFragment) {
+        if let resolved = _patchCaseIterableCase(V.self, label: label) { return resolved }
+        if let nested = try? JSONSerialization.data(withJSONObject: [label: [String: Any]()],
+                                                   options: []),
+           let decoded = try? decoder.decode(decodableType, from: nested) {
+            return decoded as? V
+        }
+    }
+    return nil
+}
+
+/// The case label of a PAYLOAD-FREE `{"case":"<label>"}` envelope, else nil. Requires the
+/// object to carry ONLY the `case` key, so an associated-value envelope (or any other
+/// object that happens to have a `case` field) never reaches the label-based recovery.
+@MainActor
+func _patchBareEnumCaseLabel(_ jsonFragment: String) -> String? {
+    guard let data = jsonFragment.data(using: .utf8),
+          let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          obj.count == 1, let name = obj["case"] as? String else { return nil }
+    return name
+}
+
+/// The `V` case whose runtime case name is `label`, when `V` is `CaseIterable`. Returns nil
+/// for a non-`CaseIterable` `V`, or when no case matches (never a wrong case: the comparison
+/// is against `swift_EnumCaseName`, the exact name the encoder emitted).
+@MainActor
+func _patchCaseIterableCase<V>(_ type: V.Type, label: String) -> V? {
+    guard let iterable = V.self as? any CaseIterable.Type else { return nil }
+    return _patchFirstCase(iterable, named: label) as? V
+}
+
+/// Implicitly opens the `any CaseIterable.Type` existential (SE-0352) so `allCases` is
+/// reachable. The return type deliberately does NOT mention `T`, which is what allows the
+/// opening.
+@MainActor
+private func _patchFirstCase<T: CaseIterable>(_ type: T.Type, named label: String) -> Any? {
+    for c in T.allCases where PatchValueEncoder.enumCaseName(c) == label { return c }
     return nil
 }
 
@@ -1737,7 +1795,19 @@ final class PatchedBodyStaticTemplateCache {
 
     /// Store the template for (typeName, export, epoch). An existing entry for the
     /// same key is replaced (idempotent — the static tree is the same on every call).
+    ///
+    /// BUG (unbounded growth): the epoch is part of the key, so every module swap created a
+    /// FRESH key for every static view while the previous epochs' entries — each holding a
+    /// fully decoded `ViewNode` tree — stayed in the dictionary FOREVER. Nothing ever removed
+    /// them (`reset()` is test-only), so a session that hot-swaps repeatedly (a dev's
+    /// "check for updates" button, `reloadAsync`, or any app that polls) grew this cache
+    /// without bound — the one cache in the file with no eviction, against its own stated
+    /// invariant #3. A stale-epoch entry is also DEAD by construction: `lookup` only ever
+    /// matches the live epoch. Sweep them on store.
     func store(typeName: String, export: String, epoch: UInt64, payload: PatchedBodyCacheEntry) {
+        if cache.keys.contains(where: { $0.epoch != epoch }) {
+            cache = cache.filter { $0.key.epoch == epoch }
+        }
         cache[Key(typeName: typeName, export: export, epoch: epoch)] = payload
     }
 
@@ -2255,6 +2325,27 @@ public struct PatchedBodyHost: View {
             return demoteFallback()
         }
 
+        // DISPATCH-COVERAGE SAFETY NET: every interactive construct is wired to the guest ONLY
+        // inside the `if let dispatchExport = entry.dispatch` block below. With no dispatch
+        // export:
+        //   * a lowered `.button(actionID:…)` falls back to `context.actions.action(for:) ?? {}`
+        //     — a Button that renders perfectly and does NOTHING on tap;
+        //   * a `.forEach` carrying `.onDelete`/`.onMove` gets the affordance attached with a
+        //     no-op handler — the user swipes, SwiftUI ANIMATES THE ROW OUT, and it SNAPS BACK
+        //     (the destructive "animates out then REAPPEARS" failure of bug #71).
+        // Both are exactly what the sibling slot nets exist to prevent, and both are reachable
+        // whenever the manifest ENTRY and the emitted TREE disagree about interactivity: a
+        // best-effort-merged PMOD, or any manifest/module skew. Demote the whole view so the
+        // developer's real, working native body runs instead. Zero cost on the normal path —
+        // the extra walk only happens when there is no dispatch export at all.
+        if entry.dispatch == nil,
+           !idSets.button.isEmpty || Self.treeHasListEditAffordance(tree) {
+            let name = typeName
+            let ep = renderEpoch
+            Task { @MainActor in PatchViewPatchRegistry.shared.markFailed(typeName: name, forEpoch: ep) }
+            return demoteFallback()
+        }
+
         var context = RenderContext(showOpaqueStubs: false)
         // Fill the renderer's opaque table with the native leaf renderers. A
         // PARAMETERIZED slot's factory is applied to the emission's `slotArgs[id]`
@@ -2646,22 +2737,6 @@ public struct PatchedBodyHost: View {
         var button: [String] = []
         var animation: [String] = []
 
-        func tokenIDs(in m: Modifier, into out: inout [String]) {
-            func add(_ c: ColorRef) { if case .hostToken(let id) = c { out.append(id) } }
-            func add(_ s: IRShapeStyle) { if case .color(let c) = s { add(c) } }
-            switch m {
-            case .fontToken(let id): out.append(id)
-            case .foregroundColor(let c), .background(let c), .tint(let c): add(c)
-            case .accentColor(let c?): add(c)
-            case .shadow(let c?, _, _, _): add(c)
-            case .foregroundStyle(let layers): for s in layers { add(s) }
-            case .backgroundStyle(let s, _), .tintStyle(let s),
-                 .fill(let s, _), .stroke(let s, _), .strokeBorder(let s, _),
-                 .border(let s, _), .overlayStyle(let s, _): add(s)
-            default: break
-            }
-        }
-
         func walk(_ n: ViewNode) {
             // Kind-derived ids (mutually-exclusive node kinds) emit PRE-ORDER — matches the
             // node-first originals (opaque/row/action/button), which append before recursing.
@@ -2673,11 +2748,16 @@ public struct PatchedBodyHost: View {
             case .button(let actionID, _, _): button.append(actionID)
             default: break
             }
+            // KIND-derived TOKEN ids: a `Color` LEAF (`.color(.hostToken(id))` — the shape a
+            // `Color.brandPrimary` / `Color("Brand")` / `Color(uiColor:)` lowers to) and a
+            // Canvas draw-op's ShapeStyle. Missing before, so an unsupplied token in either
+            // position bypassed the demote gate and rendered `.primary` (see `addTokenIDs`).
+            Self.addTokenIDs(fromKind: n.kind, into: &token)
             // This node's OWN modifier-derived ids (token/effect/animation) emit while scanning
             // `n.modifiers` — matches the modifier-first originals (which scan modifiers before
             // recursing childNodes).
             for m in n.modifiers {
-                tokenIDs(in: m, into: &token)
+                Self.addTokenIDs(fromModifier: m, into: &token)
                 if case .nativeEffectSlot(let id) = m { effect.append(id) }
                 if case .animation(_, let valueKey) = m, !valueKey.isEmpty { animation.append(valueKey) }
             }
@@ -2756,6 +2836,21 @@ public struct PatchedBodyHost: View {
         return out
     }
 
+    /// True when the tree carries a LIST-EDIT affordance (`.onDelete`/`.onMove`). Without a
+    /// dispatcher those attach a handler that can never fire, and swipe-to-delete then
+    /// animates a row out and snaps it back. Used only on the no-dispatch-export path.
+    nonisolated static func treeHasListEditAffordance(_ node: ViewNode) -> Bool {
+        for m in node.modifiers {
+            switch m {
+            case .onDelete, .onMove: return true
+            default: break
+            }
+            for child in m.contentNodes where treeHasListEditAffordance(child) { return true }
+        }
+        for child in node.childNodes where treeHasListEditAffordance(child) { return true }
+        return false
+    }
+
     /// Every `.callbackSlot(id:…)` node id in the tree — the CHILD-VIEW CALLBACK SLOTS the
     /// thunk must supply a `() -> AnyView` closure for. Walks `childNodes` AND modifier
     /// content (a callback slot nested in a sheet/overlay body must still be covered). An
@@ -2795,27 +2890,84 @@ public struct PatchedBodyHost: View {
     /// an opaque leaf). Walks node modifiers + modifier content + child nodes.
     nonisolated static func collectTokenIDs(_ node: ViewNode) -> [String] {
         var out: [String] = []
-        func add(_ c: ColorRef) { if case .hostToken(let id) = c { out.append(id) } }
-        func add(_ s: IRShapeStyle) { if case .color(let c) = s { add(c) } }
-        func add(_ m: Modifier) {
-            switch m {
-            case .fontToken(let id): out.append(id)
-            case .foregroundColor(let c), .background(let c), .tint(let c): add(c)
-            case .accentColor(let c?): add(c)
-            case .shadow(let c?, _, _, _): add(c)
-            case .foregroundStyle(let layers): for s in layers { add(s) }
-            case .backgroundStyle(let s, _), .tintStyle(let s),
-                 .fill(let s, _), .stroke(let s, _), .strokeBorder(let s, _),
-                 .border(let s, _), .overlayStyle(let s, _): add(s)
-            default: break
-            }
-        }
         func walk(_ n: ViewNode) {
-            for m in n.modifiers { add(m); for child in m.contentNodes { walk(child) } }
+            addTokenIDs(fromKind: n.kind, into: &out)
+            for m in n.modifiers { addTokenIDs(fromModifier: m, into: &out)
+                                   for child in m.contentNodes { walk(child) } }
             for child in n.childNodes { walk(child) }
         }
         walk(node)
         return out
+    }
+
+    // MARK: - Token-id extraction (the SINGLE source of truth for the token demote gate)
+    //
+    // EVERY `ColorRef.hostToken(id)` / `Modifier.fontToken(id)` the RENDERER can reach must be
+    // collected here, because `Renderer.color(_:)` falls back to `.primary` for a token id the
+    // host table doesn't carry — a WRONG BRAND COLOR silently rendered instead of the whole view
+    // demoting to its native body. Both `collectTokenIDs` and the combined `collectAllIDs` route
+    // through these helpers so the two can never disagree.
+    //
+    // Previously only a hand-listed subset of MODIFIERS was scanned, which missed:
+    //   * `NodeKind.color(.hostToken(id))` — a `Color` LEAF. This is what a plain
+    //     `Color.brandPrimary` / `Color("Brand")` / `Color(uiColor:)` / `Color(hex:)` LOWERS to
+    //     (SwiftUIEmitter emits `N.color(.hostToken(id))`), i.e. the single most common token
+    //     position in a real design-system app.
+    //   * `.underline(color:)`, `.strikethrough(color:)`, `.listItemTint`,
+    //     `.listRowSeparatorTint`, `.listSectionSeparatorTint`, `.colorMultiply`.
+    //   * a token nested in a GRADIENT stop (`IRGradientStop.color`) or in the ShapeStyle
+    //     shadow form (`IRShapeStyle.shadow(IRShadowStyle.color)`).
+    //   * a Canvas draw-op's `IRShapeStyle` (`IRDrawOp.fillPath`/`.strokePath`).
+
+    nonisolated static func addTokenIDs(fromColor c: ColorRef?, into out: inout [String]) {
+        guard let c else { return }
+        if case .hostToken(let id) = c { out.append(id) }
+    }
+
+    nonisolated static func addTokenIDs(fromStyle s: IRShapeStyle, into out: inout [String]) {
+        switch s {
+        case .color(let c): addTokenIDs(fromColor: c, into: &out)
+        case .linearGradient(let g, _, _), .radialGradient(let g, _, _, _),
+             .angularGradient(let g, _, _, _):
+            for stop in g.stops { addTokenIDs(fromColor: stop.color, into: &out) }
+        case .shadow(let sh): addTokenIDs(fromColor: sh.color, into: &out)
+        case .material, .hierarchical, .semantic: break
+        }
+    }
+
+    nonisolated static func addTokenIDs(fromModifier m: Modifier, into out: inout [String]) {
+        switch m {
+        case .fontToken(let id): out.append(id)
+        case .foregroundColor(let c), .background(let c), .tint(let c),
+             .colorMultiply(let c):
+            addTokenIDs(fromColor: c, into: &out)
+        case .accentColor(let c), .listItemTint(let c),
+             .listRowSeparatorTint(let c, _), .listSectionSeparatorTint(let c, _),
+             .underline(_, let c), .strikethrough(_, let c):
+            addTokenIDs(fromColor: c, into: &out)
+        case .shadow(let c, _, _, _): addTokenIDs(fromColor: c, into: &out)
+        case .foregroundStyle(let layers): for s in layers { addTokenIDs(fromStyle: s, into: &out) }
+        case .backgroundStyle(let s, _), .tintStyle(let s),
+             .fill(let s, _), .stroke(let s, _), .strokeBorder(let s, _),
+             .border(let s, _), .overlayStyle(let s, _):
+            addTokenIDs(fromStyle: s, into: &out)
+        default: break
+        }
+    }
+
+    nonisolated static func addTokenIDs(fromKind kind: NodeKind, into out: inout [String]) {
+        switch kind {
+        case .color(let c): addTokenIDs(fromColor: c, into: &out)
+        case .canvas(let ops):
+            for op in ops {
+                switch op {
+                case .fillPath(_, let style), .strokePath(_, let style, _):
+                    addTokenIDs(fromStyle: style, into: &out)
+                case .drawText: break   // its Text leaves are `childNodes`
+                }
+            }
+        default: break
+        }
     }
 
     /// Find the `geometryReader` node with `id` in a re-emitted tree and return its
