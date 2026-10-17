@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // ===========================================================================
 // PatchAsyncCallBroker — the HOST-side capture + resolve for ASYNC routed calls

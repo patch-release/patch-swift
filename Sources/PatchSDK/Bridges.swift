@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 #if canImport(os)
 import os
@@ -210,7 +213,9 @@ public final class BridgeRegistry: @unchecked Sendable {
         register(UserDefaultsBridge(defaults: userDefaults))
         register(NotificationCenterBridge(center: notificationCenter))
         register(NavigationBridge(handler: navigation))
+        #if canImport(Security)
         register(KeychainBridge())
+        #endif
         register(DateLocaleBridge())
         register(JSONBridge())
         // The Embedded-Swift "borrow the shell's Foundation" surface
@@ -500,6 +505,11 @@ public struct NavigationBridge: Bridge {
 // bridge is structured + compiles cross-platform and is treated as
 // **device-only** for behavioral testing. The marshalling layer around it IS
 // unit-tested via a custom-bridge stub.
+//
+// Apple-only (`canImport(Security)`). Off Apple platforms (Android) the bridge is
+// not registered: a module importing `keychain_*` fails to instantiate and the
+// loader falls back, rather than pretending secrets were stored.
+#if canImport(Security)
 public struct KeychainBridge: Bridge {
     public let module = "patch"
     private let service: String
@@ -566,6 +576,7 @@ public enum Keychain {
         return s == errSecSuccess || s == errSecItemNotFound
     }
 }
+#endif
 
 // MARK: - 6. Date / Locale
 //
@@ -757,7 +768,15 @@ public struct FoundationBridge: Bridge {
     public static func jsonGetBool(_ jsonBytes: [UInt8], key: String) -> Bool? {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(jsonBytes)) as? [String: Any],
               let raw = obj[key] else { return nil }
-        guard let n = raw as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+        guard let n = raw as? NSNumber else { return nil }
+        #if canImport(Darwin)
+        guard CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+        #else
+        // No CoreFoundation type queries off Darwin (Android): JSON bools are
+        // the only NSNumbers JSONSerialization yields with objCType "c"/"B".
+        let type = String(cString: n.objCType)
+        guard type == "c" || type == "B" else { return nil }
+        #endif
         return n.boolValue
     }
 
@@ -941,6 +960,10 @@ public struct FoundationBridge: Bridge {
     /// `dateContext`/`relativeContext` are Unix MILLIS. Locale-aware via the shell's
     /// real ICU (empty locale → current). This is the `SettingsScreen.relativeString`
     /// bug-fix shape — "2 hr ago", "yesterday", "in 3 days".
+    ///
+    /// Apple-only: Foundation off Darwin (Android) has no
+    /// `RelativeDateTimeFormatter`, so the host fn is not registered there.
+    #if canImport(Darwin)
     public static func relativeDateFormat(forMillis: Int64, relativeToMillis: Int64,
                                           unitsStyle: Int32, locale: String) -> String {
         let f = RelativeDateTimeFormatter()
@@ -955,6 +978,7 @@ public struct FoundationBridge: Bridge {
         let ref = Date(timeIntervalSince1970: Double(relativeToMillis) / 1000.0)
         return f.localizedString(for: d, relativeTo: ref)
     }
+    #endif
 
     /// `date_format_styled` — `DateFormatter` with `dateStyle`/`timeStyle` (the
     /// localized-style builder, distinct from the pattern-based `date_format`).
@@ -1168,6 +1192,7 @@ public struct FoundationBridge: Bridge {
 
         // ---- LEVER #2: Date/Calendar/Formatter host bridges --------------------
         // relative_date_format(forMillis, relativeToMillis, unitsStyle, loc ptr,len) -> packed string.
+        #if canImport(Darwin)
         imports.host(module, "relative_date_format", [.i64, .i64, .i32, .i32, .i32], [.i64], store: store) { caller, args in
             let ctx = BridgeContext(caller: caller)
             let loc = try ctx.readString(ptr: args[3].i32, len: args[4].i32)
@@ -1177,6 +1202,7 @@ public struct FoundationBridge: Bridge {
                                             locale: loc)
             return [try ctx.packedResult(s)]
         }
+        #endif
         // date_format_styled(unixMillis, dateStyle, timeStyle, loc ptr,len, tz ptr,len) -> packed string.
         imports.host(module, "date_format_styled", [.i64, .i32, .i32, .i32, .i32, .i32, .i32], [.i64], store: store) { caller, args in
             let ctx = BridgeContext(caller: caller)

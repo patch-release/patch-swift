@@ -2,7 +2,9 @@
 
 import XCTest
 import Foundation
+#if canImport(Combine)
 import Combine
+#endif
 @testable import PatchSDK
 import PatchViewIR
 #if canImport(SwiftUI)

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 @testable import PatchSDK
 #if canImport(SwiftUI)

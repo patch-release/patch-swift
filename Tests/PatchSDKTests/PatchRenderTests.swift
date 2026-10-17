@@ -930,6 +930,7 @@ final class PatchRenderTests: XCTestCase {
 
     /// The host-owned presentation binding: GET returns the guest flag, SET (a system
     /// swipe-dismiss or a button) dispatches the event. Same proven bridge as Toggle.
+    #if canImport(SwiftUI)
     @MainActor
     func testPresentationBindingDispatches() throws {
         var captured: [(String, IRValue)] = []
@@ -948,9 +949,11 @@ final class PatchRenderTests: XCTestCase {
         _ = dispatcher
         #endif
     }
+    #endif
 
     /// The Picker / TabView selection projection helpers extract Int/String tags, and
     /// `onDelete`/`onMove` dispatch `.array([.int])` payloads.
+    #if canImport(SwiftUI)
     @MainActor
     func testSelectionAndListEditDispatch() throws {
         #if canImport(SwiftUI)
@@ -978,6 +981,7 @@ final class PatchRenderTests: XCTestCase {
         XCTAssertEqual(captured[0].1, .array([.int(0), .int(2)]))
         XCTAssertEqual(captured[1].1, .array([.int(0), .int(2)]))
     }
+    #endif
 
     // MARK: - Design-system TOKENS (v4: ColorRef.hostToken / Modifier.fontToken)
 

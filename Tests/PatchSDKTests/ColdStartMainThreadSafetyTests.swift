@@ -81,6 +81,7 @@ final class ColdStartMainThreadSafetyTests: XCTestCase {
     /// After activate(), `cachedManifestBytes()` is non-nil when the module
     /// exports `patch_view_manifest` — the manifest was fetched on the
     /// activationQueue, not deferred to the first body eval on main.
+    #if canImport(SwiftUI)
     func testManifestCachedAfterActivation() throws {
         guard let url = Bundle.module.url(forResource: "EngineSettingsView",
                                           withExtension: "wasm") else {
@@ -100,6 +101,7 @@ final class ColdStartMainThreadSafetyTests: XCTestCase {
         }
         // No crash = pre-warm ran without trapping.
     }
+    #endif
 
     /// cachedManifestBytes() is nil after deactivate() — the stale cache is cleared.
     func testManifestCacheIsNilAfterDeactivate() throws {
@@ -122,6 +124,7 @@ final class ColdStartMainThreadSafetyTests: XCTestCase {
     /// We can't directly observe the handle-cache hit, but a successful call
     /// proves the export is reachable (and implicitly that the handle is memoized
     /// from the pre-warm, since WasmKit exports are immutable post-init).
+    #if canImport(SwiftUI)
     func testViewBodyExportCallableAfterPrewarm() throws {
         guard let url = Bundle.module.url(forResource: "EngineSettingsView",
                                           withExtension: "wasm") else {
@@ -145,4 +148,5 @@ final class ColdStartMainThreadSafetyTests: XCTestCase {
         XCTAssertNotNil(result,
             "W5a: pre-warmed view_body export must be callable after prewarmViewBodyExports()")
     }
+    #endif
 }

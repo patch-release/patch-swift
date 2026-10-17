@@ -36,21 +36,27 @@ final class ImageFilterBridgeTests: XCTestCase {
 
     // MARK: - applyFilter (real CoreImage on macOS)
 
+    #if canImport(CoreImage)
     func testApplyRealSepiaProducesPNG() throws {
         let out = try XCTUnwrap(ImageFilterBridge.applyFilter(try samplePNG(), name: "CISepiaTone"))
         XCTAssertFalse(out.isEmpty)
         // PNG magic number.
         XCTAssertEqual(Array(out.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
     }
+    #endif
 
+    #if canImport(CoreImage)
     func testApplyInvalidInputBytesReturnsNil() {
         XCTAssertNil(ImageFilterBridge.applyFilter([0, 1, 2, 3], name: "CISepiaTone"))
         XCTAssertNil(ImageFilterBridge.applyFilter([], name: "CISepiaTone"))
     }
+    #endif
 
+    #if canImport(CoreImage)
     func testApplyUnknownFilterReturnsNil() throws {
         XCTAssertNil(ImageFilterBridge.applyFilter(try samplePNG(), name: "CINotARealFilter"))
     }
+    #endif
 
     // MARK: - Fixture (imports patch.apply_filter; exports call_apply_filter)
 

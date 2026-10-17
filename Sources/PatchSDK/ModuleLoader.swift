@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Downloads, decompresses, verifies, caches, and activates OTA modules.
 ///

@@ -104,9 +104,12 @@ public final class ResourceOverlayRedirect: @unchecked Sendable {
 
     /// Install the ObjC swizzles for the named-lookup accessors. Idempotent + only
     /// ever called once (guarded by `installed`). On platforms without UIKit only the
-    /// Foundation `Bundle.localizedString` swizzle is installed.
+    /// Foundation `Bundle.localizedString` swizzle is installed. Without the ObjC
+    /// runtime (Android) there is nothing to swizzle, so this is a no-op.
     static func installSwizzles() {
+        #if canImport(ObjectiveC)
         OverlaySwizzles.installAll()
+        #endif
     }
 }
 

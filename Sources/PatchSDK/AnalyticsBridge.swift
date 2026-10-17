@@ -97,12 +97,25 @@ public struct AnalyticsBridge: Bridge {
             // NSNumber covers JSON numbers AND bools. Render bools as
             // "true"/"false"; integers without a trailing ".0"; other numbers
             // via their natural description.
+            #if canImport(Darwin)
             if CFGetTypeID(n) == CFBooleanGetTypeID() {
                 return n.boolValue ? "true" : "false"
             }
             if CFNumberIsFloatType(n) {
                 return "\(n.doubleValue)"
             }
+            #else
+            // No CoreFoundation type queries off Darwin (Android): use the
+            // NSNumber's objCType instead. Bools are "c"; floating point is
+            // "f"/"d". JSON never yields an 8-bit integer, so "c" is unambiguous.
+            let type = String(cString: n.objCType)
+            if type == "c" || type == "B" {
+                return n.boolValue ? "true" : "false"
+            }
+            if type == "f" || type == "d" {
+                return "\(n.doubleValue)"
+            }
+            #endif
             return "\(n.int64Value)"
         default:
             // NSNull, nested [String:Any], [Any] → not a flat scalar; drop it.

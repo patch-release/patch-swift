@@ -86,6 +86,7 @@ public struct ProcessInfoBridge: Bridge {
     static func snapshot() -> ProcessFacts {
         let info = ProcessInfo.processInfo
         let thermal: ProcessFacts.ThermalState
+        #if canImport(Darwin)
         switch info.thermalState {
         case .nominal: thermal = .nominal
         case .fair: thermal = .fair
@@ -93,10 +94,17 @@ public struct ProcessInfoBridge: Bridge {
         case .critical: thermal = .critical
         @unknown default: thermal = .nominal
         }
+        let lowPowerMode = info.isLowPowerModeEnabled
+        #else
+        // Foundation off Darwin (Android) exposes neither thermal state nor
+        // low-power mode; report the neutral values.
+        thermal = .nominal
+        let lowPowerMode = false
+        #endif
         let v = info.operatingSystemVersion
         return ProcessFacts(
             thermalState: thermal,
-            lowPowerMode: info.isLowPowerModeEnabled,
+            lowPowerMode: lowPowerMode,
             osVersion: "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)",
             processorCount: info.processorCount,
             activeProcessorCount: info.activeProcessorCount,

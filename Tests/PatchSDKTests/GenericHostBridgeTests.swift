@@ -438,11 +438,16 @@ final class HandleTableTests: XCTestCase {
         let t = HandleTable()
         weak var weakBox: Box?
         var h: Int32 = 0
-        autoreleasepool {
+        let scope = {
             let b = Box(7)
             weakBox = b
             h = t.retain(b)
         }
+        #if canImport(ObjectiveC)
+        autoreleasepool(invoking: scope)
+        #else
+        scope()  // No autorelease pools without the ObjC runtime (Android).
+        #endif
         // The host table is the only strong ref now; the object is still alive.
         XCTAssertNotNil(weakBox, "the host table retains the object")
         XCTAssertNotNil(t.resolve(h))

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import PatchSDK
 
 /// The snippet-only integration — `Patch.configure(.init(appKey: "pak_…"))`,

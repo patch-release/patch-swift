@@ -45,19 +45,23 @@ final class PDFGenerateBridgeTests: XCTestCase {
 
     // MARK: - render (real CoreGraphics/CoreText on macOS)
 
+    #if canImport(CoreGraphics) && canImport(CoreText)
     func testRenderProducesPDFDocument() throws {
         let out = try XCTUnwrap(PDFGenerateBridge.render(PDFRequest(text: "Hello PDF")))
         XCTAssertFalse(out.isEmpty)
         // "%PDF-" header.
         XCTAssertEqual(Array(out.prefix(5)), [0x25, 0x50, 0x44, 0x46, 0x2D])
     }
+    #endif
 
+    #if canImport(CoreGraphics) && canImport(CoreText)
     func testRenderLongTextPaginates() throws {
         // Enough text to overflow one page; render must still succeed (multi-page).
         let long = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 400)
         let out = try XCTUnwrap(PDFGenerateBridge.render(PDFRequest(text: long)))
         XCTAssertEqual(Array(out.prefix(5)), [0x25, 0x50, 0x44, 0x46, 0x2D])
     }
+    #endif
 
     // MARK: - Fixture (generic (ptr,len)->i64; import name `fn`, export `call_a`)
 
@@ -86,6 +90,7 @@ final class PDFGenerateBridgeTests: XCTestCase {
 
     // MARK: - Dispatch
 
+    #if canImport(CoreGraphics) && canImport(CoreText)
     func testDispatchDecodesAndPacksRealPDF() throws {
         let rt = try makeRuntime { req in PDFGenerateBridge.render(req) }
         let (p, l) = try rt.writeBuffer([UInt8](#"{"text":"Round trip"}"#.utf8))
@@ -93,13 +98,16 @@ final class PDFGenerateBridgeTests: XCTestCase {
         let out = try readPacked(res[0].i64, from: rt)
         XCTAssertEqual(Array(out.prefix(5)), [0x25, 0x50, 0x44, 0x46, 0x2D])
     }
+    #endif
 
+    #if canImport(CoreGraphics) && canImport(CoreText)
     func testDispatchInvalidPayloadPacksZero() throws {
         let rt = try makeRuntime { req in PDFGenerateBridge.render(req) }
         let (p, l) = try rt.writeBuffer([UInt8]("garbage".utf8))
         let res = try rt.invoke("call_a", [.i32(p), .i32(l)])
         XCTAssertEqual(res[0].i64, 0)
     }
+    #endif
 
     func testModuleNamespace() {
         XCTAssertEqual(PDFGenerateBridge(render: { _ in nil }).module, "patch")

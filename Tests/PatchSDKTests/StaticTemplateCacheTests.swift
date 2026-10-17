@@ -237,6 +237,7 @@ final class StaticTemplateCacheIntegrationTests: XCTestCase {
 
 // MARK: - Manifest JSON decode tests (no SwiftUI required)
 
+#if canImport(SwiftUI)
 final class StaticManifestDecodeTests: XCTestCase {
 
     /// `"isStructurallyStatic":true` decodes correctly.
@@ -333,6 +334,7 @@ final class StaticManifestDecodeTests: XCTestCase {
         XCTAssertEqual(feed.isStructurallyStatic, false, "FeedItem is explicitly non-static")
     }
 }
+#endif
 
 // MARK: - POSITIVE firewall: cache returns the SAME tree regardless of input
 
@@ -347,6 +349,7 @@ final class StaticManifestDecodeTests: XCTestCase {
 /// These tests simulate the SDK's 3-layer lookup: the static-cache path bypasses the
 /// input-hash cache, so the tree is retrieved without referencing the input string at
 /// all (the cache key is typeName+export+epoch only).
+#if canImport(SwiftUI)
 @MainActor
 final class StaticTemplateCachePositiveFirewallTests: XCTestCase {
 
@@ -509,6 +512,7 @@ final class StaticTemplateCachePositiveFirewallTests: XCTestCase {
                        + "static: \(staticDescribe)\nhash:   \(hashDescribe)")
     }
 }
+#endif
 
 // MARK: - Non-static view firewall (real WASM)
 
@@ -518,6 +522,7 @@ final class StaticTemplateCachePositiveFirewallTests: XCTestCase {
 ///
 /// We call the real `viewBodyEmission` via a fresh `Patch()` (not the singleton)
 /// so the test is self-contained and doesn't affect other tests.
+#if canImport(SwiftUI)
 final class NonStaticViewFirewallTests: XCTestCase {
 
     private func bannerModule() throws -> [UInt8] {
@@ -583,3 +588,4 @@ final class NonStaticViewFirewallTests: XCTestCase {
                         + "got isStructurallyStatic = \(String(describing: banner.isStructurallyStatic))")
     }
 }
+#endif

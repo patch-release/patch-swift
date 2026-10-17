@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 
 // MARK: - Breakthrough #6 — NETWORKING (URLSession) async host bridge

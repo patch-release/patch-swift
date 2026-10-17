@@ -55,18 +55,22 @@ final class QRGenerateBridgeTests: XCTestCase {
 
     // MARK: - generate (real CoreImage on macOS)
 
+    #if canImport(CoreImage)
     func testGenerateProducesPNG() throws {
         let out = try XCTUnwrap(QRGenerateBridge.generate(QRRequest(text: "https://patch.dev")))
         XCTAssertFalse(out.isEmpty)
         // PNG magic number.
         XCTAssertEqual(Array(out.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
     }
+    #endif
 
+    #if canImport(CoreImage)
     func testGenerateScaleAffectsSize() throws {
         let small = try XCTUnwrap(QRGenerateBridge.generate(QRRequest(text: "AAA", scale: 1)))
         let big = try XCTUnwrap(QRGenerateBridge.generate(QRRequest(text: "AAA", scale: 12)))
         XCTAssertGreaterThan(big.count, small.count, "a larger scale → more pixels → bigger PNG")
     }
+    #endif
 
     // MARK: - Fixture (generic (ptr,len)->i64; import name `fn`, export `call_a`)
 
@@ -77,6 +81,8 @@ final class QRGenerateBridgeTests: XCTestCase {
         [UInt8](try XCTUnwrap(Data(base64Encoded: Self.fixtureBase64)))
     }
 
+    // The dispatch round-trip drives the real CoreImage generator.
+    #if canImport(CoreImage)
     private func makeRuntime() throws -> WASMRuntime {
         let registry = BridgeRegistry()
         registry.registerFunction(name: "fn", parameters: [.i32, .i32], results: [.i64]) { caller, args in
@@ -109,6 +115,7 @@ final class QRGenerateBridgeTests: XCTestCase {
         let res = try rt.invoke("call_a", [.i32(p), .i32(l)])
         XCTAssertEqual(res[0].i64, 0, "empty bytes → nil request → packed 0")
     }
+    #endif
 
     func testModuleNamespace() {
         XCTAssertEqual(QRGenerateBridge(generate: { _ in nil }).module, "patch")

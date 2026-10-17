@@ -25,7 +25,7 @@ import CBZ2
 /// diff stream byte-wise), then copy `extraLen` bytes verbatim from extra, then
 /// seek the old-file cursor by `seekLen`.
 ///
-/// libbz2 (the `CBZ2` system target) inflates the bz2 streams; everything else is
+/// libbz2 (the vendored `CBZ2` target) inflates the bz2 streams; everything else is
 /// pure Swift. This is a **full, working** implementation, not a stub — the
 /// loader prefers it when the backend offers a `diff_url`, and always falls back
 /// to a full-module download on any diff failure (see `ModuleLoader`).

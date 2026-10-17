@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 import PatchHostBridge
 // (No UIKit import: the only former UIKit use here — `UIDevice.current.systemVersion`

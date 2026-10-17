@@ -4,9 +4,11 @@ import XCTest
 import Foundation
 @testable import PatchSDK
 import PatchViewIR
+// PatchRender's capability model (`PatchRenderFeature`) is platform-neutral;
+// only its SwiftUI renderer is guarded, so import it everywhere.
+@testable import PatchRender
 #if canImport(SwiftUI)
 import SwiftUI
-@testable import PatchRender
 @testable import PatchSwiftUI
 #endif
 
@@ -324,6 +326,7 @@ final class RenderCapabilitiesTests: XCTestCase {
 
     // MARK: - Manifest `minOS` (engine-resolved `if #available` branches)
 
+    #if canImport(SwiftUI)
     func testManifestMinOSDecodesAndGates() throws {
         let json = """
         {"schemaVersion":12,"views":[
@@ -345,6 +348,7 @@ final class RenderCapabilitiesTests: XCTestCase {
                                               minOS: ["iOS": "seventeen"])
         XCTAssertFalse(garbage.meetsMinimumOS(.iOS(18)), "an unparseable floor for this platform fails closed")
     }
+    #endif
 
     #if canImport(SwiftUI)
     @MainActor

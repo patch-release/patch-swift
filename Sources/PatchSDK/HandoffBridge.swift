@@ -76,10 +76,15 @@ public struct HandoffBridge: Bridge {
     /// thread (it is UI/responder-chain bound). Guarded by `canImport(Foundation)`
     /// (always true on Apple platforms) to mirror the guide's pattern.
     public init() {
+        #if canImport(Darwin)
         let store = HandoffStore()
         self.init(
             start: { activity in store.start(activity) },
             stop: { type in store.stop(type) })
+        #else
+        // No NSUserActivity / Handoff off Apple platforms (Android): no-op.
+        self.init(start: { _ in }, stop: { _ in })
+        #endif
     }
     #endif
 
@@ -125,7 +130,7 @@ public struct HandoffBridge: Bridge {
     }
 }
 
-#if canImport(Foundation)
+#if canImport(Darwin)
 /// Thread-safe registry of currently-active `NSUserActivity`s, keyed by type, so
 /// `stop` can invalidate the matching one. All `NSUserActivity` mutation hops to
 /// the main thread.

@@ -58,3 +58,33 @@ jobs:
               -destination 'generic/platform=iOS Simulator' \
               CODE_SIGNING_ALLOWED=NO
           done
+
+  # Android gate: cross-compile the package with the official Swift SDK for
+  # Android and run PatchSDKTests on an Android emulator. Apple-only bridges and
+  # renderers are #if canImport-gated out there, so this job guards the
+  # platform-neutral core (WasmKit runtime, loader, Brotli/BSDIFF40, SHA-256,
+  # update lifecycle) against regressions that only show up off Apple
+  # platforms. The action copies the test resource bundle (.wasm fixtures) to
+  # the emulator. Locally: `skip android test`.
+  android:
+    name: build + test (android)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build + test on Android emulator
+        uses: skiptools/swift-android-action@v2
+        with:
+          # Pinned to the toolchain the Android port was verified with. Must be
+          # the full release name: "6.4" resolves to a non-existent download.
+          swift-version: "6.4.0"
+          # Ubuntu runners can run out of disk while installing the emulator.
+          free-disk-space: true
+          # Swift 6.4 (swift-build backend) names the test resource bundle
+          # `PatchSDK_PatchSDKTests.bundle`, but the action only copies
+          # `*.resources` to the emulator, so Bundle.module fatal-errors. Copy the
+          # .bundle too. `${BUILD_DIR}` is the action's own build-products
+          # variable: this value is pasted into its shell script verbatim.
+          copy-files: ${BUILD_DIR}/*.bundle

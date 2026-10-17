@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 
 // MARK: - NetworkImage bridge (download + cache a remote image → bytes)

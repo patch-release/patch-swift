@@ -49,6 +49,7 @@ final class PatchViewModuleTests: XCTestCase {
 
     /// `Patch.viewBody` returns the guest-emitted tree with real interactive
     /// controls + their WASM-derived current values.
+    #if canImport(SwiftUI)
     func testViewBodyEmitsInteractiveTree() throws {
         let patch = try makePatch()
         let tree = try patch.viewBody()   // default state ⇒ guest defaults
@@ -56,9 +57,11 @@ final class PatchViewModuleTests: XCTestCase {
         XCTAssertEqual(findStepper(tree), 0, "default badgeCount == 0 (WASM)")
         XCTAssertEqual(findTextField(tree), "Ada", "default displayName == Ada (WASM)")
     }
+    #endif
 
     /// A dispatched event runs the guest UPDATE in WASM and re-emits a NEW tree:
     /// the toggle flips, and the badge stepper's clamp logic runs in WASM.
+    #if canImport(SwiftUI)
     func testDispatchRunsUpdateInWasmAndReEmits() throws {
         let patch = try makePatch()
 
@@ -82,6 +85,7 @@ final class PatchViewModuleTests: XCTestCase {
         XCTAssertTrue(r.tree.describe().contains("Hello, Grace!"),
                       "greeting recomputed in WASM from the new name")
     }
+    #endif
 
     #if canImport(SwiftUI)
     /// `Patch.patchView()` builds a real SwiftUI view backed by the live module,

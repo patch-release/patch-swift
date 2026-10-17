@@ -124,6 +124,28 @@ final class DiffApplyTests: XCTestCase {
         }
     }
 
+    func testBrotliRejectsTruncatedStream() throws {
+        let compressed = try fixture("diff_new", "br")
+        let truncated = compressed.prefix(compressed.count / 2)
+        XCTAssertThrowsError(try Brotli.decompress(truncated)) { err in
+            XCTAssertEqual(err as? Brotli.BrotliError, .decodeFailed)
+        }
+    }
+
+    func testBrotliRejectsGarbage() {
+        XCTAssertThrowsError(try Brotli.decompress(Data(repeating: 0xFF, count: 64))) { err in
+            XCTAssertEqual(err as? Brotli.BrotliError, .decodeFailed)
+        }
+    }
+
+    func testBrotliRejectsTrailingBytes() throws {
+        var compressed = try fixture("diff_new", "br")
+        compressed.append(contentsOf: [0x00, 0x01, 0x02])
+        XCTAssertThrowsError(try Brotli.decompress(compressed)) { err in
+            XCTAssertEqual(err as? Brotli.BrotliError, .decodeFailed)
+        }
+    }
+
     // MARK: - SHA-256
 
     func testSHA256MatchesBackendHexFormat() throws {

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // ===========================================================================
 // AsyncHostBridge — the ASYNC half of the generalized "call what's already

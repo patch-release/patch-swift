@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(Combine)
+import Combine
+#endif
 
 // MARK: - UpdateInfo
 
@@ -69,14 +72,26 @@ public enum PatchUpdateState: Sendable, Equatable {
 /// main actor as the imperative flow progresses, so views re-render
 /// automatically. The current `UpdateInfo` (if any) is mirrored on `available`
 /// for convenient binding.
+///
+/// Where Combine is unavailable (Android) the type is not an `ObservableObject`
+/// and its properties are plain stored values: readable, but not published.
 @MainActor
-public final class PatchUpdateStateObservable: ObservableObject {
+public final class PatchUpdateStateObservable {
+    #if canImport(Combine)
     /// The current phase of the update flow. Bind to this in SwiftUI.
     @Published public private(set) var state: PatchUpdateState = .idle
 
     /// The most recently discovered available update, if any (mirrors the
     /// `.available` / `.readyToReload` payload for convenient access).
     @Published public private(set) var available: UpdateInfo?
+    #else
+    /// The current phase of the update flow.
+    public private(set) var state: PatchUpdateState = .idle
+
+    /// The most recently discovered available update, if any (mirrors the
+    /// `.available` / `.readyToReload` payload for convenient access).
+    public private(set) var available: UpdateInfo?
+    #endif
 
     /// `nonisolated` so the owning `Patch` can construct it from its nonisolated
     /// `init()`. Only sets the two stored defaults; no observers exist yet, so
@@ -98,3 +113,7 @@ public final class PatchUpdateStateObservable: ObservableObject {
         }
     }
 }
+
+#if canImport(Combine)
+extension PatchUpdateStateObservable: ObservableObject {}
+#endif

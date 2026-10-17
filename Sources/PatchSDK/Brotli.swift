@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
-import Compression
+import CBrotliDec
 
 /// Brotli decompression for downloaded modules.
 ///
@@ -16,9 +16,10 @@ import Compression
 /// (`hashlib.sha256(wasm_bytes)` in `routes/modules.py`, before brotli). So the
 /// loader inflates first, then verifies the inflated bytes against `sha256`.
 ///
-/// Uses Apple's `Compression` framework (`COMPRESSION_BROTLI`, available on
-/// macOS 12+ / iOS 15+ — within the SDK's macOS 14 / iOS 15 floor). Verified to
-/// round-trip Python's `brotli.compress()` output. No third-party dependency.
+/// Uses Google's reference Brotli decoder, vendored as the `CBrotliDec` target
+/// (MIT, see `Sources/CBrotliDec/README.md`), instead of Apple's `Compression`
+/// framework, so the same code path builds and behaves identically on Apple
+/// platforms and Android.
 public enum Brotli {
 
     public enum BrotliError: Error, CustomStringConvertible, Equatable {
@@ -33,52 +34,58 @@ public enum Brotli {
         }
     }
 
-    /// Inflate a brotli stream. `sizeHint` seeds the output buffer (use the
-    /// backend-reported uncompressed `size` when known); the buffer grows
-    /// automatically if the hint is too small.
+    /// Upper bound on inflated output; a stream that would exceed it is
+    /// rejected as corrupt (guards against decompression bombs).
+    private static let maxOutput = 512 * 1024 * 1024
+
+    /// Size of the scratch buffer each decoder step writes into.
+    private static let chunkSize = 64 * 1024
+
+    /// Inflate a brotli stream. `sizeHint` pre-sizes the output buffer (use the
+    /// backend-reported uncompressed `size` when known); the output grows as
+    /// needed if the hint is too small or absent.
     public static func decompress(_ input: Data, sizeHint: Int = 0) throws -> Data {
         guard !input.isEmpty else { throw BrotliError.empty }
-        // Brotli ratios on wasm are typically 2–4x; start at 8x the input (or
-        // the hint, whichever is larger) and grow on overflow.
-        var capacity = max(sizeHint, max(input.count * 8, 64 * 1024))
-        let maxCapacity = 512 * 1024 * 1024
-        while true {
-            var produced = 0
-            var overflowed = false
-            let dst = try decodeOnce(input, capacity: capacity, produced: &produced, overflowed: &overflowed)
-            if overflowed {
-                guard capacity < maxCapacity else { throw BrotliError.decodeFailed }
-                capacity = min(capacity * 2, maxCapacity)
-                continue
-            }
-            guard let dst else { throw BrotliError.decodeFailed }
-            return dst.prefix(produced)
+        guard let state = BrotliDecoderCreateInstance(nil, nil, nil) else {
+            throw BrotliError.decodeFailed
         }
-    }
+        defer { BrotliDecoderDestroyInstance(state) }
 
-    private static func decodeOnce(
-        _ input: Data,
-        capacity: Int,
-        produced: inout Int,
-        overflowed: inout Bool
-    ) throws -> Data? {
-        var dst = Data(count: capacity)
-        let n = dst.withUnsafeMutableBytes { (dstPtr: UnsafeMutableRawBufferPointer) -> Int in
-            input.withUnsafeBytes { (srcPtr: UnsafeRawBufferPointer) -> Int in
-                guard let dstBase = dstPtr.bindMemory(to: UInt8.self).baseAddress,
-                      let srcBase = srcPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-                return compression_decode_buffer(
-                    dstBase, capacity,
-                    srcBase, input.count,
-                    nil, COMPRESSION_BROTLI)
+        var output = Data()
+        // Brotli ratios on wasm are typically 2–4x.
+        output.reserveCapacity(min(max(sizeHint, input.count * 4), maxOutput))
+        var chunk = [UInt8](repeating: 0, count: chunkSize)
+
+        return try input.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data in
+            var nextIn = src.bindMemory(to: UInt8.self).baseAddress
+            var availableIn = src.count
+            while true {
+                let result = try chunk.withUnsafeMutableBufferPointer { buf -> BrotliDecoderResult in
+                    var nextOut = buf.baseAddress
+                    var availableOut = buf.count
+                    let result = BrotliDecoderDecompressStream(
+                        state, &availableIn, &nextIn, &availableOut, &nextOut, nil)
+                    let produced = buf.count - availableOut
+                    if produced > 0, let base = buf.baseAddress {
+                        guard output.count + produced <= maxOutput else { throw BrotliError.decodeFailed }
+                        output.append(base, count: produced)
+                    }
+                    return result
+                }
+                switch result {
+                case BROTLI_DECODER_RESULT_SUCCESS:
+                    // Trailing bytes after the end of the stream mean the
+                    // payload is not a single well-formed brotli stream.
+                    guard availableIn == 0 else { throw BrotliError.decodeFailed }
+                    return output
+                case BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT:
+                    continue
+                default:
+                    // ERROR, or NEEDS_MORE_INPUT: all input consumed but the
+                    // stream is incomplete (truncated download).
+                    throw BrotliError.decodeFailed
+                }
             }
         }
-        // `compression_decode_buffer` returns 0 on error OR when the source was
-        // genuinely empty. When the result exactly fills `capacity` the output
-        // was very likely truncated, so grow and retry to be safe.
-        if n == 0 { return nil }
-        if n == capacity { overflowed = true; return dst }
-        produced = n
-        return dst
     }
 }

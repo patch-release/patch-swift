@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 
 /// SHA-256 helper used by the loader to verify downloaded / reconstructed
 /// modules against the `sha256` the backend reports in an update check.
 ///
-/// Uses Apple `CryptoKit` (available on iOS 13+ / macOS 10.15+), so there is no
-/// third-party crypto dependency and it is identical on device + simulator.
+/// Uses Apple `CryptoKit` on Apple platforms (available on iOS 13+ / macOS
+/// 10.15+). Elsewhere (Android) it uses Apple's `swift-crypto` package, which
+/// exposes the same `SHA256` API, so this file is identical on every platform.
 public enum SHA256Hash {
     /// Lowercase hex SHA-256 of `data`. This matches the backend, which stores
     /// `hashlib.sha256(wasm_bytes).hexdigest()` (lowercase hex of the **raw**,

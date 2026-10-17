@@ -74,14 +74,43 @@ let package = Package(
         // TODO(remove-cap): once that PR (or an equivalent) ships in a WasmKit
         // release we depend on, DROP this `swift-system` constraint and let it
         // float again. Tracked in CLAUDE.md §5 / memory `wasmkit-swift-system-170-cap`.
-        .package(url: "https://github.com/apple/swift-system", "1.5.0" ..< "1.7.0")
+        .package(url: "https://github.com/apple/swift-system", "1.5.0" ..< "1.7.0"),
+        // Apple's swift-crypto: the CryptoKit API for platforms without CryptoKit
+        // (Android). Only linked on non-Apple platforms (see the `.when` conditions
+        // below); Apple builds keep using the system CryptoKit, so it adds nothing
+        // to an iOS app. Wide range so it rarely conflicts with a consumer's pin;
+        // SwiftPM skips releases whose tools-version is newer than the active
+        // toolchain (swift-crypto 4.4+ needs 6.1, 5.x needs 6.2), so Swift 6.0
+        // consumers still resolve a compatible version.
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0" ..< "6.0.0")
     ],
     targets: [
-        // System-library shim for libbz2 (ships in the macOS + iOS SDKs). Used by
-        // the client-side bsdiff4 (BSDIFF40) diff applier to inflate the bz2
-        // control/diff/extra blocks the backend produces. Pure system linkage —
-        // no third-party code, cross-compiles for iOS device + simulator.
-        .systemLibrary(name: "CBZ2", path: "Sources/CBZ2"),
+        // The reference libbzip2 (sourceware.org, 1.0.8, BSD-style license),
+        // vendored unmodified. Used by the client-side bsdiff4 (BSDIFF40) diff
+        // applier to inflate the bz2 control/diff/extra blocks the backend
+        // produces. Same library Apple ships as the SDK's libbz2, compiled from
+        // source so it also builds where no system libbz2 exists (Android NDK).
+        // See Sources/CBZ2/README.md for provenance and the update procedure.
+        .target(
+            name: "CBZ2",
+            path: "Sources/CBZ2",
+            exclude: ["LICENSE", "README.md"],
+            sources: ["src"],
+            publicHeadersPath: "include"
+        ),
+
+        // Google's reference Brotli decoder (MIT, v1.2.0), vendored unmodified —
+        // decoder only, no encoder. Inflates the `.wasm.br` modules the backend
+        // serves. Replaces Apple's `Compression` framework so the same code path
+        // builds on non-Apple platforms (Android). See Sources/CBrotliDec/README.md
+        // for provenance and the update procedure.
+        .target(
+            name: "CBrotliDec",
+            path: "Sources/CBrotliDec",
+            exclude: ["LICENSE", "README.md"],
+            sources: ["common", "dec"],
+            publicHeadersPath: "include"
+        ),
 
         // The shared ViewNode IR (Breakthrough #3/#5). Pure Foundation `Codable`
         // value types — NO WasmKit, NO SwiftUI — so it compiles unchanged into
@@ -162,7 +191,12 @@ let package = Package(
                 // WasmKit PR #349 ships. iOS-safe (pure Swift).
                 .product(name: "SystemPackage", package: "swift-system"),
                 // libbz2 shim for diff decompression.
-                "CBZ2"
+                "CBZ2",
+                // Vendored Brotli decoder for module decompression.
+                "CBrotliDec",
+                // SHA-256 where CryptoKit is unavailable (SHA256.swift).
+                .product(name: "Crypto", package: "swift-crypto",
+                         condition: .when(platforms: [.android, .linux]))
             ],
             resources: [
                 // Apple requires a privacy manifest from third-party SDKs. It is
@@ -208,7 +242,10 @@ let package = Package(
                 .product(name: "WasmKit", package: "WasmKit"),
                 // WASI host shim — the generic-host-bridge tests instantiate the
                 // real Swift-compiled guest fixture, which imports WASI Preview 1.
-                .product(name: "WasmKitWASI", package: "WasmKit")
+                .product(name: "WasmKitWASI", package: "WasmKit"),
+                // SHA-256 in tests where CryptoKit is unavailable.
+                .product(name: "Crypto", package: "swift-crypto",
+                         condition: .when(platforms: [.android, .linux]))
             ],
             resources: [
                 // Real Swift-compiled .wasm fixtures used by the runtime tests.

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import PatchSDK
 
 /// D2 — UpdateChecker: wire-protocol parse/decision, telemetry, exponential

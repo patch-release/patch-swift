@@ -2,6 +2,9 @@
 
 import XCTest
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import PatchViewIR
 @testable import PatchSDK
 #if canImport(SwiftUI)
@@ -256,6 +259,7 @@ final class BugHuntSDK9Tests: XCTestCase {
 
     /// Forward direction: activating a module that DOES ship a manifest still ends with that
     /// module's manifest cached (the fix must not disable the W5b pre-warm optimisation).
+    #if canImport(SwiftUI)
     func testActivationStillPrewarmsTheNewModulesManifest() throws {
         let patch = Patch()
         try patch.activate(bytes: try manifestlessModule())
@@ -266,6 +270,7 @@ final class BugHuntSDK9Tests: XCTestCase {
         let manifest = try JSONDecoder().decode(PatchViewManifest.self, from: Data(cached))
         XCTAssertTrue(manifest.views.contains { $0.type == "Banner" })
     }
+    #endif
 
     // =====================================================================================
     // MARK: - BUG 3 — brotli detection broke on any URL carrying a query string

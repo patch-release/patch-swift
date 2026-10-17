@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import WasmKit
 
 // MARK: - FileDownloadBridge (download a URL to a sandboxed file)
@@ -88,6 +91,16 @@ public struct FileDownloadBridge: Bridge {
         let sem = DispatchSemaphore(value: 0)
         let box = PathBox()
         let dest = destinationDirectory.appendingPathComponent(destinationName(for: url))
+
+        #if !canImport(Darwin)
+        // FoundationNetworking off Darwin (Android) rejects `file://` URLs with
+        // NSURLErrorUnsupportedURL, so copy local files directly. Same result as
+        // the URLSession path on Apple platforms: the file lands at `dest`.
+        if url.isFileURL {
+            try? fm.removeItem(at: dest)
+            return (try? fm.copyItem(at: url, to: dest)) != nil ? dest.path : nil
+        }
+        #endif
 
         let task = session.downloadTask(with: url) { tempURL, response, _ in
             defer { sem.signal() }
